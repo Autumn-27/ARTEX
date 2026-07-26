@@ -72,8 +72,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const items = D.activityForTask();
     return { items, cursor: items.length ? items[items.length - 1].seq : 0 };
   }
-  if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3)
-    return { detail: "（demo）此活动的完整工具输入/输出明细。" };
+  if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
+    const a = D.activity.find((x) => x.seq === Number(seg[2]));
+    return { detail: a?.detail ?? a?.summary ?? "" };
+  }
   if (path === "/tokens/daily") return D.dailyTokens;
   if (path === "/tokens/conversations") return D.convTokens;
 
@@ -115,8 +117,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const items = D.conversationMessages[Number(seg[1])] ?? [];
     return { items, cursor: items.length ? items[items.length - 1].seq : 0, running: false };
   }
-  if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 4)
-    return { detail: "（demo）该消息的完整明细。" };
+  if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 4) {
+    const msgs = D.conversationMessages[Number(seg[1])] ?? [];
+    const a = msgs.find((x) => x.seq === Number(seg[3]));
+    return { detail: a?.detail ?? a?.summary ?? "" };
+  }
   if (seg[0] === "conversations" && seg[2] === "messages" && m === "POST") return { status: "ok" };
   if (seg[0] === "conversations" && seg[2] === "stop") return { status: "stopped" };
 
