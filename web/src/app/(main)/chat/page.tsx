@@ -566,7 +566,7 @@ function ConversationItem({
   return (
     <div
       className={cn(
-        "group flex items-center gap-1 rounded-md pr-1 transition-colors",
+        "group flex min-w-0 items-center gap-1 rounded-md pr-1 transition-colors",
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
@@ -591,9 +591,9 @@ function ConversationItem({
           className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
         >
           <div className="truncate text-sm">{conv.title || "新对话"}</div>
-          <div className="text-muted-foreground flex items-center gap-1 truncate text-[11px]">
+          <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
             <Bot className="size-3 shrink-0" />
-            {agent?.name ?? conv.agent_key}
+            <span className="min-w-0 truncate">{agent?.name ?? conv.agent_key}</span>
             <span className="shrink-0">·</span>
             <span className="shrink-0">{new Date(conv.created_at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
             <span className="shrink-0 opacity-60">#{conv.id}</span>
@@ -688,8 +688,8 @@ export default function ChatPage() {
               <PlusIcon /> 新建对话
             </Button>
           </div>
-          <ScrollArea type="auto" className="min-h-0 flex-1">
-            <div className="flex flex-col gap-0.5 p-2">
+          <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+            <div className="flex min-w-0 flex-col gap-0.5 p-2">
               {convs.length === 0 && (
                 <p className="text-muted-foreground px-2 py-6 text-center text-xs">暂无对话</p>
               )}
