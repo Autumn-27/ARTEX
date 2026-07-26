@@ -118,6 +118,16 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ---
 
+## 资产同步（ScopeSentry）
+
+支持从 [ScopeSentry](https://github.com/Autumn-27/ScopeSentry) 直接同步资产数据，免去重复收集：
+
+- 在「**资产同步**」页填 ScopeSentry 的地址与 API Key，接入数据源；
+- 按**项目**或**任务**维度选择要同步的目标与资产类型（域名 / 子域 / IP / 端口 / 站点 / 端点…）；
+- 一键导入并按公司资产范围归并，直接进入 ARTEX 的资产图供 agent 探索使用。
+
+---
+
 ## 开发
 
 ```bash
