@@ -1,0 +1,9 @@
+{
+  "name": "api-recon-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless runtime API harvester for the api-recon skill",
+  "dependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}
