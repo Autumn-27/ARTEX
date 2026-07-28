@@ -272,7 +272,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					continue
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ})
-				t.wrote++
+				t.writes.Assets++
 				t.anchorOwner(id)
 			}
 

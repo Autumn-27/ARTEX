@@ -193,9 +193,10 @@ func renderWorkerGraphOverview(data map[string]any) string {
 // Execute runs one intent. hooks (the per-task Guard) gates every tool call; may
 // be nil. emit, if non-nil, receives one ActivityRecord per execution step.
 // Returns the terminal reason (so the engine can distinguish completed vs
-// max_turns) and how many facts were written back (so an intent that explored but
-// persisted nothing isn't mistaken for done).
-func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger) (harness.TerminalReason, int, error) {
+// max_turns) and a per-kind breakdown of what was written back (so an intent that
+// explored but persisted nothing isn't mistaken for done, and the engine can log
+// facts/assets/findings separately instead of lumping them under "facts").
+func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetTaskID(taskID)
 	if as != nil {
@@ -298,5 +299,5 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		defer runCancel()
 	}
 	_, reason, err := captureRunSession(runCtx, s, input, emitWrap)
-	return reason, tsx.Wrote(), err
+	return reason, tsx.Writes(), err
 }

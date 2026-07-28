@@ -532,7 +532,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		// 不要误标 blocked。此时 worker 通常已在 settlement 阶段把结果写回。
 		if ectx.Err() != nil && e.isSettling(t.ID) {
 			_ = t.Store.SetIntentState(intent.ID, "exhausted")
-			log.Printf("[worker %s] task %s 意图 #%d 因任务超时收尾结束(exhausted)，写回 %d 条", name, t.ID, intent.ID, wrote)
+			log.Printf("[worker %s] task %s 意图 #%d 因任务超时收尾结束(exhausted)，写回 %s", name, t.ID, intent.ID, wrote)
 			e.touch(t.ID)
 			continue
 		}
@@ -563,13 +563,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			state = "blocked"
 		case reason == harness.ReasonMaxTurns:
 			state = "exhausted"
-			log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回事实 %d 条", name, intent.ID, wrote)
+			log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
 		case reason == harness.ReasonTimeout:
 			state = "exhausted"
-			log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回事实 %d 条", name, intent.ID, wrote)
+			log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 		}
 		_ = t.Store.SetIntentState(intent.ID, state)
-		log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %d 条事实)", name, t.ID, intent.ID, state, wrote)
+		log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
 		e.touch(t.ID)
 		t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
 	}

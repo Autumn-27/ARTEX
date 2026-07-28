@@ -58,7 +58,7 @@ type ToolSet struct {
 	ownerNode int64
 	GoalMet   bool
 	Reason    string
-	wrote     int
+	writes    WriteCounts
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -86,9 +86,29 @@ type EnrichTrigger interface {
 	ProbeSite(id int64, url string)
 }
 
-// Wrote reports how many facts this run wrote back (so the engine can tell
-// "explored but persisted nothing" apart from a completed intent).
-func (t *ToolSet) Wrote() int { return t.wrote }
+// WriteCounts breaks down what a worker persisted this run, by node kind, so the
+// engine can log an accurate "wrote back" summary instead of lumping assets and
+// findings under "facts" (record_fact → Facts, insert_assets → Assets,
+// report_finding → Findings; each element of a batch counts once).
+type WriteCounts struct {
+	Facts    int
+	Assets   int
+	Findings int
+}
+
+// Total is every node persisted this run, regardless of kind — the
+// "explored but persisted nothing" signal (Total == 0).
+func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings }
+
+// String renders the per-kind breakdown for logs, e.g. "事实1 资产25 漏洞0".
+func (w WriteCounts) String() string {
+	return fmt.Sprintf("事实%d 资产%d 漏洞%d", w.Facts, w.Assets, w.Findings)
+}
+
+// Writes reports what this run wrote back, split by node kind (so the engine can
+// tell "explored but persisted nothing" apart from a completed intent, and log an
+// honest breakdown instead of calling assets/findings "facts").
+func (t *ToolSet) Writes() WriteCounts { return t.writes }
 
 func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 	return &ToolSet{ts: ts, worker: worker}
@@ -594,7 +614,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				// conversation context: no exploration store available, cannot record finding
 				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
 			}
-			t.wrote++
+			t.writes.Findings++
 			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
 		})
 }
@@ -642,7 +662,7 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	if intent > 0 {
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
-	t.wrote++
+	t.writes.Facts++
 	return id, nil
 }
 
