@@ -18,6 +18,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       nodejs npm \
       dnsutils iputils-ping netcat-openbsd whois nmap \
     && rm -rf /var/lib/apt/lists/*
+# 预装 Playwright MCP 与 CLI（全局），运行时不再 npx 联网下载。
+# @playwright/mcp：browser MCP 直接 `npx @playwright/mcp`（已全局装好，无需 -y/@latest）。
+# @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
+# 再装 playwright（提供浏览器管理），装完用 --with-deps 预置 chromium 及其系统依赖，
+# 这样容器内 MCP/CLI 首次启动即可用，不再联网下载浏览器。
+RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@latest \
+    && playwright-cli --help \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex

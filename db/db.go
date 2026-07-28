@@ -184,7 +184,7 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
 VALUES ('browser', 'stdio', 'npx', $1, '{}', false)
 ON CONFLICT (name) DO NOTHING`,
-		`["-y","@playwright/mcp@latest","--headless"]`); err != nil {
+		`["@playwright/mcp","--headless"]`); err != nil {
 		return fmt.Errorf("seed browser mcp: %w", err)
 	}
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
