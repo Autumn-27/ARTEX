@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { Loader2Icon, PlugZapIcon, PlusIcon, SaveIcon, StarIcon, Trash2Icon } from "lucide-react";
+import { Loader2Icon, PlugZapIcon, PlusIcon, RefreshCwIcon, SaveIcon, StarIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
@@ -60,6 +61,9 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
   const [cw, setCw] = React.useState("0");
   const [thinkMode, setThinkMode] = React.useState<ThinkMode>("none");
   const [effort, setEffort] = React.useState("high");
+  const [models, setModels] = React.useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = React.useState(false);
+  const [modelsOpen, setModelsOpen] = React.useState(false);
 
   function reset() {
     setName("");
@@ -73,6 +77,28 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
     setCw("0");
     setThinkMode("none");
     setEffort("high");
+    setModels([]);
+    setModelsOpen(false);
+  }
+
+  async function loadModels() {
+    if (loadingModels) return;
+    setLoadingModels(true);
+    setModels([]);
+    try {
+      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy);
+      if (r.ok && r.models && r.models.length > 0) {
+        setModels(r.models);
+        setModelsOpen(true);
+        toast.success(`已加载 ${r.models.length} 个模型`);
+      } else {
+        toast.error(`加载模型失败：${r.error ?? "未获取到模型"}`);
+      }
+    } catch (e) {
+      toast.error(`加载模型出错：${(e as Error).message}`);
+    } finally {
+      setLoadingModels(false);
+    }
   }
 
   async function create() {
@@ -145,13 +171,47 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
             </div>
             <div className="grid gap-2">
               <Label htmlFor="np-model">模型</Label>
-              <Input
-                id="np-model"
-                className="font-mono"
-                placeholder="claude-opus-4-8"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="np-model"
+                  className="font-mono"
+                  placeholder="claude-opus-4-8"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                />
+                <Popover open={modelsOpen} onOpenChange={setModelsOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="shrink-0"
+                      disabled={loadingModels}
+                      onClick={loadModels}
+                      title="从 API 加载可用模型"
+                    >
+                      {loadingModels ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                    </Button>
+                  </PopoverTrigger>
+                  {models.length > 0 && (
+                    <PopoverContent className="w-72 max-h-64 overflow-y-auto p-1" align="end">
+                      {models.map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          className="w-full rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setModel(m);
+                            setModelsOpen(false);
+                          }}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </PopoverContent>
+                  )}
+                </Popover>
+              </div>
             </div>
           </div>
           <div className="grid gap-2">
@@ -276,6 +336,9 @@ export default function LLMPage() {
   const [thinkMode, setThinkMode] = React.useState<ThinkMode>("none");
   const [effort, setEffort] = React.useState("high");
   const [testing, setTesting] = React.useState(false);
+  const [models, setModels] = React.useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = React.useState(false);
+  const [modelsOpen, setModelsOpen] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -311,6 +374,32 @@ export default function LLMPage() {
     setApiKey("");
     setKeyHint(selected.api_key_hint ?? "");
   }, [selected]);
+
+  async function loadModels() {
+    if (loadingModels) return;
+    setLoadingModels(true);
+    setModels([]);
+    try {
+      const r = await api.fetchLLMModels(
+        format,
+        baseUrl,
+        apiKey,
+        proxy,
+        selectedId ? Number(selectedId) : undefined,
+      );
+      if (r.ok && r.models && r.models.length > 0) {
+        setModels(r.models);
+        setModelsOpen(true);
+        toast.success(`已加载 ${r.models.length} 个模型`);
+      } else {
+        toast.error(`加载模型失败：${r.error ?? "未获取到模型"}`);
+      }
+    } catch (e) {
+      toast.error(`加载模型出错：${(e as Error).message}`);
+    } finally {
+      setLoadingModels(false);
+    }
+  }
 
   async function testConnection() {
     if (testing) return;
@@ -451,13 +540,47 @@ export default function LLMPage() {
 
                 <div className="grid gap-2">
                   <Label htmlFor="model">模型</Label>
-                  <Input
-                    id="model"
-                    className="font-mono"
-                    placeholder="claude-opus-4-8"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      id="model"
+                      className="font-mono"
+                      placeholder="claude-opus-4-8"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                    />
+                    <Popover open={modelsOpen} onOpenChange={setModelsOpen}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          disabled={loadingModels}
+                          onClick={loadModels}
+                          title="从 API 加载可用模型"
+                        >
+                          {loadingModels ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                        </Button>
+                      </PopoverTrigger>
+                      {models.length > 0 && (
+                        <PopoverContent className="w-72 max-h-64 overflow-y-auto p-1" align="end">
+                          {models.map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              className="w-full rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
+                              onClick={() => {
+                                setModel(m);
+                                setModelsOpen(false);
+                              }}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                        </PopoverContent>
+                      )}
+                    </Popover>
+                  </div>
                 </div>
 
                 <div className="grid gap-2">

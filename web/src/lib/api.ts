@@ -12,6 +12,7 @@ import type {
   Tool, Conversation, AgentTrigger,
   InterceptRule, InterceptPending, InterceptApprovalRow,
   TaskAssetView, SSProject, SSTask, ConvTokenSummary,
+  CommandRecord, LLMRecordItem, LLMRecordDetail,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -248,6 +249,14 @@ export const api = {
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
+  fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number) =>
+    post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
+      provider,
+      base_url,
+      api_key,
+      proxy,
+      profile_id,
+    }),
 
   // ---- agents ----
   agents: () => get<{ agents: Agent[] }>("/agents").then((r) => arr(r.agents)),
@@ -440,4 +449,25 @@ export const api = {
     });
     if (!r.ok) throw new Error(await r.text());
   },
+
+  // ---- commands (Bash execution history) ----
+  commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.task) sp.set("task", params.task);
+    if (params?.q) sp.set("q", params.q);
+    sp.set("page", String(params?.page ?? 0));
+    sp.set("size", String(params?.size ?? 50));
+    return get<{ commands: CommandRecord[]; total: number }>(`/commands?${sp}`);
+  },
+
+  // ---- LLM records ----
+  llmRecords: (params?: { model?: string; session?: string; page?: number; size?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.model) sp.set("model", params.model);
+    if (params?.session) sp.set("session", params.session);
+    sp.set("page", String(params?.page ?? 0));
+    sp.set("size", String(params?.size ?? 50));
+    return get<{ records: LLMRecordItem[]; total: number }>(`/llm/records?${sp}`);
+  },
+  llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
 };

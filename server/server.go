@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	llmCfg    agent.Config     // current LLM config (key not exposed)
 	llmOn     bool
+	llmProf   string           // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -245,6 +247,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
+	s.cfgMu.Lock()
+	s.llmProf = p.Name
+	s.cfgMu.Unlock()
 	return cfg, true
 }
 
@@ -327,6 +332,11 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	if err != nil {
 		return err
 	}
+	// Wrap provider with LLM call recorder (persists request/response to PG).
+	s.cfgMu.Lock()
+	profName := s.llmProf
+	s.cfgMu.Unlock()
+	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName)
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.engine.UseLLM(pl, wk)
 
@@ -388,6 +398,10 @@ func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
 		return nil, nil
 	}
+	// Wrap with recorder, tagged with this profile's name.
+	if p, _ := s.m.pg.ProfileByID(id); p != nil {
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name)
+	}
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.profAgents[id] = &profBundle{pl: pl, wk: wk}
 	log.Printf("[engine] built dedicated planner/worker for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
@@ -410,6 +424,10 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	if err != nil {
 		log.Printf("[chat] build provider for LLM profile %d failed: %v", id, err)
 		return nil
+	}
+	// Wrap with recorder, tagged with this profile's name.
+	if p, _ := s.m.pg.ProfileByID(id); p != nil {
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name)
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
@@ -496,6 +514,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gc", s.gc)
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
+	mux.HandleFunc("GET /api/commands", s.pgListCommands)
+	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
+	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
@@ -582,6 +603,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
 	mux.HandleFunc("DELETE /api/llm/profiles/{id}", s.pgDeleteProfile)
 	mux.HandleFunc("POST /api/llm/profiles/active", s.pgActivateProfile)
+	mux.HandleFunc("POST /api/llm/models", s.pgListModels)
 
 	// 拦截规则管理
 	mux.HandleFunc("GET /api/intercept/rules", s.interceptListRules)

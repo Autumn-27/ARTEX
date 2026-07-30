@@ -549,3 +549,37 @@ export interface ConvTokenSummary {
   cache_read_tokens: number;
   cache_write_tokens: number;
 }
+
+// ---- Command recording (Bash execution history) ----
+export interface CommandRecord {
+  id: number;
+  exploration_id: number;
+  worker: string;
+  command: string;
+  output: string;
+  is_error: boolean;
+  created_at: string;
+}
+
+// ---- LLM recording ----
+export interface LLMRecordItem {
+  id: number;
+  ts: string;
+  model: string;
+  profile_name: string;
+  session_id: string;
+  task_id: string;
+  worker: string;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  status: string;
+  error?: string;
+}
+
+export interface LLMRecordDetail extends LLMRecordItem {
+  request_body: string;
+  response_body: string;
+}

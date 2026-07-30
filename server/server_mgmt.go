@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -1535,6 +1536,107 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 	s.invalidateProfileAgents() // active change may affect pinned-task fallbacks
 	s.reapplyActiveProfile()    // switch the running engine to the newly activated profile
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// pgListModels fetches available models from the provider's API endpoint.
+// Supports both OpenAI-format (GET /models) and Anthropic-format (GET /v1/models).
+func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider  string `json:"provider"`  // "openai" | "anthropic"
+		BaseURL   string `json:"base_url"`
+		APIKey    string `json:"api_key"`
+		Proxy     string `json:"proxy"`
+		ProfileID *int64 `json:"profile_id"` // fallback: use stored key from this profile
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	// Resolve API key: form input > profile stored key.
+	apiKey := strings.TrimSpace(req.APIKey)
+	if apiKey == "" && req.ProfileID != nil {
+		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+			apiKey = p.APIKey
+		}
+	}
+	if apiKey == "" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
+		return
+	}
+
+	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	provider := strings.TrimSpace(req.Provider)
+
+	// Build the models endpoint URL and request headers per provider format.
+	var modelsURL string
+	var hdr http.Header
+	switch provider {
+	case "openai":
+		if baseURL == "" {
+			baseURL = "https://api.openai.com/v1"
+		}
+		baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+		baseURL = strings.TrimRight(baseURL, "/")
+		modelsURL = baseURL + "/models"
+		hdr = http.Header{}
+		hdr.Set("Authorization", "Bearer "+apiKey)
+	default: // anthropic
+		if baseURL == "" {
+			baseURL = "https://api.anthropic.com"
+		}
+		baseURL = strings.TrimSuffix(baseURL, "/v1/messages")
+		baseURL = strings.TrimRight(baseURL, "/")
+		modelsURL = baseURL + "/v1/models"
+		hdr = http.Header{}
+		hdr.Set("x-api-key", apiKey)
+		hdr.Set("anthropic-version", "2023-06-01")
+	}
+
+	// Build HTTP client with optional proxy.
+	transport := &http.Transport{}
+	if p := strings.TrimSpace(req.Proxy); p != "" {
+		if pu, err := url.Parse(p); err == nil {
+			transport.Proxy = http.ProxyURL(pu)
+		}
+	}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, modelsURL, nil)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "构建请求失败: " + err.Error()})
+		return
+	}
+	httpReq.Header = hdr
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "请求失败: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != http.StatusOK {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": fmt.Sprintf("API 返回 %d: %s", resp.StatusCode, string(body[:min(len(body), 512)]))})
+		return
+	}
+
+	// Parse response: both OpenAI and Anthropic return {"data": [{"id": "..."},...]}.
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "解析响应失败: " + err.Error()})
+		return
+	}
+	models := make([]string, 0, len(parsed.Data))
+	for _, m := range parsed.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "models": models})
 }
 
 // --- prompt template helpers (Go text/template + catalog 白名单) ---
