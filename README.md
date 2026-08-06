@@ -122,6 +122,15 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL` / `ARTEX_LLM_PROXY`。
 
+`ARTEX_LLM_BASE_URL` 可指向任意 OpenAI 兼容端点，例如 [Novita](https://novita.ai/)：
+
+```bash
+export ARTEX_LLM_PROVIDER=openai
+export OPENAI_API_KEY=<NOVITA_API_KEY>
+export ARTEX_LLM_BASE_URL=https://api.novita.ai/openai/v1
+export ARTEX_LLM_MODEL=qwen/qwen3-coder-480b-a35b-instruct
+```
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **常用参数**：`./artex -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。
