@@ -9,10 +9,10 @@ import (
 	"iter"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/transcript"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -22,26 +22,12 @@ type Recorder struct {
 	pg    *db.DB
 	model string // model name (from config, not in CompletionRequest)
 	prof  string // LLM profile name (from llm_profiles)
-
-	mu        sync.Mutex
-	sessionID string // current session context (set by caller)
-	taskID    string // exploration/task identifier
-	worker    string // worker name (planner, work#1, mainagent, etc.)
 }
 
 // Wrap returns a Provider that records all calls to pg.
 // profName is the LLM profile name (e.g. "default"); may be empty.
 func Wrap(inner llm.Provider, pg *db.DB, model, profName string) *Recorder {
 	return &Recorder{inner: inner, pg: pg, model: model, prof: profName}
-}
-
-// SetSession sets the session identifier for subsequent calls (e.g. "exp1-worker-i3").
-// It also derives taskID and worker from the session format "exp<N>-<role>...".
-func (r *Recorder) SetSession(id string) {
-	r.mu.Lock()
-	r.sessionID = id
-	r.taskID, r.worker = parseSession(id)
-	r.mu.Unlock()
 }
 
 // parseSession extracts task id and worker role from session strings like
@@ -68,17 +54,16 @@ func parseSession(s string) (taskID, worker string) {
 	return taskID, worker
 }
 
-func (r *Recorder) getContext() (session, taskID, worker string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.sessionID, r.taskID, r.worker
-}
-
 // Stream implements llm.Provider. It delegates to the inner provider, accumulates
 // the streamed events to reconstruct the response, and records the full exchange.
+//
+// The session identifier (e.g. "exp1-worker-i3") is carried on ctx by the norma
+// harness via transcript.WithSessionID; reading it per-call is race-free even when
+// planner and multiple workers share one Recorder instance.
 func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	start := time.Now()
-	session, taskID, worker := r.getContext()
+	session := transcript.SessionIDFrom(ctx)
+	taskID, worker := parseSession(session)
 
 	// Serialize the request for storage.
 	reqBody := serializeRequest(req)
