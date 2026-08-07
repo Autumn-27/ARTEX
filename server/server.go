@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	llmCfg    agent.Config     // current LLM config (key not exposed)
 	llmOn     bool
+	llmProf   string           // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -245,6 +247,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
+	s.cfgMu.Lock()
+	s.llmProf = p.Name
+	s.cfgMu.Unlock()
 	return cfg, true
 }
 
@@ -327,6 +332,11 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	if err != nil {
 		return err
 	}
+	// Wrap provider with LLM call recorder (persists request/response to PG).
+	s.cfgMu.Lock()
+	profName := s.llmProf
+	s.cfgMu.Unlock()
+	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, s.m.LLMRecordEnabled)
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.engine.UseLLM(pl, wk)
 
@@ -388,6 +398,10 @@ func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
 		return nil, nil
 	}
+	// Wrap with recorder, tagged with this profile's name.
+	if p, _ := s.m.pg.ProfileByID(id); p != nil {
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
+	}
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.profAgents[id] = &profBundle{pl: pl, wk: wk}
 	log.Printf("[engine] built dedicated planner/worker for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
@@ -410,6 +424,10 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	if err != nil {
 		log.Printf("[chat] build provider for LLM profile %d failed: %v", id, err)
 		return nil
+	}
+	// Wrap with recorder, tagged with this profile's name.
+	if p, _ := s.m.pg.ProfileByID(id); p != nil {
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
@@ -496,6 +514,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gc", s.gc)
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
+	mux.HandleFunc("GET /api/commands", s.pgListCommands)
+	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
+	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
@@ -582,6 +603,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
 	mux.HandleFunc("DELETE /api/llm/profiles/{id}", s.pgDeleteProfile)
 	mux.HandleFunc("POST /api/llm/profiles/active", s.pgActivateProfile)
+	mux.HandleFunc("POST /api/llm/models", s.pgListModels)
 
 	// 拦截规则管理
 	mux.HandleFunc("GET /api/intercept/rules", s.interceptListRules)
@@ -1436,6 +1458,7 @@ func (s *Server) settingsPayload() map[string]any {
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	return map[string]any{
 		"traffic_capture":     s.m.TrafficEnabled(),
+		"llm_record":          s.m.LLMRecordEnabled(),
 		"web_search_enabled":  on,
 		"web_search_backend":  backend,
 		"brave_key_set":       strings.TrimSpace(braveKey) != "",
@@ -1466,6 +1489,7 @@ func (s *Server) pgDetectPython(w http.ResponseWriter, r *http.Request) {
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TrafficCapture *bool `json:"traffic_capture"`
+		LLMRecord      *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -1488,6 +1512,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.LLMRecord != nil {
+		// 录制器每次调用读取该标志，切换即时生效，无需 applyLLM 重建。
+		if err := s.m.SetLLMRecordEnabled(*req.LLMRecord); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

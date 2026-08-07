@@ -338,6 +338,7 @@ export interface TrafficDetail {
 // ---- App settings (runtime toggles) ----
 export interface Settings {
   traffic_capture: boolean;
+  llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;
@@ -548,4 +549,39 @@ export interface ConvTokenSummary {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+// ---- Command recording (Bash execution history) ----
+export interface CommandRecord {
+  id: number;
+  exploration_id: number;
+  worker: string;
+  tool: string;
+  command: string; // raw tool input (JSON)
+  output: string;
+  is_error: boolean;
+  created_at: string;
+}
+
+// ---- LLM recording ----
+export interface LLMRecordItem {
+  id: number;
+  ts: string;
+  model: string;
+  profile_name: string;
+  session_id: string;
+  task_id: string;
+  worker: string;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  status: string;
+  error?: string;
+}
+
+export interface LLMRecordDetail extends LLMRecordItem {
+  request_body: string;
+  response_body: string;
 }
