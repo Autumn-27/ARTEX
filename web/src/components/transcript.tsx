@@ -39,6 +39,36 @@ function workerColor(name: string): string {
 const chip = (worker: string) =>
   "mt-0.5 shrink-0 rounded px-1 text-[9px] font-medium text-white " + workerColor(worker);
 
+// useInView latches true when the ref'd element first comes within `rootMargin` of
+// the enclosing scroll viewport. Blocks that always show their full body (user
+// bubbles, answers) use it to defer fetching that body until they're about to be
+// seen — so opening a long thread doesn't fire a detail request for every off-
+// screen step. Observes the ScrollArea viewport (falls back to eager load when
+// IntersectionObserver is unavailable, e.g. SSR).
+function useInView(rootMargin = "400px"): [React.RefObject<HTMLDivElement | null>, boolean] {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [inView, setInView] = React.useState(false);
+  React.useEffect(() => {
+    if (inView) return; // latch: once seen, stop observing
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const root = el.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
+    const ob = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) setInView(true);
+      },
+      { root, rootMargin },
+    );
+    ob.observe(el);
+    return () => ob.disconnect();
+  }, [inView, rootMargin]);
+  return [ref, inView];
+}
+
 // A tool group pairs a tool_use with its matching tool_result (by tool_use_id);
 // a run of consecutive conversational steps (text/thinking/result) from the same
 // agent is one "message".
@@ -417,8 +447,10 @@ function MessageBlock({
 // and shown in full (bubble is whitespace-pre-wrap, so long/multi-line text wraps).
 function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean; getDetail: (seq: number) => Promise<string> }) {
   const Icon = intent ? CrosshairIcon : UserIcon;
+  const [ref, inView] = useInView();
   const [full, setFull] = React.useState<string | null>(null);
   React.useEffect(() => {
+    if (!inView) return; // fetch the full message only when the bubble nears view
     let live = true;
     getDetail(step.seq)
       .then((d) => {
@@ -430,9 +462,9 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
     return () => {
       live = false;
     };
-  }, [step.seq, getDetail, step.summary]);
+  }, [inView, step.seq, getDetail, step.summary]);
   return (
-    <div className="mt-3 mb-2 flex justify-end gap-2">
+    <div ref={ref} className="mt-3 mb-2 flex justify-end gap-2">
       <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground">
         {full ?? step.summary}
       </div>
@@ -447,8 +479,10 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
 // collapsed. The summary is a truncated first line, so the full text is pulled
 // from the detail and shown inline.
 function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
+  const [ref, inView] = useInView();
   const [full, setFull] = React.useState<string | null>(null);
   React.useEffect(() => {
+    if (!inView) return; // fetch the full answer only when it nears view
     let live = true;
     getDetail(step.seq)
       .then((d) => {
@@ -460,9 +494,9 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
     return () => {
       live = false;
     };
-  }, [step.seq, getDetail, step.summary]);
+  }, [inView, step.seq, getDetail, step.summary]);
   return (
-    <div className="mb-2 mt-1 flex">
+    <div ref={ref} className="mb-2 mt-1 flex">
       <div
         className={
           "min-w-0 flex-1 break-words rounded-lg bg-muted px-3 py-2 " +

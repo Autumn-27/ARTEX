@@ -54,6 +54,11 @@ function fmtDuration(ms: number): string {
   return `${h}h${String(m % 60).padStart(2, "0")}m`;
 }
 
+// HISTORY_PAGE is how many steps one history page loads: the latest page on open,
+// then one more page each time the user scrolls to the top. Kept modest so a long
+// thread stays snappy (only ~a page of rows is in the DOM until you scroll up).
+const HISTORY_PAGE = 200;
+
 // LiveBadge is the small pulsing "实时" chip reused from the task's main-agent
 // console — shown while a turn is streaming.
 function LiveBadge() {
@@ -307,7 +312,11 @@ function ChatView({
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
-  const cursorRef = React.useRef(0);
+  const cursorRef = React.useRef(0); // newest loaded id — incremental-tail anchor
+  const earliestRef = React.useRef(0); // earliest loaded id — reverse-pagination anchor
+  const hasMoreRef = React.useRef(false); // older history remains above the loaded window
+  const loadingMoreRef = React.useRef(false); // guard: one scroll-up load at a time
+  const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
 
@@ -335,18 +344,28 @@ function ChatView({
     return null;
   }, [messages]);
 
-  // reset + load whenever the selected conversation changes.
+  // reset + load whenever the selected conversation changes. Load only the LATEST
+  // page on open — a long thread's final answer sits at the very end, so the newest
+  // page shows it immediately (issue #3: opening/refresh used to load the oldest
+  // page, so the completed result was missing until another message advanced the
+  // cursor). Older history streams in on scroll-up (loadEarlier below).
   React.useEffect(() => {
     cursorRef.current = 0;
+    earliestRef.current = 0;
+    hasMoreRef.current = false;
+    setHasMore(false);
     setMessages([]);
     setRunning(false);
     let live = true;
     api
-      .conversationMessages(conv.id, 0)
+      .conversationHistory(conv.id, 0, HISTORY_PAGE)
       .then((r) => {
         if (!live) return;
         setMessages(r.items);
-        cursorRef.current = r.cursor;
+        cursorRef.current = r.cursor; // newest id → incremental-tail anchor
+        earliestRef.current = r.items.length ? r.items[0].seq : 0;
+        hasMoreRef.current = r.hasMore;
+        setHasMore(r.hasMore);
         setRunning(r.running);
       })
       .catch(() => {});
@@ -389,15 +408,46 @@ function ChatView({
       null,
     [],
   );
+  // Scroll-up loads one older page and prepends it, preserving the visual position
+  // so the view doesn't jump (record height/offset before, restore the delta after).
+  const loadEarlier = React.useCallback(async () => {
+    if (loadingMoreRef.current || !hasMoreRef.current) return;
+    const vp = viewport();
+    if (!vp) return;
+    loadingMoreRef.current = true;
+    const prevH = vp.scrollHeight;
+    const prevTop = vp.scrollTop;
+    try {
+      const r = await api.conversationHistory(conv.id, earliestRef.current, HISTORY_PAGE);
+      if (r.items.length) {
+        setMessages((prev) => {
+          const seen = new Set(prev.map((a) => a.seq));
+          return [...r.items.filter((a) => !seen.has(a.seq)), ...prev];
+        });
+        earliestRef.current = r.items[0].seq;
+      }
+      hasMoreRef.current = r.hasMore;
+      setHasMore(r.hasMore);
+      requestAnimationFrame(() => {
+        const v = viewport();
+        if (v) v.scrollTop = prevTop + (v.scrollHeight - prevH);
+      });
+    } catch {
+      /* transient — a later scroll retries */
+    } finally {
+      loadingMoreRef.current = false;
+    }
+  }, [conv.id, viewport]);
   React.useEffect(() => {
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
+      if (vp.scrollTop <= 80) void loadEarlier(); // near top → pull an older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport]);
+  }, [viewport, loadEarlier]);
   // open/switch a conversation → jump to the latest (bottom)
   React.useLayoutEffect(() => {
     const vp = viewport();
@@ -512,7 +562,14 @@ function ChatView({
               开始和「{agent?.name ?? conv.agent_key}」对话
             </div>
           ) : (
-            <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
+            <>
+              {hasMore && (
+                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">
+                  向上滚动加载更早的消息…
+                </div>
+              )}
+              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
+            </>
           )}
         </div>
       </ScrollArea>
@@ -642,6 +699,25 @@ export default function ChatPage() {
     reloadConvs();
   }, [reloadConvs]);
 
+  // Restore the open conversation from the URL (?c=<id>) on mount, so a refresh
+  // returns to the same thread instead of the empty draft view. Runs after
+  // hydration (not a lazy useState init) to avoid a server/client mismatch.
+  React.useEffect(() => {
+    const c = new URLSearchParams(window.location.search).get("c");
+    const id = c ? Number(c) : NaN;
+    if (Number.isFinite(id)) setSelectedId(id);
+  }, []);
+  // Mirror the current selection into the URL (replaceState → no history spam). A
+  // selectedId with no matching conversation (e.g. a stale ?c=, or a just-created
+  // one before reloadConvs lands) simply renders the draft view — harmless — so we
+  // deliberately do NOT auto-clear it here (that raced new-conversation creation).
+  React.useEffect(() => {
+    const url = new URL(window.location.href);
+    if (selectedId != null) url.searchParams.set("c", String(selectedId));
+    else url.searchParams.delete("c");
+    window.history.replaceState(null, "", url);
+  }, [selectedId]);
+
   const selected = convs.find((c) => c.id === selectedId) ?? null;
   // conversation agents: custom agents + conversational built-ins (role=assistant,
   // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
@@ -728,8 +804,12 @@ export default function ChatPage() {
               agents={chatAgents}
               profiles={profiles}
               onStarted={(c) => {
-                reloadConvs();
+                // Insert the new conversation immediately so `selected` resolves to
+                // it on this render (switching to ChatView right away, before the
+                // async reloadConvs lands); reloadConvs then reconciles titles etc.
+                setConvs((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
                 setSelectedId(c.id);
+                reloadConvs();
               }}
             />
           )}

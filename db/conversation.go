@@ -174,6 +174,49 @@ FROM conversation_activities WHERE conversation_id=$1 AND id>$2 ORDER BY id LIMI
 	return out, cursor, rows.Err()
 }
 
+// ConvActivityPage returns one page for reverse (newest-first) pagination: up to
+// `limit` steps ending before id `before` (exclusive; before<=0 = the latest
+// page), returned in ASCENDING id order. hasMore reports whether still-older steps
+// exist before the returned window, so the client can stop loading earlier history
+// on scroll-up. Summary-only columns (detail is lazy-loaded via ConvActivityDetail).
+func (d *DB) ConvActivityPage(convID, before int64, limit int) ([]Activity, bool, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	const cols = `id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	// fetch one extra row to detect whether older history remains before this window.
+	rows, err := d.Query(`SELECT `+cols+`
+FROM conversation_activities
+WHERE conversation_id=$1 AND ($2 <= 0 OR id < $2)
+ORDER BY id DESC LIMIT $3`, convID, before, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	desc := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.CreatedAt,
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			return nil, false, err
+		}
+		desc = append(desc, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(desc) > limit
+	if hasMore {
+		desc = desc[:limit]
+	}
+	// reverse the newest-first window into ascending id order for display.
+	out := make([]Activity, len(desc))
+	for i, a := range desc {
+		out[len(desc)-1-i] = a
+	}
+	return out, hasMore, nil
+}
+
 // ConvActivityDetail lazily returns the full detail blob for one step.
 func (d *DB) ConvActivityDetail(convID, id int64) (string, error) {
 	var s sql.NullString

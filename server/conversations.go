@@ -171,16 +171,39 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-	items, cursor, err := pg.ConvActivityList(c.ID, since, 0)
+	q := r.URL.Query()
+	limit := atoiDefault(q.Get("limit"), 200)
+	s.chatMu.Lock()
+	running := s.chatBusy[s.convBusyKey(c.ID)]
+	s.chatMu.Unlock()
+
+	// Incremental tail: ?since=N returns steps after id N (ASC) — used by the live
+	// poll and the post-send fetch. A generous cap so a burst is never dropped.
+	if sv := q.Get("since"); sv != "" {
+		since, _ := strconv.ParseInt(sv, 10, 64)
+		items, cursor, err := pg.ConvActivityList(c.ID, since, max(limit, 1000))
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": false})
+		return
+	}
+
+	// History page (reverse pagination): no ?since → the latest page; ?before=N →
+	// the page of older steps ending before id N. hasMore lets the client stop
+	// loading earlier history once the top of the thread is reached.
+	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
+	items, hasMore, err := pg.ConvActivityPage(c.ID, before, limit)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	s.chatMu.Lock()
-	running := s.chatBusy[s.convBusyKey(c.ID)]
-	s.chatMu.Unlock()
-	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running})
+	cursor := before
+	if n := len(items); n > 0 {
+		cursor = items[n-1].ID
+	}
+	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": hasMore})
 }
 
 // pgConversationMsgDetail lazily returns one step's full detail blob.
