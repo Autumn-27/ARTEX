@@ -4,6 +4,8 @@
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
+任务的核心理念来源于：https://github.com/oritera/Cairn
+
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
 </div>
