@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/artex/db"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // =====================================================================
@@ -90,16 +90,16 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						"description": "资产类型",
 					},
 					// root_domain / subdomain
-					"domain":       str("根域名或子域名（root_domain/subdomain 必填）"),
-					"icp":          str("ICP 备案号（可选）"),
-					"record_type":  str("DNS 解析类型：A/AAAA/CNAME/MX 等（subdomain 可选）"),
+					"domain":      str("根域名或子域名（root_domain/subdomain 必填）"),
+					"icp":         str("ICP 备案号（可选）"),
+					"record_type": str("DNS 解析类型：A/AAAA/CNAME/MX 等（subdomain 可选）"),
 					"record_value": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
 						"description": "DNS 解析值列表（subdomain 可选，如 [\"1.2.3.4\",\"2.3.4.5\"]）",
 					},
 					// ip
-					"ip":           str("IP 地址（ip 类型必填；service/endpoint 类型可填，用于关联 IP）"),
+					"ip": str("IP 地址（ip 类型必填；service/endpoint 类型可填，用于关联 IP）"),
 					"bound_domains": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
@@ -121,8 +121,8 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					"app_icp":     str("应用 ICP 备案（可选）"),
 					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）"),
 					// service (http)
-					"url":           str("完整 URL，含协议和端口（HTTP 服务必填；service_type 自动设为 http）"),
-					"status_code":   intp("HTTP 响应状态码，如 200/301/403/404（可选）"),
+					"url":         str("完整 URL，含协议和端口（HTTP 服务必填；service_type 自动设为 http）"),
+					"status_code": intp("HTTP 响应状态码，如 200/301/403/404（可选）"),
 					"content_length": map[string]any{
 						"type":        "integer",
 						"description": "HTTP 响应体字节数（可选）",
@@ -489,6 +489,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
+		t.addFinding(), t.recordFact(),
 	}
 }
 

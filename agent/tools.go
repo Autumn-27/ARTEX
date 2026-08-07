@@ -575,7 +575,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "发现漏洞时必须调用该工具!记录一个确认的漏洞发现。在任务上下文中 intent_id 必填（当前正在执行的意图 id）；在会话上下文中 intent_id 可不填。",
+	return writeTool("report_finding", "[重要]发现漏洞时必须调用该工具进行记录!记录一个确认的漏洞发现。在任务上下文中 intent_id 必填（当前正在执行的意图 id）；在会话上下文中 intent_id 可不填。",
 		obj(map[string]any{
 			"vulnclass": str("漏洞类"),
 			"severity":  str("high|medium|low"),
