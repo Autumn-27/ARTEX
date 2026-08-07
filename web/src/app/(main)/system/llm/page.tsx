@@ -141,7 +141,11 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
           <PlusIcon /> 新建
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent
+        className="sm:max-w-lg"
+        // don't dismiss a half-filled form on an outside click (Esc / ✕ still close).
+        onInteractOutside={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>新建 Profile</DialogTitle>
           <DialogDescription>新建后不会自动激活，请在列表中「设为激活」以启用。</DialogDescription>
