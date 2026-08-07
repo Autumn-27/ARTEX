@@ -14,6 +14,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -74,10 +75,38 @@ export default function LLMRecordsPage() {
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
 
+  // Recording on/off toggle (settings.llm_record; default off). When off the
+  // backend records nothing.
+  const [recEnabled, setRecEnabled] = React.useState(false);
+  const [recBusy, setRecBusy] = React.useState(false);
+
   // Inline detail panel (Burp-style split, not a dialog)
   const [selected, setSelected] = React.useState<LLMRecordItem | null>(null);
   const [detail, setDetail] = React.useState<LLMRecordDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
+
+  // Load recording toggle state on mount.
+  React.useEffect(() => {
+    let alive = true;
+    api
+      .settings()
+      .then((s) => { if (alive) setRecEnabled(!!s.llm_record); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const toggleRecording = async (on: boolean) => {
+    setRecBusy(true);
+    setRecEnabled(on); // optimistic
+    try {
+      const s = await api.setSettings({ llm_record: on });
+      setRecEnabled(!!s.llm_record);
+    } catch {
+      setRecEnabled(!on); // revert on failure
+    } finally {
+      setRecBusy(false);
+    }
+  };
 
   // Debounce session filter.
   React.useEffect(() => {
@@ -167,6 +196,26 @@ export default function LLMRecordsPage() {
             ))}
           </SelectContent>
         </Select>
+
+        {/* Recording on/off — off means no LLM calls are recorded */}
+        <div className="flex items-center gap-2 rounded-md border px-2.5 py-1">
+          <Switch
+            id="llm-rec-toggle"
+            size="sm"
+            checked={recEnabled}
+            onCheckedChange={toggleRecording}
+            disabled={recBusy}
+          />
+          <label
+            htmlFor="llm-rec-toggle"
+            className={cn(
+              "cursor-pointer text-xs font-medium select-none",
+              recEnabled ? "text-foreground" : "text-muted-foreground",
+            )}
+          >
+            {recEnabled ? "录制中" : "已关闭"}
+          </label>
+        </div>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span className="tabular-nums">

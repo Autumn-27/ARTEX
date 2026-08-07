@@ -43,12 +43,13 @@ function fmtTime(ts: string) {
   });
 }
 
-// extractCommand parses the tool_use detail (JSON like {"command":"..."}) and
-// returns just the command string. Falls back to raw text if not JSON.
-function extractCommand(raw: string): string {
+// toolInput renders a tool's raw input for display. Bash's {"command":"..."} is
+// unwrapped to the bare command; other tools show their pretty-printed JSON args.
+function toolInput(raw: string): string {
   try {
     const obj = JSON.parse(raw);
     if (obj && typeof obj.command === "string") return obj.command;
+    return JSON.stringify(obj, null, 2);
   } catch { /* not JSON */ }
   return raw;
 }
@@ -114,7 +115,7 @@ export default function CommandsPage() {
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <TerminalIcon className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-xl font-semibold tracking-tight">命令记录</h1>
+          <h1 className="text-xl font-semibold tracking-tight">工具执行</h1>
           <Badge variant="secondary">{total}</Badge>
         </div>
       </div>
@@ -124,7 +125,7 @@ export default function CommandsPage() {
         <div className="relative max-w-sm flex-1">
           <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="搜索命令..."
+            placeholder="搜索工具 / 参数..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="h-8 pl-8"
@@ -187,21 +188,22 @@ export default function CommandsPage() {
                   <TableHead className="w-[130px]">时间</TableHead>
                   <TableHead className="w-[60px]">任务</TableHead>
                   <TableHead className="w-[90px]">Worker</TableHead>
-                  <TableHead>命令</TableHead>
+                  <TableHead className="w-[110px]">工具</TableHead>
+                  <TableHead>输入</TableHead>
                   <TableHead className="w-[60px]">状态</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading && commands.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-12 text-center">
+                    <TableCell colSpan={6} className="py-12 text-center">
                       <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : commands.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-12 text-center text-sm text-muted-foreground">
-                      暂无命令记录
+                    <TableCell colSpan={6} className="py-12 text-center text-sm text-muted-foreground">
+                      暂无工具执行记录
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -225,9 +227,14 @@ export default function CommandsPage() {
                           {cmd.worker || "-"}
                         </Badge>
                       </TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="text-xs font-mono">
+                          {cmd.tool || "-"}
+                        </Badge>
+                      </TableCell>
                       <TableCell className="max-w-0">
                         <code className="block truncate font-mono text-xs">
-                          {truncate(extractCommand(cmd.command), CMD_MAX_LEN)}
+                          {truncate(toolInput(cmd.command), CMD_MAX_LEN)}
                         </code>
                       </TableCell>
                       <TableCell>
@@ -256,6 +263,9 @@ export default function CommandsPage() {
               <Badge variant="outline" className="text-xs font-mono">
                 {selected.worker || "-"}
               </Badge>
+              <Badge variant="secondary" className="text-xs font-mono">
+                {selected.tool || "-"}
+              </Badge>
               <span className="text-xs text-muted-foreground">
                 {fmtTime(selected.created_at)}
               </span>
@@ -277,11 +287,11 @@ export default function CommandsPage() {
             <div className="grid min-h-0 flex-1 grid-cols-2 divide-x">
               <div className="flex min-h-0 min-w-0 flex-col">
                 <div className="border-b px-3 py-1 text-[11px] font-medium text-muted-foreground">
-                  输入 Command
+                  输入 Input
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">
                   <pre className="p-3 font-mono text-xs break-all whitespace-pre-wrap">
-                    {extractCommand(selected.command)}
+                    {toolInput(selected.command)}
                   </pre>
                 </div>
               </div>

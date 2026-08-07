@@ -1539,7 +1539,9 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 // pgListModels fetches available models from the provider's API endpoint.
-// Supports both OpenAI-format (GET /models) and Anthropic-format (GET /v1/models).
+// Supports OpenAI-format (GET /models) and Anthropic-format (GET /v1/models); for
+// Anthropic-compatible third parties (e.g. DeepSeek) whose model list lives only on
+// the OpenAI path, it falls back to the OpenAI endpoint at the stripped root.
 func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider  string `json:"provider"`  // "openai" | "anthropic"
@@ -1567,29 +1569,48 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	provider := strings.TrimSpace(req.Provider)
 
-	// Build the models endpoint URL and request headers per provider format.
-	var modelsURL string
-	var hdr http.Header
+	// Candidate endpoints to try in order. Some Anthropic-compatible providers
+	// (e.g. DeepSeek) implement /v1/messages under an /anthropic path but expose
+	// the model list only on their OpenAI-format path — so for anthropic we fall
+	// back to the OpenAI endpoint at the stripped root.
+	type candidate struct {
+		url string
+		hdr http.Header
+	}
+	bearerHdr := func() http.Header {
+		h := http.Header{}
+		h.Set("Authorization", "Bearer "+apiKey)
+		return h
+	}
+	anthropicHdr := func() http.Header {
+		h := http.Header{}
+		h.Set("x-api-key", apiKey)
+		h.Set("anthropic-version", "2023-06-01")
+		return h
+	}
+
+	var candidates []candidate
 	switch provider {
 	case "openai":
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
-		baseURL = strings.TrimRight(baseURL, "/")
-		modelsURL = baseURL + "/models"
-		hdr = http.Header{}
-		hdr.Set("Authorization", "Bearer "+apiKey)
+		b := strings.TrimRight(strings.TrimSuffix(baseURL, "/chat/completions"), "/")
+		candidates = append(candidates, candidate{b + "/models", bearerHdr()})
 	default: // anthropic
 		if baseURL == "" {
 			baseURL = "https://api.anthropic.com"
 		}
-		baseURL = strings.TrimSuffix(baseURL, "/v1/messages")
-		baseURL = strings.TrimRight(baseURL, "/")
-		modelsURL = baseURL + "/v1/models"
-		hdr = http.Header{}
-		hdr.Set("x-api-key", apiKey)
-		hdr.Set("anthropic-version", "2023-06-01")
+		b := strings.TrimRight(strings.TrimSuffix(baseURL, "/v1/messages"), "/")
+		candidates = append(candidates, candidate{b + "/v1/models", anthropicHdr()})
+		// Fallback for Anthropic-compatible third parties whose model list lives on
+		// the OpenAI path: strip a trailing /anthropic and try the OpenAI endpoint.
+		if root := strings.TrimRight(strings.TrimSuffix(b, "/anthropic"), "/"); root != b {
+			candidates = append(candidates,
+				candidate{root + "/models", bearerHdr()},
+				candidate{root + "/v1/models", bearerHdr()},
+			)
+		}
 	}
 
 	// Build HTTP client with optional proxy.
@@ -1601,42 +1622,57 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, modelsURL, nil)
-	if err != nil {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "构建请求失败: " + err.Error()})
-		return
-	}
-	httpReq.Header = hdr
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "请求失败: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": fmt.Sprintf("API 返回 %d: %s", resp.StatusCode, string(body[:min(len(body), 512)]))})
-		return
-	}
-
-	// Parse response: both OpenAI and Anthropic return {"data": [{"id": "..."},...]}.
-	var parsed struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "解析响应失败: " + err.Error()})
-		return
-	}
-	models := make([]string, 0, len(parsed.Data))
-	for _, m := range parsed.Data {
-		if m.ID != "" {
-			models = append(models, m.ID)
+	// Try each candidate; return the first that yields a non-empty model list.
+	var lastErr string
+	emptyOK := false
+	for _, c := range candidates {
+		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, c.url, nil)
+		if err != nil {
+			lastErr = "构建请求失败: " + err.Error()
+			continue
 		}
+		httpReq.Header = c.hdr
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			lastErr = "请求失败: " + err.Error()
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Sprintf("API 返回 %d: %s", resp.StatusCode, string(body[:min(len(body), 512)]))
+			continue
+		}
+		// Both OpenAI and Anthropic return {"data": [{"id": "..."},...]}.
+		var parsed struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			lastErr = "解析响应失败: " + err.Error()
+			continue
+		}
+		models := make([]string, 0, len(parsed.Data))
+		for _, m := range parsed.Data {
+			if m.ID != "" {
+				models = append(models, m.ID)
+			}
+		}
+		if len(models) > 0 {
+			writeJSON(w, 200, map[string]any{"ok": true, "models": models})
+			return
+		}
+		emptyOK = true // 200 but no model ids — keep trying other candidates
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "models": models})
+	if emptyOK {
+		writeJSON(w, 200, map[string]any{"ok": true, "models": []string{}})
+		return
+	}
+	if lastErr == "" {
+		lastErr = "未获取到模型列表"
+	}
+	writeJSON(w, 200, map[string]any{"ok": false, "error": lastErr})
 }
 
 // --- prompt template helpers (Go text/template + catalog 白名单) ---

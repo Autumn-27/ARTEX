@@ -464,6 +464,7 @@ export const tools: Tool[] = [
 // ── Settings ─────────────────────────────────────────────────────────────────
 export const settings: Settings = {
   traffic_capture: true,
+  llm_record: false,
   web_search_enabled: true,
   web_search_backend: "ddgs",
   brave_key_set: false,

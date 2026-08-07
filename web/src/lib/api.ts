@@ -450,7 +450,7 @@ export const api = {
     if (!r.ok) throw new Error(await r.text());
   },
 
-  // ---- commands (Bash execution history) ----
+  // ---- commands (tool execution history, any tool) ----
   commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
     const sp = new URLSearchParams();
     if (params?.task) sp.set("task", params.task);

@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-// pgListCommands returns Bash command executions filtered from the activity table.
+// pgListCommands returns tool executions (any tool) from the activity table.
 func (s *Server) pgListCommands(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page := atoiDefault(q.Get("page"), 0)

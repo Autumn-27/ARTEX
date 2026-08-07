@@ -338,6 +338,7 @@ export interface TrafficDetail {
 // ---- App settings (runtime toggles) ----
 export interface Settings {
   traffic_capture: boolean;
+  llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;
@@ -555,7 +556,8 @@ export interface CommandRecord {
   id: number;
   exploration_id: number;
   worker: string;
-  command: string;
+  tool: string;
+  command: string; // raw tool input (JSON)
   output: string;
   is_error: boolean;
   created_at: string;

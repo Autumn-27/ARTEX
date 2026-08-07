@@ -18,16 +18,18 @@ import (
 
 // Recorder wraps an llm.Provider and records every completion call.
 type Recorder struct {
-	inner llm.Provider
-	pg    *db.DB
-	model string // model name (from config, not in CompletionRequest)
-	prof  string // LLM profile name (from llm_profiles)
+	inner   llm.Provider
+	pg      *db.DB
+	model   string      // model name (from config, not in CompletionRequest)
+	prof    string      // LLM profile name (from llm_profiles)
+	enabled func() bool // reports whether recording is currently on; nil = always record
 }
 
-// Wrap returns a Provider that records all calls to pg.
-// profName is the LLM profile name (e.g. "default"); may be empty.
-func Wrap(inner llm.Provider, pg *db.DB, model, profName string) *Recorder {
-	return &Recorder{inner: inner, pg: pg, model: model, prof: profName}
+// Wrap returns a Provider that records calls to pg when enabled() reports true.
+// profName is the LLM profile name (e.g. "default"); may be empty. A nil enabled
+// predicate records unconditionally (backward-compatible default).
+func Wrap(inner llm.Provider, pg *db.DB, model, profName string, enabled func() bool) *Recorder {
+	return &Recorder{inner: inner, pg: pg, model: model, prof: profName, enabled: enabled}
 }
 
 // parseSession extracts task id and worker role from session strings like
@@ -61,6 +63,11 @@ func parseSession(s string) (taskID, worker string) {
 // harness via transcript.WithSessionID; reading it per-call is race-free even when
 // planner and multiple workers share one Recorder instance.
 func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	// Recording off → passthrough with zero overhead: no request serialization,
+	// no response accumulation, no DB insert.
+	if r.enabled != nil && !r.enabled() {
+		return r.inner.Stream(ctx, req)
+	}
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	taskID, worker := parseSession(session)

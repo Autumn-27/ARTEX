@@ -336,7 +336,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.cfgMu.Lock()
 	profName := s.llmProf
 	s.cfgMu.Unlock()
-	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName)
+	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, s.m.LLMRecordEnabled)
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.engine.UseLLM(pl, wk)
 
@@ -400,7 +400,7 @@ func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name)
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
 	}
 	pl, wk := s.buildPlannerWorker(prov, cfg)
 	s.profAgents[id] = &profBundle{pl: pl, wk: wk}
@@ -427,7 +427,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name)
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
@@ -1458,6 +1458,7 @@ func (s *Server) settingsPayload() map[string]any {
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	return map[string]any{
 		"traffic_capture":     s.m.TrafficEnabled(),
+		"llm_record":          s.m.LLMRecordEnabled(),
 		"web_search_enabled":  on,
 		"web_search_backend":  backend,
 		"brave_key_set":       strings.TrimSpace(braveKey) != "",
@@ -1488,6 +1489,7 @@ func (s *Server) pgDetectPython(w http.ResponseWriter, r *http.Request) {
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TrafficCapture *bool `json:"traffic_capture"`
+		LLMRecord      *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -1510,6 +1512,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.LLMRecord != nil {
+		// 录制器每次调用读取该标志，切换即时生效，无需 applyLLM 重建。
+		if err := s.m.SetLLMRecordEnabled(*req.LLMRecord); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

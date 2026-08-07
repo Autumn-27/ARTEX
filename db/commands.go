@@ -6,19 +6,22 @@ import (
 	"time"
 )
 
-// CommandRecord is a paired Bash tool_use + tool_result from the activity table.
+// CommandRecord is a paired tool_use + tool_result from the activity table
+// (any tool, not just Bash). Command holds the raw tool input (JSON).
 type CommandRecord struct {
 	ID        int64     `json:"id"`
 	ExpID     int64     `json:"exploration_id"`
 	Worker    string    `json:"worker"`
+	Tool      string    `json:"tool"`
 	Command   string    `json:"command"`
 	Output    string    `json:"output"`
 	IsError   bool      `json:"is_error"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ListCommands returns Bash command executions (tool_use + paired tool_result)
-// across all explorations, with optional filtering and pagination.
+// ListCommands returns tool executions (tool_use + paired tool_result) across all
+// explorations, with optional filtering and pagination. Covers every tool, not
+// just Bash; q matches the tool name or its input.
 func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
 	if size <= 0 {
 		size = 50
@@ -28,7 +31,7 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 	}
 	offset := page * size
 
-	where := `WHERE u.tool = 'Bash' AND u.kind = 'tool_use'`
+	where := `WHERE u.kind = 'tool_use'`
 	args := []any{}
 	argN := 1
 
@@ -38,7 +41,7 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 		argN++
 	}
 	if q != "" {
-		where += fmt.Sprintf(` AND u.detail ILIKE $%d`, argN)
+		where += fmt.Sprintf(` AND (u.tool ILIKE $%d OR u.detail ILIKE $%d)`, argN, argN)
 		args = append(args, "%"+q+"%")
 		argN++
 	}
@@ -52,7 +55,7 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 
 	// data query: join tool_use with its tool_result
 	dataQ := `
-SELECT u.id, u.exploration_id, COALESCE(u.worker,''), COALESCE(u.detail,''),
+SELECT u.id, u.exploration_id, COALESCE(u.worker,''), COALESCE(u.tool,''), COALESCE(u.detail,''),
        COALESCE(r.detail,''), COALESCE(r.is_error, false), u.created_at
 FROM activity u
 LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
@@ -70,7 +73,7 @@ LIMIT $` + fmt.Sprintf("%d", argN) + ` OFFSET $` + fmt.Sprintf("%d", argN+1)
 	out := []CommandRecord{}
 	for rows.Next() {
 		var c CommandRecord
-		if err := rows.Scan(&c.ID, &c.ExpID, &c.Worker, &c.Command, &c.Output, &c.IsError, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ExpID, &c.Worker, &c.Tool, &c.Command, &c.Output, &c.IsError, &c.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, c)
