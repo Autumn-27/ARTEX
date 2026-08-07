@@ -4,7 +4,6 @@
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
-任务的核心理念来源于：https://github.com/oritera/Cairn
 
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
@@ -144,6 +143,10 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
+## 参考
+
+任务的核心理念来源于：https://github.com/oritera/Cairn
+
 
 ## 许可
 
