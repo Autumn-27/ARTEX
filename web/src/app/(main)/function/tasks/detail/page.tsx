@@ -26,6 +26,7 @@ import { FindingsTab } from "./_tabs/findings-tab";
 import { ReportTab } from "./_tabs/report-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
 import { AssetsTab } from "./_tabs/assets-tab";
+import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 
 const TABS = [
   { value: "sessions",  label: "会话" },
@@ -33,6 +34,7 @@ const TABS = [
   { value: "graph",     label: "探索链路" },
   { value: "findings",  label: "发现" },
   { value: "assets",    label: "测试资产" },
+  { value: "coverage",  label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report",    label: "报告" },
 ];
@@ -178,6 +180,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="assets" className="mt-0">
           <AssetsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="coverage" className="mt-0">
+          <CoverageGraphTab taskId={id} />
         </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />

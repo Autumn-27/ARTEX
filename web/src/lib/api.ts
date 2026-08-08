@@ -11,7 +11,7 @@ import type {
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
   Tool, Conversation, AgentTrigger,
   InterceptRule, InterceptPending, InterceptApprovalRow,
-  TaskAssetView, SSProject, SSTask, ConvTokenSummary,
+  TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData,
   CommandRecord, LLMRecordItem, LLMRecordDetail,
 } from "@/lib/types";
 
@@ -124,6 +124,9 @@ export const api = {
       pct: number | null;
       by_type: { type: string; total: number; tested: number }[];
     }>(`/tasks/${id}/coverage`),
+  // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
+  taskCoverageGraph: (id: string) =>
+    get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
 
   // ---- assets ----
   // Server-side paginated: pass limit/offset, get back the page + full match total.

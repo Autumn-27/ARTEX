@@ -133,6 +133,38 @@ export interface Asset {
   last_seen: string;
 }
 
+// ---- Asset coverage graph (per task) ----
+// 力导向「资产覆盖图」的一个节点。key 唯一：资产="a:<id>"、公司="c:<id>"、
+// 无资产行的根域名="r:<domain>"。in_scope=false 的是仅用于连线的灰色上下文节点。
+export interface CoverageGraphNode {
+  key: string;
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint";
+  label: string;
+  tested: boolean;
+  in_scope: boolean;
+  asset_id?: number;
+  company_id?: number;
+  domain?: string;
+  root_domain?: string;
+  ip?: string;
+  url?: string;
+  port?: number;
+  service_type?: string;
+  app_name?: string;
+  page_title?: string;
+  status_code?: number;
+}
+
+export interface CoverageGraphEdge {
+  src: string;
+  dst: string;
+}
+
+export interface CoverageGraphData {
+  nodes: CoverageGraphNode[];
+  edges: CoverageGraphEdge[];
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;

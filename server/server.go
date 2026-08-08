@@ -483,6 +483,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
+	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("POST /api/active", s.setActive)
@@ -1105,6 +1106,28 @@ func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, cov)
+}
+
+// taskCoverageGraph returns the force-directed asset coverage graph for a task:
+// all in-scope assets (每种类型) + 连接用的根域名/公司节点, each carrying tested/in_scope.
+func (s *Server) taskCoverageGraph(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	g, err := as.BuildCoverageGraph(taskID, t.ExpID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, g)
 }
 
 // taskScopeList returns a task's scope rows (coverage denominator sources).

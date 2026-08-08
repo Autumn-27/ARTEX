@@ -273,6 +273,254 @@ FROM target t GROUP BY t.type ORDER BY t.type`, taskID, expID)
 	return cov, nil
 }
 
+// ---------------------------------------------------------------------------
+// Coverage graph — a force-directed view of a task's in-scope assets.
+// ---------------------------------------------------------------------------
+
+// CoverageGraphNode is one node of the asset coverage graph. Node identity is a
+// string key: an asset row is "a:<id>", a company is "c:<id>", and a root domain
+// with no asset row of its own is the synthetic "r:<domain>". Out-of-scope
+// connector nodes (roots pulled in only to link subdomains, and the companies
+// above them) carry InScope=false and are rendered gray.
+type CoverageGraphNode struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"` // company|root_domain|subdomain|ip|service|app|endpoint
+	Label       string `json:"label"`
+	Tested      bool   `json:"tested"`
+	InScope     bool   `json:"in_scope"`
+	AssetID     int64  `json:"asset_id,omitempty"` // 0 for company / synthetic root
+	CompanyID   int64  `json:"company_id,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	RootDomain  string `json:"root_domain,omitempty"`
+	IP          string `json:"ip,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	ServiceType string `json:"service_type,omitempty"`
+	AppName     string `json:"app_name,omitempty"`
+	PageTitle   string `json:"page_title,omitempty"`
+	StatusCode  int    `json:"status_code,omitempty"`
+}
+
+// CoverageGraphEdge is a child→parent containment link (endpoint→service→
+// subdomain/ip→root_domain→company, app→company).
+type CoverageGraphEdge struct {
+	Src string `json:"src"`
+	Dst string `json:"dst"`
+}
+
+// CoverageGraphData is the whole graph for one task.
+type CoverageGraphData struct {
+	Nodes []CoverageGraphNode `json:"nodes"`
+	Edges []CoverageGraphEdge `json:"edges"`
+}
+
+func assetKey(id int64) string   { return "a:" + strconv.FormatInt(id, 10) }
+func companyKey(id int64) string { return "c:" + strconv.FormatInt(id, 10) }
+
+// hostPortOf returns the (host, port) a service / endpoint node hangs off — the
+// domain if set, otherwise the URL host, otherwise the IP.
+func hostPortOf(n *CoverageGraphNode) (string, int) {
+	host, port := n.Domain, n.Port
+	if host == "" && n.URL != "" {
+		h, p, _ := parseURL(normalizeURL(n.URL))
+		host = h
+		if port == 0 {
+			port = p
+		}
+	}
+	if host == "" {
+		host = n.IP
+	}
+	return host, port
+}
+
+// BuildCoverageGraph assembles the full coverage graph for a task: every in-scope
+// asset (all types) plus the connector root domains / companies needed to link
+// them, with a tested flag on each in-scope asset. The frontend does the folding
+// and highlighting; this only returns nodes + derived containment edges.
+func (s *AssetStore) BuildCoverageGraph(taskID, expID int64) (*CoverageGraphData, error) {
+	g := &CoverageGraphData{Nodes: []CoverageGraphNode{}, Edges: []CoverageGraphEdge{}}
+	if taskID <= 0 {
+		return g, nil
+	}
+	rows, err := s.db.Query(`WITH `+covTargetCTE+`
+SELECT a.id, a.type, COALESCE(a.company_id,0),
+       COALESCE(a.domain,''), COALESCE(a.root_domain,''), COALESCE(a.ip,''),
+       COALESCE(a.url,''), COALESCE(a.port,0), COALESCE(a.service_type,''),
+       COALESCE(a.app_name,''), COALESCE(a.page_title,''), COALESCE(a.status_code,0),
+       (a.id IN (SELECT asset_id FROM tested)) AS tested
+FROM assets a JOIN target t ON t.id = a.id
+ORDER BY a.id`, taskID, expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byKey := map[string]*CoverageGraphNode{}
+	rootByDomain := map[string]string{} // root domain → node key
+	subByDomain := map[string]string{}  // subdomain    → node key
+	ipByAddr := map[string]string{}     // ip literal   → node key
+	svcByHostPort := map[string]string{}
+	svcByHost := map[string]string{}
+	companyIDs := map[int64]bool{} // referenced company ids (need a node)
+
+	add := func(n CoverageGraphNode) *CoverageGraphNode {
+		if _, ok := byKey[n.Key]; ok {
+			return byKey[n.Key]
+		}
+		g.Nodes = append(g.Nodes, n)
+		p := &g.Nodes[len(g.Nodes)-1]
+		byKey[n.Key] = p
+		return p
+	}
+
+	for rows.Next() {
+		var n CoverageGraphNode
+		var companyID int64
+		if err := rows.Scan(&n.AssetID, &n.Kind, &companyID,
+			&n.Domain, &n.RootDomain, &n.IP, &n.URL, &n.Port, &n.ServiceType,
+			&n.AppName, &n.PageTitle, &n.StatusCode, &n.Tested); err != nil {
+			return nil, err
+		}
+		n.Key = assetKey(n.AssetID)
+		n.CompanyID = companyID
+		n.InScope = true
+		n.Label = coverageNodeLabel(&n)
+		p := add(n)
+		switch n.Kind {
+		case "root_domain":
+			if n.Domain != "" {
+				rootByDomain[n.Domain] = p.Key
+			}
+		case "subdomain":
+			if n.Domain != "" {
+				subByDomain[n.Domain] = p.Key
+			}
+		case "ip":
+			if n.IP != "" {
+				ipByAddr[n.IP] = p.Key
+			}
+		case "service":
+			host, port := hostPortOf(p)
+			if host != "" {
+				svcByHost[host] = p.Key
+				svcByHostPort[host+"|"+strconv.Itoa(port)] = p.Key
+			}
+		}
+		if companyID > 0 {
+			companyIDs[companyID] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Connector root domains: any subdomain whose root domain is not itself an
+	// in-scope node. Pull the real asset row if one exists (so the drawer shows
+	// real detail), else synthesize a bare "r:<domain>" placeholder. Both gray.
+	missingRoots := map[string]bool{}
+	for _, n := range g.Nodes {
+		if n.Kind == "subdomain" && n.RootDomain != "" {
+			if _, ok := rootByDomain[n.RootDomain]; !ok {
+				missingRoots[n.RootDomain] = true
+			}
+		}
+	}
+	for root := range missingRoots {
+		var id, companyID int64
+		err := s.db.QueryRow(`SELECT id, COALESCE(company_id,0) FROM assets
+WHERE type='root_domain' AND domain=$1 LIMIT 1`, root).Scan(&id, &companyID)
+		var node CoverageGraphNode
+		if err == nil && id > 0 {
+			node = CoverageGraphNode{Key: assetKey(id), Kind: "root_domain", AssetID: id,
+				CompanyID: companyID, Domain: root, Label: root}
+			if companyID > 0 {
+				companyIDs[companyID] = true
+			}
+		} else {
+			node = CoverageGraphNode{Key: "r:" + root, Kind: "root_domain", Domain: root, Label: root}
+		}
+		add(node)
+		rootByDomain[root] = node.Key
+	}
+
+	// Company nodes for every referenced company id — always gray context.
+	for id := range companyIDs {
+		key := companyKey(id)
+		if _, ok := byKey[key]; ok {
+			continue
+		}
+		var name string
+		if err := s.db.QueryRow(`SELECT name FROM companies WHERE id=$1`, id).Scan(&name); err != nil {
+			continue
+		}
+		add(CoverageGraphNode{Key: key, Kind: "company", CompanyID: id,
+			Label: name, AssetID: 0})
+	}
+
+	// Derived containment edges (only when the parent node exists).
+	link := func(childKey, parentKey string) {
+		if parentKey == "" || parentKey == childKey {
+			return
+		}
+		if _, ok := byKey[parentKey]; !ok {
+			return
+		}
+		g.Edges = append(g.Edges, CoverageGraphEdge{Src: childKey, Dst: parentKey})
+	}
+	firstOf := func(keys ...string) string {
+		for _, k := range keys {
+			if k != "" {
+				if _, ok := byKey[k]; ok {
+					return k
+				}
+			}
+		}
+		return ""
+	}
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		switch n.Kind {
+		case "subdomain":
+			link(n.Key, rootByDomain[n.RootDomain])
+		case "root_domain", "app", "ip":
+			if n.CompanyID > 0 {
+				link(n.Key, companyKey(n.CompanyID))
+			}
+		case "service":
+			link(n.Key, firstOf(subByDomain[n.Domain], ipByAddr[n.IP], rootByDomain[n.RootDomain]))
+		case "endpoint":
+			host, port := hostPortOf(n)
+			parent := firstOf(
+				svcByHostPort[host+"|"+strconv.Itoa(port)], svcByHost[host],
+				subByDomain[host], subByDomain[n.Domain], ipByAddr[host], ipByAddr[n.IP],
+				rootByDomain[n.RootDomain])
+			link(n.Key, parent)
+		}
+	}
+	return g, nil
+}
+
+// coverageNodeLabel picks the human label for a coverage-graph node.
+func coverageNodeLabel(n *CoverageGraphNode) string {
+	switch n.Kind {
+	case "endpoint", "service":
+		if n.URL != "" {
+			return n.URL
+		}
+	case "app":
+		if n.AppName != "" {
+			return n.AppName
+		}
+	}
+	for _, v := range []string{n.URL, n.Domain, n.IP, n.AppName, n.RootDomain} {
+		if v != "" {
+			return v
+		}
+	}
+	return n.Key
+}
+
 // ListUntestedAssets returns a task's in-scope, not-yet-tested assets, optionally
 // filtered by asset type, paginated. Returns the page + the total count. limit<=0 → 10.
 func (s *AssetStore) ListUntestedAssets(taskID, expID int64, typ string, limit, offset int) ([]CoverageAsset, int, error) {
