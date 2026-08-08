@@ -258,6 +258,15 @@ export default function AgentsPage() {
         <SheetContent
           side="right"
           className="flex flex-col gap-0 p-0 data-[side=right]:w-[45vw] data-[side=right]:sm:max-w-[45vw]"
+          // 抽屉内的下拉/弹出层(Select 等)会 portal 到抽屉外;交互源自这些弹出层时
+          // 不要把它当成「点击外部」而关闭抽屉。注意:Radix 的 onInteractOutside 里
+          // e.target 是层节点本身,真正被点的元素在 e.detail.originalEvent.target。
+          onInteractOutside={(e) => {
+            const t = e.detail.originalEvent.target as Element | null;
+            if (t?.closest?.("[data-radix-popper-content-wrapper],[data-radix-select-content],[role='listbox']")) {
+              e.preventDefault();
+            }
+          }}
         >
           {editing && (
             <>

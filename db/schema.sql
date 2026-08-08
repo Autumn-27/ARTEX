@@ -269,10 +269,17 @@ CREATE TABLE IF NOT EXISTS agents (
     wrapup_max_turns  INTEGER NOT NULL DEFAULT 0,
     task_timeout_wrapup_prompt    TEXT NOT NULL DEFAULT '',
     task_timeout_wrapup_max_turns INTEGER NOT NULL DEFAULT 0,
+    trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial'  CHECK (trigger_run_mode IN ('serial','parallel')),
+    trigger_merge_mode   TEXT    NOT NULL DEFAULT 'by_task' CHECK (trigger_merge_mode IN ('by_task','all','none')),
+    trigger_max_parallel INTEGER NOT NULL DEFAULT 5,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant'))
 );
+-- 加列迁移(已发版,旧库升级补列;新库 CREATE 已含。迁移不带 CHECK:旧库存量安全 + 后端写入白名单兜底)。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NULL DEFAULT 'by_task';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

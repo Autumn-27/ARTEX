@@ -304,6 +304,10 @@ type AgentDTO struct {
 	RunSecs          int    `json:"run_seconds"`
 	WebSearch        bool   `json:"web_search"`
 	InteractiveShell bool   `json:"interactive_shell"`
+	// P3 触发后处理策略(仅自定义 agent 有意义)。
+	TriggerRunMode     string `json:"trigger_run_mode"`
+	TriggerMergeMode   string `json:"trigger_merge_mode"`
+	TriggerMaxParallel int    `json:"trigger_max_parallel"`
 	// binding counts (populated only by the list endpoint) — shown on agent cards.
 	McpCount   int `json:"mcp_count"`
 	SkillCount int `json:"skill_count"`
@@ -312,17 +316,20 @@ type AgentDTO struct {
 
 func agentDTO(a *db.Agent) AgentDTO {
 	return AgentDTO{
-		ID:               i64s(a.ID),
-		Key:              a.Key,
-		Name:             a.Name,
-		Description:      a.Description,
-		Role:             a.Role,
-		Builtin:          a.Builtin,
-		Enabled:          a.Enabled,
-		MaxTurns:         a.MaxTurns,
-		RunSecs:          a.RunSecs,
-		WebSearch:        a.WebSearch,
-		InteractiveShell: a.InteractiveShell,
+		ID:                 i64s(a.ID),
+		Key:                a.Key,
+		Name:               a.Name,
+		Description:        a.Description,
+		Role:               a.Role,
+		Builtin:            a.Builtin,
+		Enabled:            a.Enabled,
+		MaxTurns:           a.MaxTurns,
+		RunSecs:            a.RunSecs,
+		WebSearch:          a.WebSearch,
+		InteractiveShell:   a.InteractiveShell,
+		TriggerRunMode:     a.TriggerRunMode,
+		TriggerMergeMode:   a.TriggerMergeMode,
+		TriggerMaxParallel: a.TriggerMaxParallel,
 	}
 }
 

@@ -132,13 +132,20 @@ type Agent struct {
 	// 任务级超时收尾词(与 per-run 两套;仅 worker/planner 用);空/0=用代码内置默认。
 	TaskTimeoutWrapupPrompt   string `json:"task_timeout_wrapup_prompt"`
 	TaskTimeoutWrapupMaxTurns int    `json:"task_timeout_wrapup_max_turns"`
+	// P3 触发后处理策略(仅自定义 agent 有意义):
+	// TriggerRunMode  serial|parallel — 串行排队 / 每次触发各自并发一个会话
+	// TriggerMergeMode by_task|all|none — 仅 serial 用:同任务合并 / 全部合并 / 不合并
+	// TriggerMaxParallel — 仅 parallel 用的每 agent 并发上限;0=不限
+	TriggerRunMode     string `json:"trigger_run_mode"`
+	TriggerMergeMode   string `json:"trigger_merge_mode"`
+	TriggerMaxParallel int    `json:"trigger_max_parallel"`
 }
 
-const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0)`
+const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'by_task'),COALESCE(trigger_max_parallel,5)`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
-	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns)
+	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel)
 	return &a, err
 }
 
@@ -297,6 +304,28 @@ func (d *DB) SetAgentRunSeconds(key string, runSecs int) error {
 		runSecs = 0
 	}
 	_, err := d.Exec(`UPDATE agents SET run_seconds=$1 WHERE key=$2`, runSecs, key)
+	return err
+}
+
+// SetAgentTriggerBehavior stores an agent's P3 trigger post-processing策略:
+// runMode(serial|parallel) / mergeMode(by_task|all|none) / maxParallel(parallel 用,0=不限)。
+// 枚举做白名单校验,非法值回落默认,避免脏数据把调度 pump 带偏。
+func (d *DB) SetAgentTriggerBehavior(key, runMode, mergeMode string, maxParallel int) error {
+	switch runMode {
+	case "serial", "parallel":
+	default:
+		runMode = "serial"
+	}
+	switch mergeMode {
+	case "by_task", "all", "none":
+	default:
+		mergeMode = "by_task"
+	}
+	if maxParallel < 0 {
+		maxParallel = 0
+	}
+	_, err := d.Exec(`UPDATE agents SET trigger_run_mode=$1, trigger_merge_mode=$2, trigger_max_parallel=$3 WHERE key=$4`,
+		runMode, mergeMode, maxParallel, key)
 	return err
 }
 

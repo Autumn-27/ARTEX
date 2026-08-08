@@ -20,9 +20,9 @@ import (
 	"text/template/parse"
 	"time"
 
-	"github.com/Autumn-27/norma/skill"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/skill"
 )
 
 // reSkillName is the base character-set pattern; validSkillName enforces
@@ -212,24 +212,32 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// run_seconds is optional (pointer) so omitting it leaves the stored value
-	// untouched rather than resetting it to 0/unlimited.
+	// All fields optional (pointers) so a partial patch (e.g. the triggers tab sending
+	// only trigger_* fields) leaves the untouched settings alone instead of resetting
+	// max_turns/run_seconds to 0.
 	var req struct {
-		MaxTurns         int   `json:"max_turns"`
+		MaxTurns         *int  `json:"max_turns"`
 		RunSeconds       *int  `json:"run_seconds"`
 		WebSearch        *bool `json:"web_search"`
 		InteractiveShell *bool `json:"interactive_shell"`
+		// P3 触发后处理策略(三者一起可选,提供任一即整体写入;未提供则不动)。
+		TriggerRunMode     *string `json:"trigger_run_mode"`
+		TriggerMergeMode   *string `json:"trigger_merge_mode"`
+		TriggerMaxParallel *int    `json:"trigger_max_parallel"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if req.MaxTurns < 0 {
-		req.MaxTurns = 0
-	}
-	if err := pg.SetAgentMaxTurns(a.Key, req.MaxTurns); err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	if req.MaxTurns != nil {
+		mt := *req.MaxTurns
+		if mt < 0 {
+			mt = 0
+		}
+		if err := pg.SetAgentMaxTurns(a.Key, mt); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.RunSeconds != nil {
 		rs := *req.RunSeconds
@@ -253,6 +261,24 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// P3 触发策略:三者作为一组写入(SetAgentTriggerBehavior 一次写三列),缺的字段用
+	// 当前存量值回填,避免只传一个把另两个覆盖成默认。
+	if req.TriggerRunMode != nil || req.TriggerMergeMode != nil || req.TriggerMaxParallel != nil {
+		runMode, mergeMode, maxPar := a.TriggerRunMode, a.TriggerMergeMode, a.TriggerMaxParallel
+		if req.TriggerRunMode != nil {
+			runMode = *req.TriggerRunMode
+		}
+		if req.TriggerMergeMode != nil {
+			mergeMode = *req.TriggerMergeMode
+		}
+		if req.TriggerMaxParallel != nil {
+			maxPar = *req.TriggerMaxParallel
+		}
+		if err := pg.SetAgentTriggerBehavior(a.Key, runMode, mergeMode, maxPar); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	// rebuild the live agents so the new max_turns/run_seconds apply without a restart.
 	s.cfgMu.Lock()
 	cfg, on := s.llmCfg, s.llmOn
@@ -260,7 +286,10 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if on {
 		_ = s.applyLLM(cfg)
 	}
-	resp := map[string]any{"ok": true, "max_turns": req.MaxTurns}
+	resp := map[string]any{"ok": true}
+	if req.MaxTurns != nil {
+		resp["max_turns"] = *req.MaxTurns
+	}
 	if req.RunSeconds != nil {
 		resp["run_seconds"] = *req.RunSeconds
 	}
@@ -1544,7 +1573,7 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 // the OpenAI path, it falls back to the OpenAI endpoint at the stripped root.
 func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider  string `json:"provider"`  // "openai" | "anthropic"
+		Provider  string `json:"provider"` // "openai" | "anthropic"
 		BaseURL   string `json:"base_url"`
 		APIKey    string `json:"api_key"`
 		Proxy     string `json:"proxy"`

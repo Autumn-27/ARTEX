@@ -17,14 +17,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/memory"
-	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
+	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/memory"
+	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
@@ -42,7 +42,7 @@ type Server struct {
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	llmCfg    agent.Config     // current LLM config (key not exposed)
 	llmOn     bool
-	llmProf   string           // active LLM profile name (for llmrec tagging)
+	llmProf   string // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -57,15 +57,18 @@ type Server struct {
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
 	chatCancel map[string]context.CancelFunc
 
-	// triggerQ serializes P3 trigger fires PER AGENT: multiple fires for the same
-	// custom agent queue up (FIFO) and run one at a time — the next conversation
-	// only starts after the previous one finishes. triggerRun marks that a drain
-	// goroutine is already active for that agent key so we don't spawn two. Distinct
-	// agents still run concurrently. Queue is in-memory (matches chatBusy); a restart
-	// drops pending fires — the scheduler re-fires on its next tick from watermarks.
-	queueMu    sync.Mutex
-	triggerQ   map[string][]triggeredRun
-	triggerRun map[string]bool
+	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
+	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
+	// merge); parallel → limit = trigger_max_parallel (0=∞), no merge. triggerActive
+	// counts in-flight runs per agent (replaces a boolean drain flag); a run's
+	// completion decrements it and re-pumps to fill the freed slot. triggerCfg caches
+	// the agent's last-read策略 so the pump never queries the DB while holding queueMu.
+	// Distinct agents always run concurrently. Queue is in-memory (matches chatBusy); a
+	// restart drops pending fires — the scheduler re-fires from watermarks next tick.
+	queueMu       sync.Mutex
+	triggerQ      map[string][]triggeredRun
+	triggerActive map[string]int
+	triggerCfg    map[string]triggerBehavior
 
 	// profAgents caches the dedicated planner/worker built for a specific (non-active)
 	// LLM profile, keyed by profile id, so tasks pinned to that profile share one
@@ -100,7 +103,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string) *Serv
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
-		chatCancel: map[string]context.CancelFunc{}, triggerQ: map[string][]triggeredRun{}, triggerRun: map[string]bool{},
+		chatCancel: map[string]context.CancelFunc{}, triggerQ: map[string][]triggeredRun{},
+		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{}}
 	// per-task LLM: a task pinned to a specific profile runs on that profile's
 	// dedicated planner/worker; unpinned tasks fall back to the global active pair.
@@ -157,11 +161,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string) *Serv
 		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
-		wireTools(m.pg, domainReg)                      // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
-		seedPrompts(m.pg)                               // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		s.seedOrchestrationTools()                      // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
-		s.seedPythonInterpreter()                       // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		go newScheduler(s).Run(s.ctx)                   // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		wireTools(m.pg, domainReg)    // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
+		seedPrompts(m.pg)             // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		s.seedOrchestrationTools()    // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
+		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
@@ -721,8 +725,8 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		active = t.ID
 	}
 	list := s.m.List()
-	toks, _ := s.m.PG().TokenTotalsAll()     // whole-task token totals, one query for all tasks
-	lastAct, _ := s.m.PG().LastActivityAll() // persisted last-activity per task, one query
+	toks, _ := s.m.PG().TokenTotalsAll()      // whole-task token totals, one query for all tasks
+	lastAct, _ := s.m.PG().LastActivityAll()  // persisted last-activity per task, one query
 	goalCounts, _ := s.m.PG().GoalCountsAll() // goal progress per exploration, one query
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
@@ -1080,8 +1084,6 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, t)
 }
 
-
-
 func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
@@ -1402,7 +1404,6 @@ func (s *Server) activityDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"detail": d})
 }
 
-
 func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 	tr := s.m.Traffic()
 	if tr == nil {
@@ -1457,15 +1458,15 @@ func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	return map[string]any{
-		"traffic_capture":     s.m.TrafficEnabled(),
-		"llm_record":          s.m.LLMRecordEnabled(),
-		"web_search_enabled":  on,
-		"web_search_backend":  backend,
-		"brave_key_set":       strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":      strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":    proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"python_interpreter":  strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":             s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"traffic_capture":    s.m.TrafficEnabled(),
+		"llm_record":         s.m.LLMRecordEnabled(),
+		"web_search_enabled": on,
+		"web_search_backend": backend,
+		"brave_key_set":      strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":     strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":   proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"python_interpreter": strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":            s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 	}
 }
 

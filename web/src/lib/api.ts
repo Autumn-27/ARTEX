@@ -315,8 +315,18 @@ export const api = {
   updateTrigger: (id: number, t: Omit<AgentTrigger, "id" | "agent_key" | "last_fire">) =>
     patch<{ ok: boolean }>(`/triggers/${id}`, t),
   deleteTrigger: (id: number) => del<{ deleted: number }>(`/triggers/${id}`),
-  saveAgentConfig: (key: string, patch: { max_turns: number; run_seconds?: number; web_search?: boolean; interactive_shell?: boolean }) =>
-    put<{ ok: boolean }>(`/agents/${key}/config`, patch),
+  saveAgentConfig: (
+    key: string,
+    patch: {
+      max_turns?: number;
+      run_seconds?: number;
+      web_search?: boolean;
+      interactive_shell?: boolean;
+      trigger_run_mode?: "serial" | "parallel";
+      trigger_merge_mode?: "by_task" | "all" | "none";
+      trigger_max_parallel?: number;
+    },
+  ) => put<{ ok: boolean }>(`/agents/${key}/config`, patch),
   agentPromptVersions: (key: string) => get<{ versions: PromptVersion[] }>(`/agents/${key}/prompts`).then((r) => arr(r.versions)),
   agentVariables: (key: string) => get<{ variables: PromptVar[] }>(`/agents/${key}/variables`).then((r) => arr(r.variables)),
   previewAgentPrompt: (key: string, template: string, sample?: Record<string, string>) =>

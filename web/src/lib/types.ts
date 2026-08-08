@@ -387,6 +387,10 @@ export interface Agent {
   run_seconds?: number; // worker 单次运行墙钟上限(秒)；0 = 无限制
   web_search?: boolean; // 是否启用网络搜索(受系统全局开关门控)
   interactive_shell?: boolean; // 是否启用交互式 shell(持久 PTY 会话工具族)
+  // P3 触发后处理策略(仅自定义 agent 有意义)
+  trigger_run_mode?: "serial" | "parallel"; // 串行排队 / 每次触发各自并发一个会话
+  trigger_merge_mode?: "by_task" | "all" | "none"; // 仅 serial：同任务合并 / 全部合并 / 不合并
+  trigger_max_parallel?: number; // 仅 parallel：每 agent 并发上限；0=不限
   // 绑定数量(仅列表接口返回)：可见 MCP / 可见 Skill / 绑定工具
   mcp_count?: number;
   skill_count?: number;

@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -24,7 +25,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVersion, Settings, SkillItem, Tool } from "@/lib/types";
+import type { Agent, AgentDetail, AgentTrigger, MCPServer, PromptVar, PromptVersion, Settings, SkillItem, Tool } from "@/lib/types";
 
 // Traffic tools are host tools gated by the global 流量捕获 switch: bindable, but
 // only usable when capture is on. Keep this list in sync with traffic.SeedToolMetas.
@@ -626,7 +627,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       {/* 触发(P3, 仅自定义 agent) */}
       {isCustom && (
         <TabsContent value="triggers" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-          <AgentTriggersTab agentKey={agentKey} />
+          <AgentTriggersTab agentKey={agentKey} agent={detail?.agent} />
         </TabsContent>
       )}
     </Tabs>
@@ -690,9 +691,30 @@ function DiffView({ oldText, newText }: { oldText: string; newText: string }) {
 // AgentTriggersTab manages a custom agent's P3 triggers: list + add + delete.
 // Each trigger fires (定时/发现finding/目标达成/任务超时/工具调用，可多选) → a new conversation runs
 // in parallel with the base user message + auto context appended by the backend.
-function AgentTriggersTab({ agentKey }: { agentKey: string }) {
+function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent }) {
   const [triggers, setTriggers] = React.useState<AgentTrigger[]>([]);
   const [tools, setTools] = React.useState<Tool[]>([]);
+  // 触发后处理策略(每 agent);初值来自 agent detail,改动即保存。
+  const [runMode, setRunMode] = React.useState<"serial" | "parallel">(agent?.trigger_run_mode ?? "serial");
+  const [mergeMode, setMergeMode] = React.useState<"by_task" | "all" | "none">(agent?.trigger_merge_mode ?? "by_task");
+  const [maxParallel, setMaxParallel] = React.useState(String(agent?.trigger_max_parallel ?? 5));
+  React.useEffect(() => {
+    setRunMode(agent?.trigger_run_mode ?? "serial");
+    setMergeMode(agent?.trigger_merge_mode ?? "by_task");
+    setMaxParallel(String(agent?.trigger_max_parallel ?? 5));
+  }, [agent?.trigger_run_mode, agent?.trigger_merge_mode, agent?.trigger_max_parallel]);
+
+  async function saveBehavior(patch: {
+    trigger_run_mode?: "serial" | "parallel";
+    trigger_merge_mode?: "by_task" | "all" | "none";
+    trigger_max_parallel?: number;
+  }) {
+    try {
+      await api.saveAgentConfig(agentKey, patch);
+    } catch (e) {
+      toast.error("保存策略失败：" + (e as Error).message);
+    }
+  }
   const [onInterval, setOnInterval] = React.useState(false);
   const [intervalSec, setIntervalSec] = React.useState("60");
   const [onFinding, setOnFinding] = React.useState(false);
@@ -810,9 +832,85 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
   return (
     <div className="grid gap-4">
       <p className="text-muted-foreground text-xs">
-        触发器让这个自定义 Agent 自动运行：每次触发都<b>新建一个会话并行运行</b>（在「对话」页可见）。
+        触发器让这个自定义 Agent 自动运行：每次触发都<b>新建一个会话运行</b>（在「对话」页可见）。
         可多选触发条件；系统会把「本次为何触发 + 相关任务/finding/目标」自动附加到你写的基础消息后面。
       </p>
+
+      {/* 触发后处理策略 */}
+      <div className="grid gap-3 rounded-md border p-3">
+        <Label className="text-muted-foreground text-xs">触发后处理策略（决定触发如何排队/合并运行）</Label>
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="grid gap-1">
+            <Label className="text-xs">运行模式</Label>
+            <Select
+              value={runMode}
+              onValueChange={(v) => {
+                const rm = v as "serial" | "parallel";
+                setRunMode(rm);
+                saveBehavior({ trigger_run_mode: rm });
+              }}
+            >
+              <SelectTrigger size="sm" className="h-8 w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="serial">串行（排队，一次一个）</SelectItem>
+                <SelectItem value="parallel">并行（各自并发会话）</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid gap-1">
+            <Label className="text-xs">合并模式</Label>
+            <Select
+              value={mergeMode}
+              disabled={runMode === "parallel"}
+              onValueChange={(v) => {
+                const mm = v as "by_task" | "all" | "none";
+                setMergeMode(mm);
+                saveBehavior({ trigger_merge_mode: mm });
+              }}
+            >
+              <SelectTrigger size="sm" className="h-8 w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="by_task">按任务合并</SelectItem>
+                <SelectItem value="all">全部合并成一条</SelectItem>
+                <SelectItem value="none">不合并</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {runMode === "parallel" && (
+            <div className="grid gap-1">
+              <Label htmlFor="tr-maxpar" className="text-xs">最大并发（0=不限）</Label>
+              <Input
+                id="tr-maxpar"
+                type="number"
+                min={0}
+                className="h-8 w-28"
+                value={maxParallel}
+                onChange={(e) => setMaxParallel(e.target.value)}
+                onBlur={() => {
+                  const n = Math.max(0, Math.floor(Number(maxParallel) || 0));
+                  setMaxParallel(String(n));
+                  saveBehavior({ trigger_max_parallel: n });
+                }}
+              />
+            </div>
+          )}
+        </div>
+        <p className="text-muted-foreground text-xs">
+          {runMode === "parallel"
+            ? "并行：每次触发立即各开一个会话并发运行，不合并；超过最大并发的触发排队等空位。"
+            : mergeMode === "by_task"
+              ? "串行·按任务合并：同 agent 一次跑一个；排队中同一任务的事件触发合并成一条会话。"
+              : mergeMode === "all"
+                ? "串行·全部合并：同 agent 一次跑一个；取队列时把当前排队的所有触发合并成一条会话。"
+                : "串行·不合并：同 agent 一次跑一个；每条触发各自一个会话。"}
+        </p>
+      </div>
 
       {/* 新增触发器 */}
       <div className="grid gap-3 rounded-md border p-3">

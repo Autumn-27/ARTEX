@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -351,51 +352,111 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	_ = pg.TouchConversation(c.ID)
 }
 
-// StartTriggeredRun enqueues a P3 trigger fire for agentKey. Fires for the SAME
-// agent queue up and run one at a time (FIFO) — the next only starts after the
-// previous conversation finishes. Distinct agents still run concurrently. taskID +
-// mergeable let the drainer coalesce same-task event triggers before a run starts.
+// triggerBehavior is an agent's cached P3 trigger post-processing策略 (see the
+// agents table trigger_* columns). Read once per fire in StartTriggeredRun so the
+// pump never touches the DB while holding queueMu.
+type triggerBehavior struct {
+	runMode     string // serial | parallel
+	mergeMode   string // by_task | all | none (serial 用;parallel 忽略,每条各自一个会话)
+	maxParallel int    // parallel 用的每 agent 并发上限;<=0=不限
+}
+
+// readTriggerBehavior loads an agent's策略, falling back to safe defaults
+// (serial / by_task / 5) on any error or unknown enum value.
+func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
+	b := triggerBehavior{runMode: "serial", mergeMode: "by_task", maxParallel: 5}
+	if s.m.pg == nil {
+		return b
+	}
+	a, err := s.m.pg.GetAgentByKey(agentKey)
+	if err != nil || a == nil {
+		return b
+	}
+	if a.TriggerRunMode == "parallel" {
+		b.runMode = "parallel"
+	}
+	switch a.TriggerMergeMode {
+	case "by_task", "all", "none":
+		b.mergeMode = a.TriggerMergeMode
+	}
+	b.maxParallel = a.TriggerMaxParallel
+	return b
+}
+
+// StartTriggeredRun enqueues a P3 trigger fire for agentKey and pumps the queue. The
+// agent's策略 decides concurrency + merge: serial → run one at a time (optionally
+// merging by task / all / none); parallel → run each fire in its own concurrent
+// conversation up to trigger_max_parallel. Distinct agents always run concurrently.
 func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool) {
 	if s.m.pg == nil || s.chatAgentRef() == nil {
 		return
 	}
+	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
+	s.triggerCfg[agentKey] = cfg
 	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, mergeable: mergeable})
-	depth := len(s.triggerQ[agentKey])
-	if !s.triggerRun[agentKey] {
-		s.triggerRun[agentKey] = true
-		go s.drainTriggerQueue(agentKey)
+	s.pumpLocked(agentKey)
+	s.queueMu.Unlock()
+}
+
+// pumpLocked launches queued fires for one agent up to its concurrency limit, then
+// returns. Serial → limit 1; parallel → limit = maxParallel (<=0 → unlimited). Each
+// launched run re-pumps on completion (runAndPump) to fill the freed slot. Caller
+// holds queueMu.
+func (s *Server) pumpLocked(agentKey string) {
+	if s.ctx.Err() != nil {
+		return
+	}
+	cfg := s.triggerCfg[agentKey]
+	limit := 1
+	if cfg.runMode == "parallel" {
+		if cfg.maxParallel <= 0 {
+			limit = math.MaxInt
+		} else {
+			limit = cfg.maxParallel
+		}
+	}
+	for s.triggerActive[agentKey] < limit && len(s.triggerQ[agentKey]) > 0 {
+		item := s.nextTriggerRun(agentKey, cfg)
+		s.triggerActive[agentKey]++
+		go s.runAndPump(agentKey, item)
+	}
+}
+
+// runAndPump runs one fire to completion, then decrements the active counter and
+// re-pumps to fill the freed slot (cleaning up the agent's maps when fully idle).
+func (s *Server) runAndPump(agentKey string, item triggeredRun) {
+	s.runTriggeredRun(item)
+	s.queueMu.Lock()
+	s.triggerActive[agentKey]--
+	if s.triggerActive[agentKey] <= 0 && len(s.triggerQ[agentKey]) == 0 {
+		delete(s.triggerActive, agentKey)
+		delete(s.triggerQ, agentKey)
+		delete(s.triggerCfg, agentKey)
 	} else {
-		log.Printf("[trigger] %s busy → queued (depth %d)", agentKey, depth)
+		s.pumpLocked(agentKey)
 	}
 	s.queueMu.Unlock()
 }
 
-// drainTriggerQueue runs one agent's queued trigger fires serially until the queue
-// empties, then clears the active flag. Before each run it coalesces all queued
-// finding/goal fires from the SAME task into one conversation (nextTriggerRun), so a
-// burst of a task's events becomes a single session. A panic is contained.
-func (s *Server) drainTriggerQueue(agentKey string) {
-	for {
-		s.queueMu.Lock()
-		if len(s.triggerQ[agentKey]) == 0 || s.ctx.Err() != nil {
-			delete(s.triggerQ, agentKey)
-			delete(s.triggerRun, agentKey)
-			s.queueMu.Unlock()
-			return
-		}
-		item := s.nextTriggerRun(agentKey)
-		s.queueMu.Unlock()
-
-		s.runTriggeredRun(item)
-	}
-}
-
-// nextTriggerRun pops the head of the agent's queue; if the head is a mergeable
-// (finding/goal) fire, it also pulls every other queued mergeable fire from the SAME
-// task and merges them into one run. Caller holds queueMu.
-func (s *Server) nextTriggerRun(agentKey string) triggeredRun {
+// nextTriggerRun pops the next run from the agent's queue per the merge mode:
+//
+//	parallel / none → one head item, no merge
+//	by_task         → head + all queued same-task mergeable fires merged into one
+//	all             → the ENTIRE queue merged into one run (regardless of task/type)
+//
+// Caller holds queueMu.
+func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredRun {
 	q := s.triggerQ[agentKey]
+	if cfg.runMode == "parallel" || cfg.mergeMode == "none" {
+		s.triggerQ[agentKey] = q[1:]
+		return q[0]
+	}
+	if cfg.mergeMode == "all" {
+		s.triggerQ[agentKey] = q[:0:0]
+		return mergeAllRuns(q)
+	}
+	// by_task: head + same-task mergeable fires.
 	head := q[0]
 	if !head.mergeable || head.taskID == 0 {
 		s.triggerQ[agentKey] = q[1:]
@@ -429,6 +490,27 @@ func mergeTriggeredRuns(items []triggeredRun) triggeredRun {
 	return triggeredRun{
 		agentKey:  first.agentKey,
 		title:     fmt.Sprintf("合并触发 · task#%d · %d 条", first.taskID, len(items)),
+		message:   b.String(),
+		taskID:    first.taskID,
+		mergeable: true,
+	}
+}
+
+// mergeAllRuns folds the ENTIRE queued burst into one run (merge_mode='all'),
+// regardless of task or type — a header plus each fire's message.
+func mergeAllRuns(items []triggeredRun) triggeredRun {
+	if len(items) == 1 {
+		return items[0]
+	}
+	first := items[0]
+	var b strings.Builder
+	fmt.Fprintf(&b, "【本会话合并了队列中的 %d 条触发事件（不区分任务），请一并处理】\n", len(items))
+	for i, it := range items {
+		fmt.Fprintf(&b, "\n── 触发 %d（task#%d）──\n%s\n", i+1, it.taskID, it.message)
+	}
+	return triggeredRun{
+		agentKey:  first.agentKey,
+		title:     fmt.Sprintf("合并触发 · 全部 · %d 条", len(items)),
 		message:   b.String(),
 		taskID:    first.taskID,
 		mergeable: true,
