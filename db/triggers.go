@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
-// AgentTrigger is one P3 trigger attached to a custom agent. Four trigger
-// conditions can be on at once: interval / on_finding / on_goal_met / on_task_timeout.
+// AgentTrigger is one P3 trigger attached to a custom agent. Five trigger
+// conditions can be on at once: interval / on_finding / on_goal_met /
+// on_task_timeout / on_tool_call. ToolNames scopes the tool-call trigger to a
+// non-empty set of tool keys (empty is rejected at the API layer for on_tool_call).
 type AgentTrigger struct {
 	ID                 int64      `json:"id"`
 	AgentKey           string     `json:"agent_key"`
@@ -16,21 +18,42 @@ type AgentTrigger struct {
 	OnFinding          bool       `json:"on_finding"`
 	OnGoalMet          bool       `json:"on_goal_met"`
 	OnTaskTimeout      bool       `json:"on_task_timeout"`
+	OnToolCall         bool       `json:"on_tool_call"`
 	IntervalMessage    string     `json:"interval_message"` // 各触发条件的独立用户消息
 	FindingMessage     string     `json:"finding_message"`
 	GoalMessage        string     `json:"goal_message"`
 	TaskTimeoutMessage string     `json:"task_timeout_message"`
+	ToolCallMessage    string     `json:"tool_call_message"`
+	ToolNames          []string   `json:"tool_names"` // 选中的工具 key 列表(DB 存 JSON 文本)
 	LastFire           *time.Time `json:"last_fire,omitempty"`
 }
 
-const triggerCols = `id, agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, interval_message, finding_message, goal_message, task_timeout_message, last_fire`
+const triggerCols = `id, agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, on_tool_call, interval_message, finding_message, goal_message, task_timeout_message, tool_call_message, tool_names, last_fire`
+
+// marshalToolNames encodes the tool-key list as JSON text for the tool_names column.
+// A nil/empty list stores "" (not "null"/"[]") so the column default stays clean.
+func marshalToolNames(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
 
 func scanTrigger(sc interface{ Scan(...any) error }) (*AgentTrigger, error) {
 	var t AgentTrigger
 	var lf sql.NullTime
-	if err := sc.Scan(&t.ID, &t.AgentKey, &t.Enabled, &t.IntervalSec, &t.OnFinding, &t.OnGoalMet, &t.OnTaskTimeout,
-		&t.IntervalMessage, &t.FindingMessage, &t.GoalMessage, &t.TaskTimeoutMessage, &lf); err != nil {
+	var toolNames string
+	if err := sc.Scan(&t.ID, &t.AgentKey, &t.Enabled, &t.IntervalSec, &t.OnFinding, &t.OnGoalMet, &t.OnTaskTimeout, &t.OnToolCall,
+		&t.IntervalMessage, &t.FindingMessage, &t.GoalMessage, &t.TaskTimeoutMessage, &t.ToolCallMessage, &toolNames, &lf); err != nil {
 		return nil, err
+	}
+	t.ToolNames = []string{}
+	if toolNames != "" {
+		_ = json.Unmarshal([]byte(toolNames), &t.ToolNames)
 	}
 	if lf.Valid {
 		t.LastFire = &lf.Time
@@ -41,18 +64,18 @@ func scanTrigger(sc interface{ Scan(...any) error }) (*AgentTrigger, error) {
 // CreateTrigger inserts a trigger for agentKey and returns it.
 func (d *DB) CreateTrigger(t *AgentTrigger) (*AgentTrigger, error) {
 	row := d.QueryRow(`
-INSERT INTO agent_triggers(agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, interval_message, finding_message, goal_message, task_timeout_message)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING `+triggerCols,
-		t.AgentKey, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout,
-		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage)
+INSERT INTO agent_triggers(agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, on_tool_call, interval_message, finding_message, goal_message, task_timeout_message, tool_call_message, tool_names)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING `+triggerCols,
+		t.AgentKey, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall,
+		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, marshalToolNames(t.ToolNames))
 	return scanTrigger(row)
 }
 
 // UpdateTrigger updates a trigger's fields (not last_fire).
 func (d *DB) UpdateTrigger(t *AgentTrigger) error {
-	_, err := d.Exec(`UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, interval_message=$7, finding_message=$8, goal_message=$9, task_timeout_message=$10 WHERE id=$1`,
-		t.ID, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout,
-		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage)
+	_, err := d.Exec(`UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, on_tool_call=$7, interval_message=$8, finding_message=$9, goal_message=$10, task_timeout_message=$11, tool_call_message=$12, tool_names=$13 WHERE id=$1`,
+		t.ID, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall,
+		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, marshalToolNames(t.ToolNames))
 	return err
 }
 
@@ -123,13 +146,17 @@ ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, key, value)
 // TaskEvent is a finding/goal event carrying the owning task's info, used to
 // compose the trigger message context.
 type TaskEvent struct {
-	NodeID    int64  `json:"node_id"`
-	TaskID    int64  `json:"task_id"`
-	TaskDesc  string `json:"task_description"`
-	TaskGoal  string `json:"task_goal"`
-	Summary   string `json:"summary"`   // finding summary / goal text
-	VulnClass string `json:"vulnclass"` // finding only
-	Severity  string `json:"severity"`  // finding only
+	NodeID     int64  `json:"node_id"`
+	TaskID     int64  `json:"task_id"`
+	TaskDesc   string `json:"task_description"`
+	TaskGoal   string `json:"task_goal"`
+	Summary    string `json:"summary"`     // finding summary / goal text
+	VulnClass  string `json:"vulnclass"`   // finding only
+	Severity   string `json:"severity"`    // finding only
+	Tool       string `json:"tool"`        // tool-call only: tool name
+	ToolInput  string `json:"tool_input"`  // tool-call only: 入参(JSON 文本)
+	ToolOutput string `json:"tool_output"` // tool-call only: 返回内容
+	ToolIsErr  bool   `json:"tool_is_err"` // tool-call only: 工具返回是否为错误
 }
 
 // NewFindingsSince returns findings with node id > lastID across all live tasks,
@@ -178,6 +205,35 @@ ORDER BY id`, lastID)
 		}
 		e.TaskID = e.NodeID // task id doubles as NodeID for the watermark
 		e.Summary = e.TaskGoal
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// NewToolCallsSince returns completed tool calls (a tool_result row) with activity
+// id > lastID across all live tasks, ordered by id (monotonic watermark → no
+// double-fire). It is driven by tool_result rows (the tool finished, so both input
+// and output are available) and joins back to the paired tool_use row for the input.
+// Only task-execution activity is scanned — triggered agent runs are conversations
+// (conversation_activities), so a tool-call trigger never fires on its own output.
+func (d *DB) NewToolCallsSince(lastID int64) ([]TaskEvent, error) {
+	rows, err := d.Query(`
+SELECT r.id, t.id, t.description, t.goal, r.tool, COALESCE(u.detail,''), COALESCE(r.detail,''), r.is_error
+FROM activity r
+JOIN tasks t ON t.exploration_id = r.exploration_id
+LEFT JOIN activity u ON u.exploration_id = r.exploration_id AND u.tool_use_id = r.tool_use_id AND u.kind='tool_use'
+WHERE r.kind='tool_result' AND r.id > $1 AND r.tool <> '' AND t.deleted_at IS NULL
+ORDER BY r.id`, lastID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TaskEvent{}
+	for rows.Next() {
+		var e TaskEvent
+		if err := rows.Scan(&e.NodeID, &e.TaskID, &e.TaskDesc, &e.TaskGoal, &e.Tool, &e.ToolInput, &e.ToolOutput, &e.ToolIsErr); err != nil {
+			return nil, err
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()

@@ -688,18 +688,23 @@ function DiffView({ oldText, newText }: { oldText: string; newText: string }) {
 }
 
 // AgentTriggersTab manages a custom agent's P3 triggers: list + add + delete.
-// Each trigger fires (定时/发现finding/目标达成，可多选) → a new conversation runs
+// Each trigger fires (定时/发现finding/目标达成/任务超时/工具调用，可多选) → a new conversation runs
 // in parallel with the base user message + auto context appended by the backend.
 function AgentTriggersTab({ agentKey }: { agentKey: string }) {
   const [triggers, setTriggers] = React.useState<AgentTrigger[]>([]);
-  const [intervalSec, setIntervalSec] = React.useState("0");
+  const [tools, setTools] = React.useState<Tool[]>([]);
+  const [onInterval, setOnInterval] = React.useState(false);
+  const [intervalSec, setIntervalSec] = React.useState("60");
   const [onFinding, setOnFinding] = React.useState(false);
   const [onGoalMet, setOnGoalMet] = React.useState(false);
   const [onTaskTimeout, setOnTaskTimeout] = React.useState(false);
+  const [onToolCall, setOnToolCall] = React.useState(false);
   const [intervalMsg, setIntervalMsg] = React.useState("");
   const [findingMsg, setFindingMsg] = React.useState("");
   const [goalMsg, setGoalMsg] = React.useState("");
   const [taskTimeoutMsg, setTaskTimeoutMsg] = React.useState("");
+  const [toolCallMsg, setToolCallMsg] = React.useState("");
+  const [toolNames, setToolNames] = React.useState<string[]>([]);
   const [saving, setSaving] = React.useState(false);
 
   const reload = React.useCallback(() => {
@@ -708,11 +713,22 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
   React.useEffect(() => {
     reload();
   }, [reload]);
+  React.useEffect(() => {
+    api.tools().then(setTools).catch(() => setTools([]));
+  }, []);
+
+  function toggleTool(key: string) {
+    setToolNames((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
 
   async function create() {
-    const n = Math.max(0, Math.floor(Number(intervalSec) || 0));
-    if (n === 0 && !onFinding && !onGoalMet && !onTaskTimeout) {
+    const n = onInterval ? Math.max(1, Math.floor(Number(intervalSec) || 0)) : 0;
+    if (n === 0 && !onFinding && !onGoalMet && !onTaskTimeout && !onToolCall) {
       toast.error("至少选择一种触发条件");
+      return;
+    }
+    if (onToolCall && toolNames.length === 0) {
+      toast.error("工具调用触发至少选择一个工具");
       return;
     }
     setSaving(true);
@@ -723,20 +739,27 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
         on_finding: onFinding,
         on_goal_met: onGoalMet,
         on_task_timeout: onTaskTimeout,
+        on_tool_call: onToolCall,
         interval_message: intervalMsg.trim(),
         finding_message: findingMsg.trim(),
         goal_message: goalMsg.trim(),
         task_timeout_message: taskTimeoutMsg.trim(),
+        tool_call_message: toolCallMsg.trim(),
+        tool_names: onToolCall ? toolNames : [],
       });
       toast.success("已添加触发器");
-      setIntervalSec("0");
+      setOnInterval(false);
+      setIntervalSec("60");
       setOnFinding(false);
       setOnGoalMet(false);
       setOnTaskTimeout(false);
+      setOnToolCall(false);
       setIntervalMsg("");
       setFindingMsg("");
       setGoalMsg("");
       setTaskTimeoutMsg("");
+      setToolCallMsg("");
+      setToolNames([]);
       reload();
     } catch (e) {
       toast.error("添加失败：" + (e as Error).message);
@@ -752,10 +775,13 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
         on_finding: t.on_finding,
         on_goal_met: t.on_goal_met,
         on_task_timeout: t.on_task_timeout,
+        on_tool_call: t.on_tool_call,
         interval_message: t.interval_message,
         finding_message: t.finding_message,
         goal_message: t.goal_message,
         task_timeout_message: t.task_timeout_message,
+        tool_call_message: t.tool_call_message,
+        tool_names: t.tool_names,
       });
       reload();
     } catch (e) {
@@ -777,6 +803,7 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
     if (t.on_finding) parts.push("发现 finding");
     if (t.on_goal_met) parts.push("目标达成");
     if (t.on_task_timeout) parts.push("任务超时");
+    if (t.on_tool_call) parts.push(`工具调用(${t.tool_names.length})`);
     return parts.join(" · ") || "（无条件）";
   }
 
@@ -793,15 +820,20 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
 
         {/* 定时 */}
         <div className="grid gap-1.5">
-          <div className="flex items-center gap-2">
-            <Label htmlFor="tr-interval" className="text-xs">定时触发：每</Label>
-            <Input id="tr-interval" type="number" min={0} className="h-8 w-24"
-              value={intervalSec} onChange={(e) => setIntervalSec(e.target.value)} />
-            <span className="text-muted-foreground text-xs">秒（0=关）</span>
-          </div>
-          {Number(intervalSec) > 0 && (
-            <Textarea className="text-xs" rows={2} value={intervalMsg}
-              placeholder="定时触发时发给 agent 的话，如：巡检所有任务" onChange={(e) => setIntervalMsg(e.target.value)} />
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={onInterval} onCheckedChange={(v) => setOnInterval(!!v)} /> 定时触发
+          </label>
+          {onInterval && (
+            <div className="grid gap-1.5">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="tr-interval" className="text-xs">每</Label>
+                <Input id="tr-interval" type="number" min={1} className="h-8 w-24"
+                  value={intervalSec} onChange={(e) => setIntervalSec(e.target.value)} />
+                <span className="text-muted-foreground text-xs">秒</span>
+              </div>
+              <Textarea className="text-xs" rows={2} value={intervalMsg}
+                placeholder="定时触发时发给 agent 的话，如：巡检所有任务" onChange={(e) => setIntervalMsg(e.target.value)} />
+            </div>
           )}
         </div>
 
@@ -838,6 +870,37 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
           )}
         </div>
 
+        {/* 工具调用 */}
+        <div className="grid gap-1.5">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={onToolCall} onCheckedChange={(v) => setOnToolCall(!!v)} /> 工具调用时触发
+          </label>
+          {onToolCall && (
+            <div className="grid gap-1.5">
+              <div className="text-muted-foreground text-xs">
+                选择要监听的工具（至少一个）；任务执行中这些工具每次<b>调用完成</b>都会触发。已选 {toolNames.length} 个。
+              </div>
+              <div className="max-h-40 overflow-y-auto rounded-md border p-2">
+                {tools.length === 0 && <span className="text-muted-foreground text-xs">（工具列表为空）</span>}
+                <div className="grid gap-1">
+                  {tools.map((tool) => (
+                    <label key={tool.key} className="flex items-start gap-2 text-xs">
+                      <Checkbox className="mt-0.5" checked={toolNames.includes(tool.key)}
+                        onCheckedChange={() => toggleTool(tool.key)} />
+                      <span className="min-w-0">
+                        <span className="font-medium">{tool.key}</span>
+                        {tool.description && <span className="text-muted-foreground line-clamp-1"> {tool.description}</span>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <Textarea className="text-xs" rows={2} value={toolCallMsg}
+                placeholder="工具被调用时发给 agent 的话（系统会附带任务信息、工具入参与返回内容）" onChange={(e) => setToolCallMsg(e.target.value)} />
+            </div>
+          )}
+        </div>
+
         <div>
           <Button size="sm" onClick={create} disabled={saving}>
             <SaveIcon /> 添加触发器
@@ -864,6 +927,12 @@ function AgentTriggersTab({ agentKey }: { agentKey: string }) {
                 {t.on_finding && t.finding_message && <div className="line-clamp-1">finding：{t.finding_message}</div>}
                 {t.on_goal_met && t.goal_message && <div className="line-clamp-1">目标：{t.goal_message}</div>}
                 {t.on_task_timeout && t.task_timeout_message && <div className="line-clamp-1">超时：{t.task_timeout_message}</div>}
+                {t.on_tool_call && (
+                  <>
+                    <div className="line-clamp-1">工具：{t.tool_names.join("、") || "（未选）"}</div>
+                    {t.tool_call_message && <div className="line-clamp-1">消息：{t.tool_call_message}</div>}
+                  </>
+                )}
               </div>
             </div>
             <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-destructive"

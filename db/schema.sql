@@ -425,15 +425,22 @@ CREATE TABLE IF NOT EXISTS agent_triggers (
     on_finding                  BOOLEAN NOT NULL DEFAULT false,
     on_goal_met                 BOOLEAN NOT NULL DEFAULT false,
     on_task_timeout             BOOLEAN NOT NULL DEFAULT false,
+    on_tool_call                BOOLEAN NOT NULL DEFAULT false,
     interval_message            TEXT NOT NULL DEFAULT '',
     finding_message             TEXT NOT NULL DEFAULT '',
     goal_message                TEXT NOT NULL DEFAULT '',
     task_timeout_message        TEXT NOT NULL DEFAULT '',
+    tool_call_message           TEXT NOT NULL DEFAULT '',
+    tool_names                  TEXT NOT NULL DEFAULT '',
     last_fire                   TIMESTAMPTZ,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_agent_triggers_agent ON agent_triggers(agent_key);
+-- 加列迁移(已发版,旧库升级补列;新库 CREATE 已含这些列,ALTER 为 no-op)。幂等,每次启动可重复执行。
+ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS on_tool_call      BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS tool_call_message TEXT    NOT NULL DEFAULT '';
+ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS tool_names        TEXT    NOT NULL DEFAULT '';
 DROP TRIGGER IF EXISTS trg_agent_triggers_upd ON agent_triggers;
 CREATE TRIGGER trg_agent_triggers_upd BEFORE UPDATE ON agent_triggers
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
