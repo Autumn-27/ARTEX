@@ -248,6 +248,30 @@ DROP TRIGGER IF EXISTS trg_tasks_upd ON tasks;
 CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- 任务测试范围（资产覆盖度的分母 + 授权边界）。
+--   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围
+--     （root_domain→root_domain，subdomain/service/endpoint→subdomain(host)，ip→ip）；
+--     side-effect 派生的资产不入范围（钩子在 handler 顶层，派生在 db 层内部）。
+--   agent 填(source='agent')：add_task_scope 加 company/root_domain/subdomain/ip。
+-- 覆盖度 = 匹配 active 行的 assets（分母）中，被 fact 节点锚定过的占比（分子）。
+CREATE TABLE IF NOT EXISTS task_scope (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr')),
+    company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
+    domain      TEXT,          -- root_domain / subdomain
+    net         CIDR,          -- ip / cidr
+    source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','agent','manual')),
+    reason      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0));
+CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
+CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
+CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
+
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录
 -- =====================================================================

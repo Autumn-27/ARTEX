@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -271,6 +272,13 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++
 				t.anchorOwner(id)
+				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
+				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
+				svcIP := item.ServiceIP
+				if svcIP == "" {
+					svcIP = item.IP
+				}
+				_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
 			}
 
 			return jsonResult(map[string]any{
@@ -326,6 +334,64 @@ func (t *ToolSet) addCompanyScope() actool.CoreTool {
 			}
 			if len(errMsgs) > 0 {
 				out["errors"] = errMsgs
+			}
+			return jsonResult(out)
+		},
+	)
+}
+
+// addTaskScope lets the plan agent add test scope to THE CURRENT TASK — the coverage
+// denominator and the task's authorization edge. Worker discoveries are auto-scoped
+// (precise host) by insertAssets; this tool is for DELIBERATELY WIDENING: pull a whole
+// root domain or whole company into scope, or add a specific subdomain / ip.
+func (t *ToolSet) addTaskScope() actool.CoreTool {
+	return writeTool(
+		"add_task_scope",
+		"把测试范围加入【本任务】——这是资产测试覆盖度的分母，也是本任务的授权边界。\n"+
+			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr。\n"+
+			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
+			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段。\n"+
+			"务必给 reason 说明依据(可审计)。多条用 entries 数组。",
+		obj(map[string]any{
+			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value}]。kind∈company/root_domain/subdomain/ip/cidr；value=公司名或id / 域名 / IP / CIDR。", "items": map[string]any{"type": "object"}},
+			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr"),
+			"value":   str("[单条] 公司名或id / 域名 / IP / CIDR"),
+			"reason":  str("加入依据(用于审计)，务必填写"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.as == nil {
+				return actool.Errorf("add_task_scope 未启用: AssetStore 未初始化"), nil
+			}
+			if t.taskID <= 0 {
+				return actool.Errorf("add_task_scope 需要任务上下文(当前无 task)"), nil
+			}
+			type scopeEntry struct {
+				Kind  string `json:"kind"`
+				Value string `json:"value"`
+			}
+			var a struct {
+				Entries    []scopeEntry `json:"entries"`
+				scopeEntry              // 单条模式
+				Reason     string       `json:"reason"`
+			}
+			_ = json.Unmarshal(in, &a)
+			items := a.Entries
+			if len(items) == 0 {
+				items = []scopeEntry{a.scopeEntry}
+			}
+			var added []map[string]any
+			errs := map[string]string{}
+			for i, e := range items {
+				ts, err := t.as.AddAgentScope(t.taskID, strings.TrimSpace(e.Kind), e.Value, a.Reason)
+				if err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
+				added = append(added, map[string]any{"kind": ts.Kind, "domain": ts.Domain, "net": ts.Net, "company_id": ts.CompanyID})
+			}
+			out := map[string]any{"added": added}
+			if len(errs) > 0 {
+				out["errors"] = errs
 			}
 			return jsonResult(out)
 		},

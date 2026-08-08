@@ -115,6 +115,15 @@ export const api = {
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  // 资产测试覆盖度(粗估，供参考)：范围内资产里被 fact 碰过的占比 + 未测 backlog 取样。
+  taskCoverage: (id: string) =>
+    get<{
+      scope_rows: number;
+      denominator: number;
+      tested: number;
+      pct: number | null;
+      backlog_sample: { id: number; type: string; label: string }[];
+    }>(`/tasks/${id}/coverage`),
 
   // ---- assets ----
   // Server-side paginated: pass limit/offset, get back the page + full match total.

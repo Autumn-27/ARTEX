@@ -22,9 +22,20 @@ func TestBuiltinToolSeeds(t *testing.T) {
 		}
 		byKey[s.Key] = s
 	}
-	// record_fact is worker-only.
-	if rf, ok := byKey["record_fact"]; !ok || len(rf.Agents) != 1 || rf.Agents[0] != "worker" {
-		t.Errorf("record_fact agents = %v, want [worker]", rf.Agents)
+	// record_fact is bound to worker (also mainagent, which can log confirmed facts).
+	rf, ok := byKey["record_fact"]
+	hasWorker := false
+	for _, a := range rf.Agents {
+		if a == "worker" {
+			hasWorker = true
+		}
+	}
+	if !ok || !hasWorker {
+		t.Errorf("record_fact agents = %v, want to include worker", rf.Agents)
+	}
+	// add_task_scope is bound to the planner (deliberate scope widening).
+	if ts, ok := byKey["add_task_scope"]; !ok || len(ts.Agents) == 0 {
+		t.Errorf("add_task_scope not seeded / has no agent binding: %v", ts.Agents)
 	}
 	// SDK generic tools (incl. sleep, now part of DefaultTools) are deliberately NOT
 	// seeded — every agent owns them; they flow through ToolResolve untouched.

@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Autumn-27/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 )
 
 // compactIntents distills intents to {id, summary, state, asset_ids, parents,
@@ -323,6 +323,25 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		// decomposed goals.
 		if description, goal, err := t.ts.Root(); err == nil {
 			out["task"] = map[string]any{"description": description, "goal": goal}
+		}
+		// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
+		// 占比；backlog_sample 是范围内还没被测的资产(供优先补测)。仅任务上下文有。
+		if t.as != nil && t.ts != nil && t.taskID > 0 {
+			if cov, err := t.as.TaskCoverage(t.taskID, t.ts.ID(), 20); err == nil {
+				m := map[string]any{
+					"denominator":    cov.Denominator,
+					"tested":         cov.Tested,
+					"backlog_sample": cov.Backlog,
+					"note":           "粗略估计、仅供参考：容器型资产/大量枚举会让它偏低，勿据此认为已测完；优先补测 backlog。",
+				}
+				if cov.ScopeRows == 0 {
+					m["pct"] = nil
+					m["status"] = "范围未锚定"
+				} else {
+					m["pct"] = cov.Pct
+				}
+				out["coverage"] = m
+			}
 		}
 		return out
 	}
@@ -1073,5 +1092,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
+		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。
+		t.addTaskScope(),
 	}
 }

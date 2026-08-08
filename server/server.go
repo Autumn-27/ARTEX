@@ -482,6 +482,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
+	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
+	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("POST /api/active", s.setActive)
 
@@ -1082,6 +1084,48 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, t)
+}
+
+// taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).
+func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	cov, err := as.TaskCoverage(taskID, t.ExpID, atoiDefault(r.URL.Query().Get("backlog"), 20))
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, cov)
+}
+
+// taskScopeList returns a task's scope rows (coverage denominator sources).
+func (s *Server) taskScopeList(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	rows, err := as.ListTaskScope(taskID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"scope": rows})
 }
 
 func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {

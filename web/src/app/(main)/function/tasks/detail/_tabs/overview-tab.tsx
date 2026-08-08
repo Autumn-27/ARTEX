@@ -52,6 +52,13 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [stats, setStats] = React.useState<Stats | null>(null);
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
+  const [coverage, setCoverage] = React.useState<{
+    scope_rows: number;
+    denominator: number;
+    tested: number;
+    pct: number | null;
+    backlog_sample: { id: number; type: string; label: string }[];
+  } | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -70,6 +77,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         setStats(statsResp);
         setIntents(intentsResp);
         setFindings(findingsResp);
+        // coverage is independent + may 503 when no asset store — fetch separately so
+        // its failure never blocks the others.
+        api
+          .taskCoverage(taskId)
+          .then((c) => {
+            if (!cancelled) setCoverage(c);
+          })
+          .catch(() => {});
       } catch {
         // transient errors are ignored; the next poll will retry
       }
@@ -93,6 +108,39 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {coverage && coverage.scope_rows > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TargetIcon className="size-4 text-emerald-500" /> 资产测试覆盖度
+              <span className="text-muted-foreground text-xs font-normal">（粗估，仅供参考）</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-baseline gap-3">
+              <span className="text-2xl font-semibold tabular-nums">
+                {coverage.pct != null ? Math.round(coverage.pct * 100) + "%" : "—"}
+              </span>
+              <span className="text-muted-foreground text-sm">
+                已测 {coverage.tested} / 范围内 {coverage.denominator}
+              </span>
+            </div>
+            {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
+            {coverage.backlog_sample.length > 0 && (
+              <div className="text-xs">
+                <div className="text-muted-foreground mb-1">未测（优先补测）：</div>
+                <div className="flex flex-wrap gap-1">
+                  {coverage.backlog_sample.slice(0, 12).map((a) => (
+                    <span key={a.id} className="bg-muted rounded px-1.5 py-0.5 font-mono">
+                      {a.label || a.type}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {/* Heartbeat */}
       <Card>
         <CardHeader>
