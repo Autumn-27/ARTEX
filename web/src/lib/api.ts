@@ -115,14 +115,14 @@ export const api = {
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
-  // 资产测试覆盖度(粗估，供参考)：范围内资产里被 fact 碰过的占比 + 未测 backlog 取样。
+  // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
       scope_rows: number;
       denominator: number;
       tested: number;
       pct: number | null;
-      backlog_sample: { id: number; type: string; label: string }[];
+      by_type: { type: string; total: number; tested: number }[];
     }>(`/tasks/${id}/coverage`),
 
   // ---- assets ----

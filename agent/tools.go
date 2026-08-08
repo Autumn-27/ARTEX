@@ -325,14 +325,14 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			out["task"] = map[string]any{"description": description, "goal": goal}
 		}
 		// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
-		// 占比；backlog_sample 是范围内还没被测的资产(供优先补测)。仅任务上下文有。
+		// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
 		if t.as != nil && t.ts != nil && t.taskID > 0 {
-			if cov, err := t.as.TaskCoverage(t.taskID, t.ts.ID(), 20); err == nil {
+			if cov, err := t.as.TaskCoverage(t.taskID, t.ts.ID()); err == nil {
 				m := map[string]any{
-					"denominator":    cov.Denominator,
-					"tested":         cov.Tested,
-					"backlog_sample": cov.Backlog,
-					"note":           "粗略估计、仅供参考：容器型资产/大量枚举会让它偏低，勿据此认为已测完；优先补测 backlog。",
+					"denominator": cov.Denominator,
+					"tested":      cov.Tested,
+					"by_type":     cov.ByType,
+					"note":        "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：容器型资产/大量枚举会让它偏低，勿据此认为已测完；可以通过相关工具增加任务测试范围",
 				}
 				if cov.ScopeRows == 0 {
 					m["pct"] = nil
@@ -1094,5 +1094,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.listCompanies(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。
 		t.addTaskScope(),
+		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
+		t.listUntestedAssets(),
 	}
 }

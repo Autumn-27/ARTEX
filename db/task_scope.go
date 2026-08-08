@@ -203,18 +203,25 @@ type CoverageAsset struct {
 	Label string `json:"label"`
 }
 
+// CoverageByType is per-asset-type coverage: total in scope vs tested.
+type CoverageByType struct {
+	Type   string `json:"type"`
+	Total  int    `json:"total"`
+	Tested int    `json:"tested"`
+}
+
 // Coverage is a task's rough asset test coverage — a reference figure for the agent,
 // NOT a precise metric. Denominator = assets matching any active task_scope row;
 // Tested = those anchored to at least one fact node in the exploration.
 type Coverage struct {
-	ScopeRows   int             `json:"scope_rows"`  // 0 → 范围未锚定
-	Denominator int             `json:"denominator"` // 范围内资产数
-	Tested      int             `json:"tested"`      // 已测(约)
-	Pct         *float64        `json:"pct"`         // 覆盖度；分母 0 时 null
-	Backlog     []CoverageAsset `json:"backlog_sample"`
+	ScopeRows   int              `json:"scope_rows"`  // 0 → 范围未锚定
+	Denominator int              `json:"denominator"` // 范围内资产数
+	Tested      int              `json:"tested"`      // 已测(约)
+	Pct         *float64         `json:"pct"`         // 覆盖度；分母 0 时 null
+	ByType      []CoverageByType `json:"by_type"`     // 按资产类型的 总数/已测
 }
 
-// task_scope→assets match predicate, reused by the count and backlog queries. $1=taskID.
+// task_scope→assets match predicate, reused by the count / by-type / untested queries. $1=taskID.
 const covTargetCTE = `
 target AS (
   SELECT DISTINCT a.id, a.type,
@@ -234,39 +241,74 @@ tested AS (
   WHERE en.exploration_id = $2 AND en.kind = 'fact'
 )`
 
-// TaskCoverage computes rough coverage for a task. taskID indexes task_scope + assets;
-// expID indexes the fact anchors. backlogSample caps the untested-asset sample (≤).
-func (s *AssetStore) TaskCoverage(taskID, expID int64, backlogSample int) (*Coverage, error) {
-	if backlogSample <= 0 {
-		backlogSample = 20
-	}
-	cov := &Coverage{Backlog: []CoverageAsset{}}
+// TaskCoverage computes rough per-type coverage for a task. taskID indexes
+// task_scope + assets; expID indexes the fact anchors. Reference figure only.
+func (s *AssetStore) TaskCoverage(taskID, expID int64) (*Coverage, error) {
+	cov := &Coverage{ByType: []CoverageByType{}}
 	_ = s.db.QueryRow(`SELECT count(*) FROM task_scope WHERE task_id=$1`, taskID).Scan(&cov.ScopeRows)
-
-	if err := s.db.QueryRow(`WITH `+covTargetCTE+`
-SELECT (SELECT count(*) FROM target),
-       (SELECT count(*) FROM target t WHERE t.id IN (SELECT asset_id FROM tested))`,
-		taskID, expID).Scan(&cov.Denominator, &cov.Tested); err != nil {
+	rows, err := s.db.Query(`WITH `+covTargetCTE+`
+SELECT t.type, count(*) AS total,
+       count(*) FILTER (WHERE t.id IN (SELECT asset_id FROM tested)) AS tested
+FROM target t GROUP BY t.type ORDER BY t.type`, taskID, expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var bt CoverageByType
+		if err := rows.Scan(&bt.Type, &bt.Total, &bt.Tested); err != nil {
+			return nil, err
+		}
+		cov.ByType = append(cov.ByType, bt)
+		cov.Denominator += bt.Total
+		cov.Tested += bt.Tested
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if cov.Denominator > 0 {
 		p := float64(cov.Tested) / float64(cov.Denominator)
 		cov.Pct = &p
 	}
+	return cov, nil
+}
 
+// ListUntestedAssets returns a task's in-scope, not-yet-tested assets, optionally
+// filtered by asset type, paginated. Returns the page + the total count. limit<=0 → 10.
+func (s *AssetStore) ListUntestedAssets(taskID, expID int64, typ string, limit, offset int) ([]CoverageAsset, int, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	typeFilter := ""
+	args := []any{taskID, expID}
+	if typ != "" {
+		typeFilter = " AND t.type = $3"
+		args = append(args, typ)
+	}
+	var total int
+	_ = s.db.QueryRow(`WITH `+covTargetCTE+`
+SELECT count(*) FROM target t WHERE t.id NOT IN (SELECT asset_id FROM tested)`+typeFilter, args...).Scan(&total)
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	limPos := strconv.Itoa(len(args) + 1)
+	offPos := strconv.Itoa(len(args) + 2)
 	rows, err := s.db.Query(`WITH `+covTargetCTE+`
 SELECT t.id, t.type, t.label FROM target t
-WHERE t.id NOT IN (SELECT asset_id FROM tested)
-ORDER BY t.id LIMIT $3`, taskID, expID, backlogSample)
+WHERE t.id NOT IN (SELECT asset_id FROM tested)`+typeFilter+`
+ORDER BY t.id LIMIT $`+limPos+` OFFSET $`+offPos, pageArgs...)
 	if err != nil {
-		return cov, nil // counts are still useful even if the sample query fails
+		return nil, total, err
 	}
 	defer rows.Close()
+	out := []CoverageAsset{}
 	for rows.Next() {
 		var a CoverageAsset
-		if err := rows.Scan(&a.ID, &a.Type, &a.Label); err == nil {
-			cov.Backlog = append(cov.Backlog, a)
+		if err := rows.Scan(&a.ID, &a.Type, &a.Label); err != nil {
+			return nil, total, err
 		}
+		out = append(out, a)
 	}
-	return cov, nil
+	return out, total, rows.Err()
 }

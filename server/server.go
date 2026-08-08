@@ -1099,7 +1099,7 @@ func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	cov, err := as.TaskCoverage(taskID, t.ExpID, atoiDefault(r.URL.Query().Get("backlog"), 20))
+	cov, err := as.TaskCoverage(taskID, t.ExpID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

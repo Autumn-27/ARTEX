@@ -398,6 +398,51 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 	)
 }
 
+// listUntestedAssets lets the plan agent pull the CURRENT TASK's in-scope, not-yet-
+// tested assets on demand (filter by type, paginated) — so it can decide what to
+// test next itself, instead of coverage pushing a backlog list into every prompt.
+func (t *ToolSet) listUntestedAssets() actool.CoreTool {
+	return readTool(
+		"list_untested_assets",
+		"查询【本任务】范围内、还没被测过的资产（供你自己判断要不要补测，不代替你决策）。\n"+
+			"可选按资产类型过滤：root_domain/subdomain/service/app/endpoint/ip。\n"+
+			"分页：page 从 1 起、page_size 默认 10。返回 {assets:[{id,type,label}], total, page, page_size}。仅任务上下文可用。",
+		obj(map[string]any{
+			"type":      str("资产类型过滤（可选）：root_domain/subdomain/service/app/endpoint/ip"),
+			"page":      intp("页码，从 1 起（默认 1）"),
+			"page_size": intp("每页数量（默认 10）"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.as == nil {
+				return actool.Errorf("list_untested_assets 未启用: AssetStore 未初始化"), nil
+			}
+			if t.taskID <= 0 || t.ts == nil {
+				return actool.Errorf("list_untested_assets 需要任务上下文"), nil
+			}
+			var a struct {
+				Type     string `json:"type"`
+				Page     int    `json:"page"`
+				PageSize int    `json:"page_size"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if a.Page <= 0 {
+				a.Page = 1
+			}
+			if a.PageSize <= 0 {
+				a.PageSize = 10
+			}
+			offset := (a.Page - 1) * a.PageSize
+			assets, total, err := t.as.ListUntestedAssets(t.taskID, t.ts.ID(), strings.TrimSpace(a.Type), a.PageSize, offset)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return jsonResult(map[string]any{
+				"assets": assets, "total": total, "page": a.Page, "page_size": a.PageSize,
+			})
+		},
+	)
+}
+
 // listAssets lets an agent query the asset table.
 func (t *ToolSet) listAssets() actool.CoreTool {
 	return readTool(
@@ -553,6 +598,9 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
 		t.addFinding(), t.recordFact(),
+		t.addTaskScope(),
+		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
+		t.listUntestedAssets(),
 	}
 }
 

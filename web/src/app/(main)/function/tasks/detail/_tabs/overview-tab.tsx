@@ -57,7 +57,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     denominator: number;
     tested: number;
     pct: number | null;
-    backlog_sample: { id: number; type: string; label: string }[];
+    by_type: { type: string; total: number; tested: number }[];
   } | null>(null);
 
   React.useEffect(() => {
@@ -126,16 +126,16 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               </span>
             </div>
             {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
-            {coverage.backlog_sample.length > 0 && (
-              <div className="text-xs">
-                <div className="text-muted-foreground mb-1">未测（优先补测）：</div>
-                <div className="flex flex-wrap gap-1">
-                  {coverage.backlog_sample.slice(0, 12).map((a) => (
-                    <span key={a.id} className="bg-muted rounded px-1.5 py-0.5 font-mono">
-                      {a.label || a.type}
+            {coverage.by_type.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                {coverage.by_type.map((b) => (
+                  <span key={b.type} className="bg-muted rounded px-1.5 py-0.5">
+                    <span className="text-muted-foreground">{b.type}</span>{" "}
+                    <span className="tabular-nums font-medium">
+                      {b.tested}/{b.total}
                     </span>
-                  ))}
-                </div>
+                  </span>
+                ))}
               </div>
             )}
           </CardContent>
