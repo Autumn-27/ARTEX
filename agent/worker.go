@@ -170,6 +170,22 @@ func workerSystem(proxyAddr, workDir string) string {
 // renderIntentTask formats the claimed intent for the worker's SYSTEM prompt: the
 // intent is the worker's whole job, so — like the planner's situational block — it
 // belongs in system, where compaction can never drop it during a long run.
+// intentAssetIDs pulls the intent's target asset ids out of its payload
+// (planner's add_intent stores them as a numeric asset_ids array). nil on absence
+// or malformed payload.
+func intentAssetIDs(intent *db.Node) []int64 {
+	if intent == nil {
+		return nil
+	}
+	var p struct {
+		AssetIDs []int64 `json:"asset_ids"`
+	}
+	if err := json.Unmarshal(intent.Payload, &p); err != nil {
+		return nil
+	}
+	return p.AssetIDs
+}
+
 func renderIntentTask(intent *db.Node) string {
 	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
 }
@@ -180,6 +196,10 @@ func renderIntentTask(intent *db.Node) string {
 // purpose is letting the worker read context (existing facts/assets/hints)
 // so it avoids redundant work and doesn't re-derive what others already found.
 func renderWorkerGraphOverview(data map[string]any) string {
+	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
+	// 那条意图、别追未覆盖的点」的职责边界相悖 → 从 worker 视图里剔除。data 是本次 worker
+	// 专属的新 map，删键不影响 planner。
+	delete(data, "coverage")
 	b, err := json.Marshal(data)
 	if err != nil {
 		return "" // fall back silently: the worker just won't have the global context
@@ -278,8 +298,18 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	// 意图已在 system 里。user 输入只放启动指令。
+	// 意图已在 system 里。user 输入只放启动指令 + 意图锚定资产的原始数据（供 worker 直接
+	// 用，省去开场再查一次 list_assets）。原始 JSON 直接附上，不做提取/格式化。
 	input := "开始执行 system 提示里的这条意图：只做它、只产生事实、做完即停。"
+	if as != nil {
+		if ids := intentAssetIDs(intent); len(ids) > 0 {
+			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
+				if b, err := json.Marshal(assets); err == nil {
+					input += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
+				}
+			}
+		}
+	}
 
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
