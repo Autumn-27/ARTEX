@@ -37,6 +37,9 @@ var knownStringFields = map[string]string{
 	"icp":          "icp",
 	"service_name": "service_name",
 	"app_name":     "app_name",
+	"bundle_id":    "bundle_id",
+	"category":     "category",
+	"app_icp":      "app_icp",
 	"method":       "method",
 	"service_type": "service_type",
 	"record_type":  "record_type",
@@ -67,13 +70,13 @@ func isKnownField(f string) bool {
 // ── tokeniser ────────────────────────────────────────────────────────────────
 
 const (
-	tkField  = "FIELD"
-	tkBare   = "BARE"
-	tkAnd    = "AND"
-	tkOr     = "OR"
-	tkLP     = "LPAREN"
-	tkRP     = "RPAREN"
-	tkEOF    = "EOF"
+	tkField = "FIELD"
+	tkBare  = "BARE"
+	tkAnd   = "AND"
+	tkOr    = "OR"
+	tkLP    = "LPAREN"
+	tkRP    = "RPAREN"
+	tkEOF   = "EOF"
 )
 
 type tok struct {

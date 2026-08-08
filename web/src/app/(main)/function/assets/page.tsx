@@ -7,6 +7,7 @@ import {
   NetworkIcon,
   LayoutTemplateIcon,
   LinkIcon,
+  SmartphoneIcon,
   SearchIcon,
   KeyRoundIcon,
   ChevronLeftIcon,
@@ -76,6 +77,9 @@ const DSL_FIELDS: { name: string; desc: string; ops: { op: string; desc: string 
   { name: "icp",          desc: "ICP 备案号",                        ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
   { name: "service_name", desc: "服务名称（非 HTTP 服务）",           ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
   { name: "app_name",     desc: "应用名称",                          ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
+  { name: "bundle_id",    desc: "应用 Bundle ID",                    ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
+  { name: "category",     desc: "应用分类",                          ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
+  { name: "app_icp",      desc: "应用 ICP 备案",                     ops: [{ op: "=",  desc: "模糊匹配" }, { op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
   { name: "method",       desc: "HTTP 方法 GET/POST/PUT/…",          ops: [{ op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
   { name: "service_type", desc: "服务类型：http | other",             ops: [{ op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
   { name: "record_type",  desc: "DNS 解析类型 A/CNAME/MX/…",        ops: [{ op: "==", desc: "精确匹配" }, { op: "!=", desc: "排除" }] },
@@ -216,6 +220,7 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
   { key: "root_domain", label: "根域名", icon: GlobeIcon },
   { key: "ip",          label: "IP",     icon: NetworkIcon },
   { key: "subdomain",   label: "子域名", icon: GlobeIcon },
+  { key: "app",         label: "应用",   icon: SmartphoneIcon },
   { key: "service",     label: "服务",   icon: LayoutTemplateIcon },
   { key: "endpoint",    label: "接口",   icon: LinkIcon },
 ];
@@ -594,6 +599,45 @@ export default function AssetsPage() {
                 <TableCell className="font-mono text-xs">{a.root_domain || "—"}</TableCell>
                 <TableCell className="text-xs">{a.record_type || "—"}</TableCell>
                 <TableCell className="max-w-xs truncate font-mono text-xs">{(Array.isArray(a.record_value) ? a.record_value.join(", ") : a.record_value) || "—"}</TableCell>
+                <TableCell className="w-8 pl-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => openDelete([a.id])}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </AssetCard>
+        </TabsContent>
+
+        {/* 应用 */}
+        <TabsContent value="app" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
+          {searchBox}
+          <AssetCard
+            cols={["", "应用名", "Bundle ID", "分类", "ICP 备案", ""]}
+            loaded={loaded}
+            total={total}
+            page={page}
+            size={size}
+            onSize={setSize}
+            onPage={setPage}
+            rows={rows}
+            selected={selected}
+            onToggleAll={(ids) => toggleSelectAll(ids)}
+          >
+            {slice(tabData("app")).map((a) => (
+              <TableRow key={a.id} className={selected.has(a.id) ? "bg-muted/40" : undefined}>
+                <TableCell className="w-8 pr-0">
+                  <Checkbox checked={selected.has(a.id)} onCheckedChange={() => toggleSelect(a.id)} />
+                </TableCell>
+                <TableCell className="text-xs font-medium">{a.app_name || "—"}</TableCell>
+                <TableCell className="font-mono text-xs">{a.bundle_id || "—"}</TableCell>
+                <TableCell className="text-xs">{a.category || "—"}</TableCell>
+                <TableCell className="text-xs">{a.app_icp || "—"}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
