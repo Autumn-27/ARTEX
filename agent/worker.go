@@ -307,6 +307,12 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 				if b, err := json.Marshal(assets); err == nil {
 					input += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
 				}
+				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
+				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
+				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
+				for _, a := range assets {
+					_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+				}
 			}
 		}
 	}
