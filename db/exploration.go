@@ -615,6 +615,29 @@ AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, 
 	return scanTrace(rows)
 }
 
+// ActivityTraceSearchExcluding keyword-searches every node's steps in this
+// exploration EXCEPT one node's own (excludeNodeID) — so a worker's
+// search_all_worker_traces doesn't return its own in-progress trace (which is
+// already in its context). excludeNodeID<=0 → no exclusion (searches all nodes).
+func (s *ExplorationStore) ActivityTraceSearchExcluding(excludeNodeID int64, q string, limit int) ([]Activity, error) {
+	if excludeNodeID <= 0 {
+		return s.ActivityTraceSearch(nil, q, limit)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	like := "%" + q + "%"
+	rows, err := s.db.Query(`SELECT `+traceCols+`
+FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND node_id <> $2
+AND kind NOT IN ('thinking','usage')
+AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, excludeNodeID, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrace(rows)
+}
+
 // ActivityByIDs loads full detail for specific step ids (the trace drill-down),
 // scoped to this exploration. thinking rows are skipped (never returned, even if
 // their id is asked for). Order is ascending id, not the input order.
