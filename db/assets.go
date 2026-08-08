@@ -628,8 +628,8 @@ RETURNING id`,
 		return 0, err
 	}
 
-	// side effects
-	_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: req.TaskID})
+	// side effects: register root_domain + subdomain as their own assets too
+	s.linkHostAssets(domain, rootDomain, req.TaskID)
 	if req.IP != "" {
 		var boundDomains []string
 		if domain != "" {
@@ -760,10 +760,20 @@ RETURNING id`,
 			TaskID:       req.TaskID,
 		})
 	}
-	if rootDomain != "" {
-		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: req.TaskID})
-	}
+	s.linkHostAssets(domain, rootDomain, req.TaskID)
 	return id, nil
+}
+
+// linkHostAssets ensures a service/endpoint's host is also registered as its own
+// root_domain and (when it's a real subdomain, not the apex or an IP) subdomain
+// asset — so those asset types stay populated and can anchor task scope. Best-effort.
+func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) {
+	if rootDomain != "" {
+		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: taskID})
+	}
+	if domain != "" && domain != rootDomain && net.ParseIP(domain) == nil {
+		_, _ = s.UpsertSubdomain(UpsertSubdomainReq{Domain: domain, TaskID: taskID})
+	}
 }
 
 // =====================================================================
@@ -852,7 +862,16 @@ RETURNING id`,
 		normURL, method, domainVal, ipVal, nullableInt(port), rootDomainVal,
 		paramsJSON, companyID, taskIDs, csegVal,
 	).Scan(&id)
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	// side effects: endpoint previously registered none — register its host as
+	// root_domain + subdomain(+IP) so those asset types get populated too.
+	s.linkHostAssets(domain, rootDomain, req.TaskID)
+	if req.IP != "" {
+		_, _ = s.UpsertIP(UpsertIPReq{IP: req.IP, TaskID: req.TaskID})
+	}
+	return id, nil
 }
 
 // =====================================================================

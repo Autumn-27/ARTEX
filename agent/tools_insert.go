@@ -79,7 +79,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"auth/technologies/params 都是【追加合并】(append)，不会覆盖原有值。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
-			"task_id": intp("任务 id（可选，用于关联 task_ids）"),
+			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
 			"assets": map[string]any{
 				"type":        "array",
 				"description": "资产数组，每个元素对应一条资产记录",
@@ -158,16 +158,13 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			}
 			var a struct {
 				Assets []assetInputItem `json:"assets"`
-				TaskID int64            `json:"task_id"`
 			}
 			if err := json.Unmarshal(in, &a); err != nil {
 				return actool.Errorf("invalid input: " + err.Error()), nil
 			}
-			// use ToolSet.taskID as fallback
-			taskID := a.TaskID
-			if taskID == 0 {
-				taskID = t.taskID
-			}
+			// task_id 由程序权威赋值(worker: SetTaskID)，不接受模型传入——避免模型漏传/错传
+			// 导致资产未归任务或归错任务。无任务上下文的调用方(auto/pentest/chat)其 t.taskID=0。
+			taskID := t.taskID
 
 			type result struct {
 				Index int    `json:"index"`
