@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 )
 
 // goalsDefaultTmpl is the built-in EDITABLE body (段 [A]) of the goals-decomposer
@@ -31,6 +31,26 @@ const goalsDefaultTmpl = `你是渗透测试目标分解器。你的职责是从
 
 调用 set_goals 提交结果。`
 
+// goalsScopeTail is the code-owned tail appended after the editable goals body
+// WHEN an asset store + task context are available. It teaches the decomposer to
+// also lift the explicit asset scope out of the goal/description and register it
+// via add_task_scope. Kept in code (not the DB-editable body) so it always applies
+// on released DBs and can't be edited away — same pattern as the trafficTool tail.
+const goalsScopeTail = `
+
+**额外职责：登记测试资产范围**
+除拆分目标外，你还要从上面的「任务目标 / 任务描述」里识别出**明确给出的测试资产范围**，并调用 add_task_scope 登记为本任务范围（资产测试覆盖度的分母，也是授权边界）：
+- 完整根域名（如 example.com，其所有子域都在测试范围）→ kind=root_domain，value=example.com
+- 单个精确子域名（如 app.example.com，只测这一个）→ kind=subdomain，value=app.example.com
+- IP 或网段 → kind=ip / cidr，value=IP 或 CIDR
+规则（务必遵守）：
+- 只登记**目标/描述里明确写出**的范围；严禁臆造或推断未提及的域名/IP。
+- 粒度拿不准时选更**精确**的那种（宁可 subdomain，不要轻易升级为 root_domain）。
+- 只处理域名 / IP / 网段；**不要**登记公司范围（company）——任务刚建立、资产系统里通常还没有这家公司，登记不上，公司级范围交由后续 plan 阶段处理。
+- reason 简述依据来自哪句话，便于审计。
+- 若目标/描述中没有任何明确资产范围，则**不要**调用 add_task_scope。
+先用 add_task_scope 登记范围（如有），再调用 set_goals 提交目标。`
+
 // GoalSpec is one decomposed objective.
 type GoalSpec struct {
 	Text      string `json:"text"`
@@ -48,7 +68,10 @@ type GoalSpec struct {
 //
 // emit, when non-nil, receives every LLM step (thinking/tool_use/result) with
 // Worker="planner" so the round-0 goal-decomposition activity is visible in the UI.
-func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, emit func(db.Activity)) []GoalSpec {
+//
+// as + taskID, when non-nil/positive, wire the add_task_scope tool so the
+// decomposer can register the explicit asset scope it extracts from the goal.
+func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, as *db.AssetStore, taskID int64, emit func(db.Activity)) []GoalSpec {
 	prov, err := c.NewProvider()
 	if err != nil {
 		return nil
@@ -79,6 +102,14 @@ func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, emit f
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
 	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{})
+	tools := []actool.CoreTool{submitTool}
+	// Wire add_task_scope only when we have a real asset store + task to write to.
+	// The scope-extraction tail is appended in lockstep so the prompt never asks for
+	// a tool that isn't present.
+	if as != nil && taskID > 0 {
+		tools = append(tools, (&ToolSet{as: as, taskID: taskID}).addTaskScope())
+		sys += goalsScopeTail
+	}
 	userMsg := "任务目标：\n" + goalText
 	if d := strings.TrimSpace(desc); d != "" {
 		userMsg += "\n\n任务描述（背景信息，可能含靶标范围/flag 数量/交战说明；仅供参考，不要臆造其中未提及的内容）：\n" + d
@@ -94,10 +125,10 @@ func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, emit f
 	captureRun(ctx, agentcore.Options{
 		Provider:               prov,
 		SystemPrompt:           []string{sys},
-		Tools:                  []actool.CoreTool{submitTool},
+		Tools:                  tools,
 		PermissionMode:         acperm.ModeBypass,
 		DisableBackgroundTasks: true,
-		MaxTurns:               4,
+		MaxTurns:               6,
 	}, userMsg, captureEmit)
 	if !captured {
 		return nil
