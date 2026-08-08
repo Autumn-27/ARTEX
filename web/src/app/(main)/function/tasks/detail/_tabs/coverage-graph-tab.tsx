@@ -1,41 +1,15 @@
 "use client";
-"use no memo";
 
 import * as React from "react";
-import {
-  Background,
-  BackgroundVariant,
-  Controls,
-  type Edge as RFEdge,
-  Handle,
-  MiniMap,
-  type Node as RFNode,
-  type NodeProps,
-  Panel,
-  Position,
-  ReactFlow,
-  ReactFlowProvider,
-  useEdgesState,
-  useNodesState,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import {
-  forceCenter,
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  forceX,
-  forceY,
-} from "d3-force";
+import type { Graph as G6Graph } from "@antv/g6";
 import {
   AppWindow,
   Building2,
   Globe,
   Link2,
   type LucideIcon,
-  MoreHorizontal,
   Radio,
+  RefreshCw,
   Server,
   Waypoints,
 } from "lucide-react";
@@ -59,23 +33,21 @@ const FOLD_STEP = 20;
 
 type Kind = CoverageGraphNode["kind"];
 
-type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string };
+type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string; emoji: string; size: number };
 
 const kindMeta: Record<Kind, KindMeta> = {
-  company: { label: "公司", icon: Building2, iconBg: "bg-slate-500", hex: "#64748b" },
-  root_domain: { label: "根域名", icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1" },
-  subdomain: { label: "子域名", icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6" },
-  ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2" },
-  service: { label: "服务", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b" },
-  app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef" },
-  endpoint: { label: "端点", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e" },
+  company: { label: "公司", icon: Building2, iconBg: "bg-slate-500", hex: "#64748b", emoji: "🏢", size: 46 },
+  root_domain: { label: "根域名", icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1", emoji: "🌐", size: 38 },
+  subdomain: { label: "子域名", icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6", emoji: "🔗", size: 30 },
+  ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2", emoji: "🖥️", size: 28 },
+  service: { label: "服务", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", emoji: "📡", size: 26 },
+  app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", emoji: "📱", size: 26 },
+  endpoint: { label: "端点", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", emoji: "🔌", size: 20 },
 };
 
 // ---------------------------------------------------------------------------
-// Folding: turn the full graph into the currently-visible node/edge set.
-// 折叠是自顶向下的：某节点被折叠隐藏时，它的整棵子树也不再展开。
+// Folding: full graph → currently-visible node/edge set (自顶向下级联折叠)。
 // ---------------------------------------------------------------------------
-
 type FoldNode = {
   fold: true;
   key: string;
@@ -87,7 +59,6 @@ type FoldNode = {
 type AssetRenderNode = { fold: false; key: string; kind: Kind; node: CoverageGraphNode };
 type RenderNode = AssetRenderNode | FoldNode;
 
-// tested 优先，其次按 label。
 function sortChildren(a: CoverageGraphNode, b: CoverageGraphNode): number {
   if (a.tested !== b.tested) return a.tested ? -1 : 1;
   return (a.label || "").localeCompare(b.label || "");
@@ -113,7 +84,6 @@ function computeVisible(
   const visible = new Set<string>();
   const foldNodes: FoldNode[] = [];
 
-  // 顶层：没有父节点的节点（公司 / 孤立根域名 / 孤立 ip…）。
   const queue: string[] = [];
   for (const n of nodes) {
     if (!parentOf.has(n.key)) {
@@ -126,7 +96,6 @@ function computeVisible(
     const parent = queue[qi];
     const kids = childrenOf.get(parent) ?? [];
     if (kids.length === 0) continue;
-    // 按类型分组
     const groups = new Map<Kind, CoverageGraphNode[]>();
     for (const ck of kids) {
       const cn = byKey.get(ck);
@@ -148,14 +117,7 @@ function computeVisible(
         }
       }
       if (hidden.length > 0) {
-        foldNodes.push({
-          fold: true,
-          key: `fold:${groupId}`,
-          groupId,
-          parentKey: parent,
-          kind,
-          hidden,
-        });
+        foldNodes.push({ fold: true, key: `fold:${groupId}`, groupId, parentKey: parent, kind, hidden });
       }
     }
   }
@@ -163,9 +125,7 @@ function computeVisible(
   for (const n of nodes) {
     if (visible.has(n.key)) renderNodes.push({ fold: false, key: n.key, kind: n.kind, node: n });
   }
-  const renderEdges: CoverageGraphEdge[] = edges.filter(
-    (e) => visible.has(e.src) && visible.has(e.dst),
-  );
+  const renderEdges: CoverageGraphEdge[] = edges.filter((e) => visible.has(e.src) && visible.has(e.dst));
   for (const f of foldNodes) {
     renderNodes.push(f);
     renderEdges.push({ src: f.key, dst: f.parentKey });
@@ -174,132 +134,63 @@ function computeVisible(
 }
 
 // ---------------------------------------------------------------------------
-// d3-force 静态布局：一次性 tick 到收敛，得到每个节点坐标。
+// G6 数据映射。自定义字段放节点顶层（G6 v5 官方 force 示例约定：style/layout 回调直接读 d.<field>）。
 // ---------------------------------------------------------------------------
-function layout(
-  renderNodes: RenderNode[],
-  renderEdges: CoverageGraphEdge[],
-): Map<string, { x: number; y: number }> {
-  const sim = renderNodes.map((n) => ({ key: n.key })) as Array<{
-    key: string;
-    x?: number;
-    y?: number;
-  }>;
-  const links = renderEdges.map((e) => ({ source: e.src, target: e.dst }));
-  const s = forceSimulation(sim)
-    .force("charge", forceManyBody().strength(-420))
-    .force(
-      "link",
-      forceLink(links)
-        .id((d) => (d as unknown as { key: string }).key)
-        .distance(96)
-        .strength(0.55),
-    )
-    .force("center", forceCenter(0, 0))
-    .force("x", forceX(0).strength(0.05))
-    .force("y", forceY(0).strength(0.05))
-    .force("collide", forceCollide(52))
-    .stop();
-  const ticks = Math.min(400, 120 + sim.length * 2);
-  for (let i = 0; i < ticks; i++) s.tick();
-  const pos = new Map<string, { x: number; y: number }>();
-  for (const d of sim) pos.set(d.key, { x: d.x ?? 0, y: d.y ?? 0 });
-  return pos;
+type G6NodeDatum = {
+  id: string;
+  kind: Kind;
+  fold: boolean;
+  tested: boolean;
+  inScope: boolean;
+  lbl: string;
+  size: number;
+};
+
+function trunc(s: string, n = 26): string {
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-// ---------------------------------------------------------------------------
-// 节点视觉：已测=实色高亮；范围内未测=灰；范围外连接节点=更淡的灰 + 虚线。
-// ---------------------------------------------------------------------------
-function nodeTone(n: CoverageGraphNode): "tested" | "untested" | "context" {
-  if (!n.in_scope) return "context";
-  return n.tested ? "tested" : "untested";
+function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
+  return renderNodes.map((rn) => {
+    if (rn.fold) {
+      return {
+        id: rn.key,
+        kind: rn.kind,
+        fold: true,
+        tested: false,
+        inScope: false,
+        lbl: `还有 ${rn.hidden.length} 个${kindMeta[rn.kind].label}`,
+        size: 24,
+      };
+    }
+    return {
+      id: rn.key,
+      kind: rn.kind,
+      fold: false,
+      tested: rn.node.tested,
+      inScope: rn.node.in_scope,
+      lbl: trunc(rn.node.label || kindMeta[rn.kind].label),
+      size: kindMeta[rn.kind].size,
+    };
+  });
 }
 
-type AssetNodeData = { rn: AssetRenderNode };
-type FoldNodeData = { rn: FoldNode };
-type AssetRF = RFNode<AssetNodeData, "asset">;
-type FoldRF = RFNode<FoldNodeData, "fold">;
+// G6 的类型把自定义字段归在 data 下，但官方 force 示例（及运行时）按顶层读 d.<field>。
+// 回调形参用 unknown 满足 G6 签名，内部用 nd() 强转回我们的顶层结构。
+const nd = (d: unknown) => d as G6NodeDatum;
 
-function AssetGraphNode({ data, selected }: NodeProps<AssetRF>) {
-  const n = data.rn.node;
-  const meta = kindMeta[n.kind];
-  const Icon = meta.icon;
-  const tone = nodeTone(n);
-
-  return (
-    <div
-      className={cn(
-        "w-[180px] cursor-pointer rounded-xl border-2 transition-colors",
-        selected
-          ? "border-blue-500"
-          : tone === "tested"
-            ? "border-emerald-400/70"
-            : "border-transparent",
-      )}
-    >
-      <div
-        className={cn(
-          "group relative flex items-center gap-2 rounded-[10px] border px-2.5 py-2 shadow-sm transition-shadow hover:shadow-md",
-          tone === "context"
-            ? "border-dashed border-neutral-300 bg-neutral-100/70 dark:border-neutral-700 dark:bg-neutral-900/60"
-            : "border-black/[0.06] bg-white dark:border-white/10 dark:bg-neutral-900",
-          tone === "untested" && "opacity-90",
-        )}
-      >
-        <Handle type="target" position={Position.Top} className="!size-1.5 !border-0 !bg-neutral-300 opacity-0" />
-        <span
-          className={cn(
-            "flex size-6 shrink-0 items-center justify-center rounded-lg shadow-sm",
-            tone === "tested" ? meta.iconBg : "bg-neutral-400 dark:bg-neutral-600",
-          )}
-        >
-          <Icon className="size-3.5 text-white" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div
-            className={cn(
-              "truncate text-[12px] font-semibold",
-              tone === "tested"
-                ? "text-neutral-800 dark:text-neutral-100"
-                : "text-neutral-500 dark:text-neutral-400",
-            )}
-            title={n.label}
-          >
-            {n.label || meta.label}
-          </div>
-          <div className="text-[10px] text-neutral-400">{meta.label}</div>
-        </div>
-        {tone === "tested" && (
-          <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" title="已测试" />
-        )}
-        <Handle type="source" position={Position.Bottom} className="!size-1.5 !border-0 !bg-neutral-300 opacity-0" />
-      </div>
-    </div>
-  );
+// 已测=实色高亮；范围内未测=灰；范围外/折叠=更淡的灰 + 虚线描边。
+function nodeFill(d: G6NodeDatum): string {
+  if (d.fold) return "#f1f5f9";
+  if (!d.inScope) return "#e2e8f0";
+  if (d.tested) return kindMeta[d.kind].hex;
+  return "#94a3b8";
 }
-
-function FoldGraphNode({ data, selected }: NodeProps<FoldRF>) {
-  const f = data.rn;
-  const meta = kindMeta[f.kind];
-  return (
-    <div
-      className={cn(
-        "cursor-pointer rounded-full border-2 transition-colors",
-        selected ? "border-blue-500" : "border-transparent",
-      )}
-    >
-      <div className="group relative flex items-center gap-1.5 rounded-full border border-dashed border-neutral-400 bg-neutral-50 px-3 py-1.5 shadow-sm hover:bg-neutral-100 dark:border-neutral-600 dark:bg-neutral-900 dark:hover:bg-neutral-800">
-        <Handle type="target" position={Position.Top} className="!size-1.5 !border-0 !bg-neutral-300 opacity-0" />
-        <MoreHorizontal className="size-4 text-neutral-500" />
-        <span className="text-[11px] font-medium text-neutral-600 dark:text-neutral-300">
-          还有 {f.hidden.length} 个{meta.label}
-        </span>
-      </div>
-    </div>
-  );
+function nodeStroke(d: G6NodeDatum): string {
+  if (d.fold || !d.inScope) return "#94a3b8";
+  if (d.tested) return "#0f766e";
+  return "#64748b";
 }
-
-const nodeTypes = { asset: AssetGraphNode, fold: FoldGraphNode };
 
 // ---------------------------------------------------------------------------
 // 抽屉：资产节点看详情；折叠节点看隐藏列表 + "展示更多"。
@@ -363,9 +254,7 @@ function AssetSheet({
                   <DetailRow label="IP">{node.ip}</DetailRow>
                   <DetailRow label="端口">{node.port ? node.port : undefined}</DetailRow>
                   <DetailRow label="URL">
-                    {node.url ? (
-                      <span className="font-mono text-xs break-all">{node.url}</span>
-                    ) : undefined}
+                    {node.url ? <span className="font-mono text-xs break-all">{node.url}</span> : undefined}
                   </DetailRow>
                   <DetailRow label="标题">{node.page_title}</DetailRow>
                   <DetailRow label="状态码">{node.status_code ? node.status_code : undefined}</DetailRow>
@@ -411,9 +300,7 @@ function FoldSheet({
               <SheetTitle className="text-base">
                 未展示的{meta.label}（{fold.hidden.length}）
               </SheetTitle>
-              <p className="text-muted-foreground text-xs">
-                已测优先展示。点「展示更多」把下一批拉进图里。
-              </p>
+              <p className="text-muted-foreground text-xs">已测优先展示。点「展示更多」把下一批拉进图里。</p>
             </SheetHeader>
             <ScrollArea className="min-h-0 flex-1">
               <div className="flex flex-col gap-1 p-3">
@@ -461,30 +348,31 @@ function GraphInner({ taskId }: { taskId: string }) {
   const [expanded, setExpanded] = React.useState<Map<string, number>>(new Map());
   const [selectedAsset, setSelectedAsset] = React.useState<CoverageGraphNode | null>(null);
   const [selectedFoldId, setSelectedFoldId] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(true);
 
-  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<AssetRF | FoldRF>([]);
-  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const graphRef = React.useRef<G6Graph | null>(null);
+  // click 处理需要最新的 key→RenderNode 映射（G6 事件回调闭包外读 ref）。
+  const renderMapRef = React.useRef<Map<string, RenderNode>>(new Map());
+  const gDataRef = React.useRef<{ nodes: G6NodeDatum[]; edges: { source: string; target: string }[] }>({
+    nodes: [],
+    edges: [],
+  });
+
+  const fetchGraph = React.useCallback(() => {
+    setLoading(true);
+    api
+      .taskCoverageGraph(taskId)
+      .then((g) => setData({ nodes: g.nodes ?? [], edges: g.edges ?? [] }))
+      .catch(() => {
+        /* 保留上一次数据 */
+      })
+      .finally(() => setLoading(false));
+  }, [taskId]);
 
   React.useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      api
-        .taskCoverageGraph(taskId)
-        .then((g) => {
-          if (cancelled) return;
-          setData({ nodes: g.nodes ?? [], edges: g.edges ?? [] });
-        })
-        .catch(() => {
-          /* 保留上一次数据 */
-        });
-    };
-    load();
-    const timer = setInterval(load, 8000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [taskId]);
+    fetchGraph();
+  }, [fetchGraph]);
 
   const { renderNodes, renderEdges } = React.useMemo(
     () =>
@@ -494,38 +382,105 @@ function GraphInner({ taskId }: { taskId: string }) {
     [data, expanded],
   );
 
-  // 布局只在「可见节点集合」变化时重算，避免轮询导致抖动。
+  // 结构签名：只在可见节点/边集合变化时重建图 + 重跑布局，避免无谓抖动。
   const sig = React.useMemo(
-    () => `${renderNodes.map((n) => n.key).sort().join(",")}|${renderEdges.length}`,
+    () =>
+      `${renderNodes.map((n) => `${n.key}:${n.fold ? "f" : n.node.tested ? "t" : "u"}`).sort().join(",")}|${renderEdges.length}`,
     [renderNodes, renderEdges],
   );
-  const posRef = React.useRef<Map<string, { x: number; y: number }>>(new Map());
-  const lastSig = React.useRef("");
-  if (sig !== lastSig.current) {
-    posRef.current = layout(renderNodes, renderEdges);
-    lastSig.current = sig;
-  }
 
+  // 维护 gDataRef + renderMapRef（供事件与图数据应用读取）。
+  gDataRef.current = {
+    nodes: toG6Nodes(renderNodes),
+    edges: renderEdges.map((e) => ({ source: e.src, target: e.dst })),
+  };
+  const rmap = new Map<string, RenderNode>();
+  for (const rn of renderNodes) rmap.set(rn.key, rn);
+  renderMapRef.current = rmap;
+
+  const applyData = React.useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    graph.setData(gDataRef.current);
+    void graph.render();
+  }, []);
+
+  // 建图（一次）。动态 import 避开 SSR/静态导出期的 window 依赖。
   React.useEffect(() => {
-    const pos = posRef.current;
-    setRfNodes(
-      renderNodes.map((rn) => {
-        const p = pos.get(rn.key) ?? { x: 0, y: 0 };
-        return rn.fold
-          ? ({ id: rn.key, type: "fold", position: p, data: { rn } } as FoldRF)
-          : ({ id: rn.key, type: "asset", position: p, data: { rn } } as AssetRF);
-      }),
-    );
-    setRfEdges(
-      renderEdges.map((e, i) => ({
-        id: `e${i}-${e.src}-${e.dst}`,
-        source: e.src,
-        target: e.dst,
-        type: "default",
-        style: { stroke: "#cbd5e1", strokeWidth: 1.5 },
-      })),
-    );
-  }, [renderNodes, renderEdges, setRfNodes, setRfEdges]);
+    let destroyed = false;
+    let graph: G6Graph | null = null;
+    void (async () => {
+      const { Graph } = await import("@antv/g6");
+      if (destroyed || !containerRef.current) return;
+      graph = new Graph({
+        container: containerRef.current,
+        autoResize: true,
+        autoFit: "view",
+        background: "#f0f2f7",
+        node: {
+          style: {
+            size: (d: unknown) => nd(d).size,
+            fill: (d: unknown) => nodeFill(nd(d)),
+            stroke: (d: unknown) => nodeStroke(nd(d)),
+            lineWidth: (d: unknown) => (nd(d).fold || !nd(d).inScope ? 1 : 1.5),
+            lineDash: (d: unknown) => (nd(d).fold || !nd(d).inScope ? [3, 3] : [0]),
+            iconText: (d: unknown) => (nd(d).fold ? "⋯" : kindMeta[nd(d).kind].emoji),
+            iconFontSize: (d: unknown) => Math.max(11, nd(d).size * 0.48),
+            labelText: (d: unknown) => nd(d).lbl,
+            labelFontSize: 10,
+            labelPlacement: "bottom",
+            labelFill: "#475569",
+            labelBackground: true,
+            labelBackgroundFill: "rgba(255,255,255,0.75)",
+            labelBackgroundRadius: 3,
+            labelPadding: [1, 3],
+          },
+        },
+        edge: {
+          style: { stroke: "#cbd5e1", lineWidth: 1, endArrow: false },
+        },
+        layout: {
+          type: "d3-force",
+          collide: { radius: (d: unknown) => (nd(d).size ? nd(d).size : 20) + 8 },
+          link: {
+            distance: (edge: unknown) => {
+              // 顶层（公司/根域名）离子节点远一点，叶子近一点。edge.source 可能是 id 或已解析节点。
+              const s = (edge as { source: string | { id?: string } }).source;
+              const srcId = typeof s === "string" ? s : (s?.id ?? "");
+              const src = renderMapRef.current.get(srcId);
+              const k = src && !src.fold ? src.kind : "endpoint";
+              return k === "company" || k === "root_domain" ? 120 : 60;
+            },
+          },
+          manyBody: {
+            strength: (d: unknown) => (nd(d).kind === "endpoint" || nd(d).fold ? -60 : -200),
+          },
+        },
+        behaviors: ["drag-element-force", "drag-canvas", "zoom-canvas"],
+      });
+      graph.on("node:click", (evt: unknown) => {
+        const id = (evt as { target?: { id?: string } }).target?.id;
+        if (!id) return;
+        const rn = renderMapRef.current.get(id);
+        if (!rn) return;
+        if (rn.fold) setSelectedFoldId(rn.key);
+        else setSelectedAsset(rn.node);
+      });
+      graphRef.current = graph;
+      applyData();
+    })();
+    return () => {
+      destroyed = true;
+      graph?.destroy();
+      graphRef.current = null;
+    };
+  }, [applyData]);
+
+  // 可见集合变化 → 重新灌数据 + 布局。sig 只作为重排触发器（applyData 读 gDataRef）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sig 是刻意的重排触发依赖
+  React.useEffect(() => {
+    applyData();
+  }, [sig, applyData]);
 
   const showMore = React.useCallback((groupId: string) => {
     setExpanded((prev) => {
@@ -537,9 +492,8 @@ function GraphInner({ taskId }: { taskId: string }) {
 
   const selectedFold =
     selectedFoldId != null
-      ? (renderNodes.find((n) => n.fold && n.key === selectedFoldId) as FoldNode | undefined) ?? null
+      ? ((renderNodes.find((n) => n.fold && n.key === selectedFoldId) as FoldNode | undefined) ?? null)
       : null;
-  // 折叠节点全部展开后自动关闭抽屉。
   React.useEffect(() => {
     if (selectedFoldId != null && !selectedFold) setSelectedFoldId(null);
   }, [selectedFoldId, selectedFold]);
@@ -549,79 +503,54 @@ function GraphInner({ taskId }: { taskId: string }) {
   const inScope = data?.nodes.filter((n) => n.in_scope).length ?? 0;
 
   return (
-    <>
-      <ReactFlow
-        nodes={rfNodes}
-        edges={rfEdges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onNodeClick={(_, node) => {
-          const rn = (node.data as AssetNodeData | FoldNodeData).rn;
-          if (rn.fold) setSelectedFoldId(rn.key);
-          else setSelectedAsset(rn.node);
-        }}
-        nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        proOptions={{ hideAttribution: true }}
-        minZoom={0.05}
-        className="!bg-[#f0f2f7] dark:!bg-neutral-950"
-      >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={1} className="text-neutral-400/50 dark:text-neutral-700/60" />
-        <Controls
-          showInteractive={false}
-          className="!rounded-lg !border !shadow-sm [&>button]:!border-border [&>button]:!bg-card [&>button:hover]:!bg-accent [&_svg]:!fill-foreground"
-        />
-        <MiniMap
-          pannable
-          zoomable
-          className="!bg-card !rounded-lg !border !shadow-sm"
-          maskColor="rgb(148 163 184 / 0.18)"
-          nodeColor={(node) => {
-            const rn = (node.data as AssetNodeData | FoldNodeData | undefined)?.rn;
-            if (!rn || rn.fold) return "#94a3b8";
-            return rn.node.in_scope && rn.node.tested ? kindMeta[rn.node.kind].hex : "#cbd5e1";
-          }}
-          nodeStrokeWidth={0}
-          nodeBorderRadius={4}
-        />
-        <Panel position="top-left">
-          <div className="bg-card/95 flex flex-col gap-2.5 rounded-lg border p-3 text-xs shadow-sm backdrop-blur">
-            {total === 0 && <span className="text-muted-foreground">暂无范围内资产（先锚定任务范围）</span>}
-            {total > 0 && (
-              <div className="text-muted-foreground">
-                范围内 <span className="text-foreground font-semibold tabular-nums">{inScope}</span> · 已测{" "}
-                <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{tested}</span>
-              </div>
-            )}
-            <div className="flex flex-wrap gap-x-3 gap-y-1.5">
-              {(Object.keys(kindMeta) as Kind[]).map((k) => {
-                const m = kindMeta[k];
-                const Icon = m.icon;
-                return (
-                  <span key={k} className="text-foreground inline-flex items-center gap-1.5">
-                    <span className={cn("flex size-4 items-center justify-center rounded", m.iconBg)}>
-                      <Icon className="size-2.5 text-white" />
-                    </span>
-                    {m.label}
-                  </span>
-                );
-              })}
-            </div>
-            <div className="border-border/60 text-muted-foreground flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded bg-emerald-500" /> 已测（高亮）
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" />
+
+      {/* 图例 + 统计 + 刷新（叠加层） */}
+      <div className="bg-card/95 pointer-events-auto absolute top-3 left-3 flex max-w-[340px] flex-col gap-2.5 rounded-lg border p-3 text-xs shadow-sm backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          {total > 0 ? (
+            <span className="text-muted-foreground">
+              范围内 <span className="text-foreground font-semibold tabular-nums">{inScope}</span> · 已测{" "}
+              <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{tested}</span>
+            </span>
+          ) : (
+            <span className="text-muted-foreground">{loading ? "加载中…" : "暂无范围内资产（先锚定任务范围）"}</span>
+          )}
+          <Button variant="ghost" size="icon" className="size-6" onClick={fetchGraph} title="刷新">
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+          {(Object.keys(kindMeta) as Kind[]).map((k) => {
+            const m = kindMeta[k];
+            const Icon = m.icon;
+            return (
+              <span key={k} className="text-foreground inline-flex items-center gap-1.5">
+                <span className={cn("flex size-4 items-center justify-center rounded", m.iconBg)}>
+                  <Icon className="size-2.5 text-white" />
+                </span>
+                {m.label}
               </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded bg-neutral-400" /> 未测
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded border border-dashed border-neutral-400 bg-neutral-100" /> 范围外
-              </span>
-            </div>
-          </div>
-        </Panel>
-      </ReactFlow>
+            );
+          })}
+        </div>
+        <div className="border-border/60 text-muted-foreground flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-3 rounded-full bg-emerald-500" /> 已测（高亮）
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-3 rounded-full bg-neutral-400" /> 未测
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" /> 范围外
+          </span>
+        </div>
+        <p className="text-muted-foreground/80 border-border/60 border-t pt-2 leading-relaxed">
+          力导向布局，可拖拽节点、滚轮缩放；灰色「⋯」是折叠节点，点开可展开更多。
+        </p>
+      </div>
+
       <AssetSheet node={selectedAsset} onOpenChange={(o) => !o && setSelectedAsset(null)} />
       <FoldSheet
         fold={selectedFold}
@@ -632,7 +561,7 @@ function GraphInner({ taskId }: { taskId: string }) {
           setSelectedAsset(n);
         }}
       />
-    </>
+    </div>
   );
 }
 
@@ -641,9 +570,7 @@ export function CoverageGraphTab({ taskId }: { taskId: string }) {
     <Card>
       <CardContent className="p-0">
         <div className="h-[72vh] w-full overflow-hidden rounded-xl">
-          <ReactFlowProvider>
-            <GraphInner taskId={taskId} />
-          </ReactFlowProvider>
+          <GraphInner taskId={taskId} />
         </div>
       </CardContent>
     </Card>
