@@ -27,6 +27,10 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | :---: | :---: |
 | ![发现](screenshots/findings.png) | ![资产](screenshots/assets.png) |
 
+| 资产覆盖图（力导向布局 · 已测高亮 · 节点折叠展开） |
+| :---: |
+| ![资产覆盖图](screenshots/assets_test.png) |
+
 | 流量录制 | 人在环路对话 |
 | :---: | :---: |
 | ![流量](screenshots/traffic.png) | ![对话](screenshots/chat.png) |
