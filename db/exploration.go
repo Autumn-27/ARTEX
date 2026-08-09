@@ -615,6 +615,51 @@ AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, 
 	return scanTrace(rows)
 }
 
+// AssetRef is a compact exploration node (intent/fact/finding) that references an
+// asset via an anchor — for the coverage graph's node drawer.
+type AssetRef struct {
+	ID      int64  `json:"id"`
+	Kind    string `json:"kind"`
+	State   string `json:"state"`
+	Summary string `json:"summary"`
+}
+
+// AssetRefs returns the intents / facts / findings in THIS exploration anchored to
+// the given asset id (newest first) — what this task tested / concluded about it.
+func (s *ExplorationStore) AssetRefs(assetID int64) ([]AssetRef, error) {
+	if assetID <= 0 {
+		return []AssetRef{}, nil
+	}
+	rows, err := s.db.Query(`
+SELECT en.id, en.kind, en.state, en.payload
+FROM exploration_anchors ea
+JOIN exploration_nodes en ON en.id = ea.node_id
+WHERE ea.asset_id = $1 AND en.exploration_id = $2 AND en.kind IN ('intent','fact','finding')
+ORDER BY en.id DESC`, assetID, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AssetRef{}
+	for rows.Next() {
+		var r AssetRef
+		var payload []byte
+		if err := rows.Scan(&r.ID, &r.Kind, &r.State, &payload); err != nil {
+			return nil, err
+		}
+		var p map[string]any
+		_ = json.Unmarshal(payload, &p)
+		for _, k := range []string{"summary", "text"} {
+			if v, ok := p[k].(string); ok && strings.TrimSpace(v) != "" {
+				r.Summary = v
+				break
+			}
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ActivityTraceSearchExcluding keyword-searches every node's steps in this
 // exploration EXCEPT one node's own (excludeNodeID) — so a worker's
 // search_all_worker_traces doesn't return its own in-progress trace (which is

@@ -484,6 +484,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
+	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("POST /api/active", s.setActive)
@@ -1128,6 +1129,40 @@ func (s *Server) taskCoverageGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, g)
+}
+
+// taskAssetRefs returns the intents / facts / findings in this task anchored to a
+// given asset id — powers the coverage-graph node drawer's「关联意图 / 关联事实」。
+func (s *Server) taskAssetRefs(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	assetID, _ := strconv.ParseInt(r.URL.Query().Get("asset_id"), 10, 64)
+	if assetID <= 0 {
+		writeErr(w, 400, "需要 asset_id")
+		return
+	}
+	refs, err := t.Store.AssetRefs(assetID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	intents := []db.AssetRef{}
+	facts := []db.AssetRef{}
+	findings := []db.AssetRef{}
+	for _, ref := range refs {
+		switch ref.Kind {
+		case "intent":
+			intents = append(intents, ref)
+		case "fact":
+			facts = append(facts, ref)
+		case "finding":
+			findings = append(findings, ref)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"intents": intents, "facts": facts, "findings": findings})
 }
 
 // taskScopeList returns a task's scope rows (coverage denominator sources).

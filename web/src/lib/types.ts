@@ -165,6 +165,19 @@ export interface CoverageGraphData {
   edges: CoverageGraphEdge[];
 }
 
+// 某资产在本任务探索图里关联到的意图/事实/发现（覆盖图节点抽屉用）。
+export interface CoverageAssetRef {
+  id: number;
+  kind: string;
+  state: string;
+  summary: string;
+}
+export interface CoverageAssetRefs {
+  intents: CoverageAssetRef[];
+  facts: CoverageAssetRef[];
+  findings: CoverageAssetRef[];
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;

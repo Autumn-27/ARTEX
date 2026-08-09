@@ -25,7 +25,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
-import type { CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
+import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
 
 // 每个父节点下、同一类型的子节点默认展示的数量；超出折叠，"展示更多"每次再拉这么多。
 const FOLD_LIMIT = 20;
@@ -33,17 +33,57 @@ const FOLD_STEP = 20;
 
 type Kind = CoverageGraphNode["kind"];
 
-type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string; emoji: string; size: number };
+type KindMeta = { label: string; icon: LucideIcon; iconBg: string; hex: string; size: number };
 
 const kindMeta: Record<Kind, KindMeta> = {
-  company: { label: "公司", icon: Building2, iconBg: "bg-slate-500", hex: "#64748b", emoji: "🏢", size: 46 },
-  root_domain: { label: "根域名", icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1", emoji: "🌐", size: 38 },
-  subdomain: { label: "子域名", icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6", emoji: "🔗", size: 30 },
-  ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2", emoji: "🖥️", size: 28 },
-  service: { label: "服务", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", emoji: "📡", size: 26 },
-  app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", emoji: "📱", size: 26 },
-  endpoint: { label: "端点", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", emoji: "🔌", size: 20 },
+  company: { label: "公司", icon: Building2, iconBg: "bg-slate-500", hex: "#64748b", size: 46 },
+  root_domain: { label: "根域名", icon: Globe, iconBg: "bg-indigo-500", hex: "#6366f1", size: 38 },
+  subdomain: { label: "子域名", icon: Waypoints, iconBg: "bg-blue-500", hex: "#3b82f6", size: 30 },
+  ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2", size: 28 },
+  service: { label: "服务", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", size: 26 },
+  app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", size: 26 },
+  endpoint: { label: "端点", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", size: 20 },
 };
+
+// G6 节点图标用平台一致的 lucide 图标：把 lucide 的 SVG 路径（v1.22）渲染成白色描边的
+// data URI，作为节点 iconSrc（白色在实色/灰色底上都清晰）。手写内嵌，避免 react-dom/server
+// 在 React19/Next 客户端打包的问题。
+function svgUri(inner: string, filled = false): string {
+  const attrs = filled
+    ? 'fill="#fff" stroke="none"'
+    : 'fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" ${attrs}>${inner}</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+const KIND_ICON: Record<Kind, string> = {
+  company: svgUri(
+    '<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/>',
+  ),
+  root_domain: svgUri(
+    '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  ),
+  subdomain: svgUri(
+    '<path d="m10.586 5.414-5.172 5.172"/><path d="m18.586 13.414-5.172 5.172"/><path d="M6 12h12"/><circle cx="12" cy="20" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="20" cy="12" r="2"/><circle cx="4" cy="12" r="2"/>',
+  ),
+  ip: svgUri(
+    '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  ),
+  service: svgUri(
+    '<path d="M16.247 7.761a6 6 0 0 1 0 8.478"/><path d="M19.075 4.933a10 10 0 0 1 0 14.134"/><path d="M4.925 19.067a10 10 0 0 1 0-14.134"/><path d="M7.753 16.239a6 6 0 0 1 0-8.478"/><circle cx="12" cy="12" r="2"/>',
+  ),
+  app: svgUri(
+    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
+  ),
+  endpoint: svgUri(
+    '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',
+  ),
+};
+
+const FOLD_ICON = svgUri(
+  '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+  true,
+);
 
 // ---------------------------------------------------------------------------
 // Folding: full graph → currently-visible node/edge set (自顶向下级联折叠)。
@@ -150,6 +190,26 @@ function trunc(s: string, n = 26): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
+// 图里的节点文案：服务不显示完整 URL，只显示 端口·标题·状态码；端点只显示 path。
+// 其余类型沿用后端给的 label。
+function graphLabel(n: CoverageGraphNode): string {
+  if (n.kind === "service") {
+    const parts: string[] = [];
+    if (n.port) parts.push(`:${n.port}`);
+    if (n.page_title) parts.push(n.page_title);
+    if (n.status_code) parts.push(String(n.status_code));
+    return parts.length ? parts.join(" · ") : n.domain || n.ip || n.label;
+  }
+  if (n.kind === "endpoint" && n.url) {
+    try {
+      return new URL(n.url).pathname || "/";
+    } catch {
+      /* 非法 URL：回退到完整 label */
+    }
+  }
+  return n.label;
+}
+
 function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
   return renderNodes.map((rn) => {
     if (rn.fold) {
@@ -169,7 +229,7 @@ function toG6Nodes(renderNodes: RenderNode[]): G6NodeDatum[] {
       fold: false,
       tested: rn.node.tested,
       inScope: rn.node.in_scope,
-      lbl: trunc(rn.node.label || kindMeta[rn.kind].label),
+      lbl: trunc(graphLabel(rn.node) || kindMeta[rn.kind].label),
       size: kindMeta[rn.kind].size,
     };
   });
@@ -205,16 +265,56 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   );
 }
 
+function RefList({ title, items }: { title: string; items: CoverageAssetRef[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <h4 className="text-muted-foreground mb-1 text-xs font-medium">
+        {title}（{items.length}）
+      </h4>
+      <div className="flex flex-col gap-1">
+        {items.map((r) => (
+          <div key={`${r.kind}-${r.id}`} className="bg-muted/50 flex items-start gap-2 rounded-md px-2 py-1.5 text-xs">
+            <span className="text-muted-foreground shrink-0 font-mono">#{r.id}</span>
+            {r.state && <span className="text-muted-foreground shrink-0">{r.state}</span>}
+            <span className="text-foreground min-w-0 flex-1 break-words">{r.summary || "—"}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AssetSheet({
   node,
+  taskId,
   onOpenChange,
 }: {
   node: CoverageGraphNode | null;
+  taskId: string;
   onOpenChange: (open: boolean) => void;
 }) {
   const meta = node ? kindMeta[node.kind] : null;
   const Icon = meta?.icon;
   const raw = node ? JSON.stringify(node, null, 2) : "";
+  const [refs, setRefs] = React.useState<CoverageAssetRefs | null>(null);
+
+  React.useEffect(() => {
+    setRefs(null);
+    if (!node?.asset_id) return;
+    let cancelled = false;
+    api
+      .taskAssetRefs(taskId, node.asset_id)
+      .then((r) => {
+        if (!cancelled) setRefs(r);
+      })
+      .catch(() => {
+        /* 无关联或出错：不展示该区块 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node, taskId]);
   return (
     <Sheet open={node !== null} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 data-[side=right]:sm:max-w-md">
@@ -263,6 +363,13 @@ function AssetSheet({
                     {node.asset_id ? <span className="font-mono text-xs">{node.asset_id}</span> : undefined}
                   </DetailRow>
                 </section>
+                {refs && (refs.intents.length > 0 || refs.facts.length > 0 || refs.findings.length > 0) && (
+                  <section className="flex flex-col gap-3 border-t pt-3">
+                    <RefList title="关联意图" items={refs.intents} />
+                    <RefList title="关联事实" items={refs.facts} />
+                    <RefList title="关联发现" items={refs.findings} />
+                  </section>
+                )}
                 <section className="border-t pt-3">
                   <h4 className="text-muted-foreground mb-1.5 text-xs font-medium">原始数据</h4>
                   <pre className="bg-muted/50 text-foreground max-w-full overflow-hidden rounded-md border p-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
@@ -424,8 +531,9 @@ function GraphInner({ taskId }: { taskId: string }) {
             stroke: (d: unknown) => nodeStroke(nd(d)),
             lineWidth: (d: unknown) => (nd(d).fold || !nd(d).inScope ? 1 : 1.5),
             lineDash: (d: unknown) => (nd(d).fold || !nd(d).inScope ? [3, 3] : [0]),
-            iconText: (d: unknown) => (nd(d).fold ? "⋯" : kindMeta[nd(d).kind].emoji),
-            iconFontSize: (d: unknown) => Math.max(11, nd(d).size * 0.48),
+            iconSrc: (d: unknown) => (nd(d).fold ? FOLD_ICON : KIND_ICON[nd(d).kind]),
+            iconWidth: (d: unknown) => Math.max(12, nd(d).size * 0.55),
+            iconHeight: (d: unknown) => Math.max(12, nd(d).size * 0.55),
             labelText: (d: unknown) => nd(d).lbl,
             labelFontSize: 10,
             labelPlacement: "bottom",
@@ -551,7 +659,7 @@ function GraphInner({ taskId }: { taskId: string }) {
         </p>
       </div>
 
-      <AssetSheet node={selectedAsset} onOpenChange={(o) => !o && setSelectedAsset(null)} />
+      <AssetSheet node={selectedAsset} taskId={taskId} onOpenChange={(o) => !o && setSelectedAsset(null)} />
       <FoldSheet
         fold={selectedFold}
         onOpenChange={(o) => !o && setSelectedFoldId(null)}

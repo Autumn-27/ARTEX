@@ -11,7 +11,7 @@ import type {
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
   Tool, Conversation, AgentTrigger,
   InterceptRule, InterceptPending, InterceptApprovalRow,
-  TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData,
+  TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData, CoverageAssetRefs,
   CommandRecord, LLMRecordItem, LLMRecordDetail,
 } from "@/lib/types";
 
@@ -127,6 +127,9 @@ export const api = {
   // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
   taskCoverageGraph: (id: string) =>
     get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
+  taskAssetRefs: (id: string, assetId: number) =>
+    get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
 
   // ---- assets ----
   // Server-side paginated: pass limit/offset, get back the page + full match total.
