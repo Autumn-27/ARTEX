@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -154,17 +156,36 @@ func workerTrafficBlock(proxyAddr string) string {
 // artifactSpec is 段 [C]: the code-owned, non-editable tail appended to every
 // pentest agent's prompt — intermediate artifacts must land in the shared work
 // dir, never /tmp. Guaranteed present regardless of how the DB body is edited.
-func artifactSpec(workDir string) string {
-	return "\n\n**中间产物输出规约**：脚本、payload、抓到的响应体、临时数据等一切中间产物，**一律写到共享工作目录 " + workDir + "**（这是所有 agent 共用的 CWD，相对路径即写在这里，也可用该绝对路径）——**不要写 /tmp、不要用其它绝对路径**。"
+func artifactSpec(dir string) string {
+	return "\n\n**中间产物输出规约**：脚本、payload、抓到的响应体、临时数据等一切中间产物，**一律写到本任务工作目录 " + dir + "**（相对路径即写在这里，也可用该绝对路径）——**不要写 /tmp、不要用其它绝对路径**。"
 }
 
-// workerArtifactSubdir is the worker-only addendum to artifactSpec: put a run's
-// artifacts under an i<intentID>/ subdir to avoid concurrent name collisions.
-const workerArtifactSubdir = "为避免与其他 work 撞名，把本次产物放到子目录 i<意图id>/ 下（如 i123/exploit.py）。"
+// workerArtifactSpec is the worker's 段 [C]: its per-intent run dir is pre-created
+// by the engine (ensureRunDir), so it just writes relative paths there — no manual
+// mkdir, no cross-worker name collisions.
+func workerArtifactSpec(runDir string) string {
+	return "\n\n**中间产物输出规约**：脚本、payload、抓到的响应体、临时数据等一切中间产物，**一律写到本次意图的专属工作目录 " + runDir + "**（已自动建好，直接用相对路径写在这里即可，无需再手动建目录）——**不要写 /tmp、不要用其它绝对路径**。"
+}
 
-func workerSystem(proxyAddr, workDir string) string {
+// ensureRunDir builds and creates an agent's working directory under base:
+// <base>/<taskID> for planner/main; <base>/<taskID>/i<intentID> for a worker
+// (intentID<=0 → task dir only). Best-effort mkdir — on failure, writes fail the
+// same way an unwritable CWD would.
+func ensureRunDir(base string, taskID, intentID int64) string {
+	dir := filepath.Join(base, strconv.FormatInt(taskID, 10))
+	if intentID > 0 {
+		dir = filepath.Join(dir, "i"+strconv.FormatInt(intentID, 10))
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
+// cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
+func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
+
+func workerSystem(proxyAddr, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr})
-	return body + workerTrafficBlock(proxyAddr) + artifactSpec(workDir) + workerArtifactSubdir
+	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's SYSTEM prompt: the
@@ -235,8 +256,10 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// 意图是 worker 的全部任务，放进 system prompt（抗 compaction、整轮常驻），而不是
 	// user 输入——与 planner 把关键态势放 system 一致。落在指令之后、deferred 块之前。
 	// 全局态势(graphOverviewData)也带上，但仅供了解大局；意图放在最后、最醒目的位置。
+	// 本次意图的专属工作目录 <workDir>/<taskID>/i<intentID>，引擎侧先建好。
+	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	system, boundary := deferredSystem(workerSystem(w.proxyAddr, w.workDir)+overview+renderIntentTask(intent), def)
+	system, boundary := deferredSystem(workerSystem(w.proxyAddr, runDir)+overview+renderIntentTask(intent), def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
@@ -266,7 +289,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		WebSearchProxy:     w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
 		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
-		WorkingDir: w.workDir,
+		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
@@ -277,7 +300,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		Settlement: settle,
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
 		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
-		ToolOutputDir: filepath.Join(w.workDir, "cmd-output"),
+		ToolOutputDir: cmdOutDir(runDir),
 		Compaction:    compactionConfig(w.window), // long tool-heavy runs stay within the window
 		Todos:         actool.NewTodoStore(),      // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 	}
