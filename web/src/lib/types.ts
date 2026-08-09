@@ -293,11 +293,13 @@ export interface AgentTrigger {
   on_goal_met: boolean; // 任意任务达成目标时触发
   on_task_timeout: boolean; // 任意任务超时时触发
   on_tool_call: boolean; // 选中工具被调用(执行完成)时触发
+  on_task_create: boolean; // 任意任务被创建时触发
   interval_message: string; // 各触发条件的独立用户消息
   finding_message: string;
   goal_message: string;
   task_timeout_message: string;
   tool_call_message: string;
+  task_create_message: string;
   tool_names: string[]; // on_tool_call 选中的工具 key(至少一个)
   last_fire?: string;
 }

@@ -721,11 +721,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   const [onGoalMet, setOnGoalMet] = React.useState(false);
   const [onTaskTimeout, setOnTaskTimeout] = React.useState(false);
   const [onToolCall, setOnToolCall] = React.useState(false);
+  const [onTaskCreate, setOnTaskCreate] = React.useState(false);
   const [intervalMsg, setIntervalMsg] = React.useState("");
   const [findingMsg, setFindingMsg] = React.useState("");
   const [goalMsg, setGoalMsg] = React.useState("");
   const [taskTimeoutMsg, setTaskTimeoutMsg] = React.useState("");
   const [toolCallMsg, setToolCallMsg] = React.useState("");
+  const [taskCreateMsg, setTaskCreateMsg] = React.useState("");
   const [toolNames, setToolNames] = React.useState<string[]>([]);
   const [saving, setSaving] = React.useState(false);
 
@@ -745,7 +747,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
 
   async function create() {
     const n = onInterval ? Math.max(1, Math.floor(Number(intervalSec) || 0)) : 0;
-    if (n === 0 && !onFinding && !onGoalMet && !onTaskTimeout && !onToolCall) {
+    if (n === 0 && !onFinding && !onGoalMet && !onTaskTimeout && !onToolCall && !onTaskCreate) {
       toast.error("至少选择一种触发条件");
       return;
     }
@@ -762,11 +764,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
         on_goal_met: onGoalMet,
         on_task_timeout: onTaskTimeout,
         on_tool_call: onToolCall,
+        on_task_create: onTaskCreate,
         interval_message: intervalMsg.trim(),
         finding_message: findingMsg.trim(),
         goal_message: goalMsg.trim(),
         task_timeout_message: taskTimeoutMsg.trim(),
         tool_call_message: toolCallMsg.trim(),
+        task_create_message: taskCreateMsg.trim(),
         tool_names: onToolCall ? toolNames : [],
       });
       toast.success("已添加触发器");
@@ -776,11 +780,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
       setOnGoalMet(false);
       setOnTaskTimeout(false);
       setOnToolCall(false);
+      setOnTaskCreate(false);
       setIntervalMsg("");
       setFindingMsg("");
       setGoalMsg("");
       setTaskTimeoutMsg("");
       setToolCallMsg("");
+      setTaskCreateMsg("");
       setToolNames([]);
       reload();
     } catch (e) {
@@ -798,11 +804,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
         on_goal_met: t.on_goal_met,
         on_task_timeout: t.on_task_timeout,
         on_tool_call: t.on_tool_call,
+        on_task_create: t.on_task_create,
         interval_message: t.interval_message,
         finding_message: t.finding_message,
         goal_message: t.goal_message,
         task_timeout_message: t.task_timeout_message,
         tool_call_message: t.tool_call_message,
+        task_create_message: t.task_create_message,
         tool_names: t.tool_names,
       });
       reload();
@@ -826,6 +834,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
     if (t.on_goal_met) parts.push("目标达成");
     if (t.on_task_timeout) parts.push("任务超时");
     if (t.on_tool_call) parts.push(`工具调用(${t.tool_names.length})`);
+    if (t.on_task_create) parts.push("任务创建");
     return parts.join(" · ") || "（无条件）";
   }
 
@@ -999,6 +1008,17 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
           )}
         </div>
 
+        {/* 任务创建 */}
+        <div className="grid gap-1.5">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={onTaskCreate} onCheckedChange={(v) => setOnTaskCreate(!!v)} /> 任务创建时触发
+          </label>
+          {onTaskCreate && (
+            <Textarea className="text-xs" rows={2} value={taskCreateMsg}
+              placeholder="任务被创建时发给 agent 的话（系统会附带任务编号与目标）" onChange={(e) => setTaskCreateMsg(e.target.value)} />
+          )}
+        </div>
+
         <div>
           <Button size="sm" onClick={create} disabled={saving}>
             <SaveIcon /> 添加触发器
@@ -1025,6 +1045,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
                 {t.on_finding && t.finding_message && <div className="line-clamp-1">finding：{t.finding_message}</div>}
                 {t.on_goal_met && t.goal_message && <div className="line-clamp-1">目标：{t.goal_message}</div>}
                 {t.on_task_timeout && t.task_timeout_message && <div className="line-clamp-1">超时：{t.task_timeout_message}</div>}
+                {t.on_task_create && t.task_create_message && <div className="line-clamp-1">任务创建：{t.task_create_message}</div>}
                 {t.on_tool_call && (
                   <>
                     <div className="line-clamp-1">工具：{t.tool_names.join("、") || "（未选）"}</div>

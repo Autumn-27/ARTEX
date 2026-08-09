@@ -26,10 +26,11 @@ type Scheduler struct {
 }
 
 const (
-	schedKeyLastFinding  = "last_finding_id"  // watermark: max finding node id fired for
-	schedKeyFiredGoals   = "fired_goals"      // JSON array of goal node ids already fired
-	schedKeyLastTimeout  = "last_timeout_id"  // watermark: max task id fired for task timeout
-	schedKeyLastToolCall = "last_toolcall_id" // watermark: max activity id fired for tool call
+	schedKeyLastFinding    = "last_finding_id"    // watermark: max finding node id fired for
+	schedKeyFiredGoals     = "fired_goals"        // JSON array of goal node ids already fired
+	schedKeyLastTimeout    = "last_timeout_id"    // watermark: max task id fired for task timeout
+	schedKeyLastToolCall   = "last_toolcall_id"   // watermark: max activity id fired for tool call
+	schedKeyLastTaskCreate = "last_taskcreate_id" // watermark: max task id fired for task create
 )
 
 func newScheduler(s *Server) *Scheduler {
@@ -99,6 +100,17 @@ func (sc *Scheduler) init() {
 		}
 		_ = sc.pg.SetSchedState(schedKeyLastToolCall, strconv.FormatInt(maxID, 10))
 	}
+	if sc.mustState(schedKeyLastTaskCreate) == "" {
+		var maxID int64
+		if evs, err := sc.pg.NewTasksSince(0); err == nil {
+			for _, e := range evs {
+				if e.NodeID > maxID {
+					maxID = e.NodeID
+				}
+			}
+		}
+		_ = sc.pg.SetSchedState(schedKeyLastTaskCreate, strconv.FormatInt(maxID, 10))
+	}
 }
 
 func (sc *Scheduler) step() {
@@ -114,6 +126,7 @@ func (sc *Scheduler) step() {
 	sc.fireGoals(triggers)
 	sc.fireTaskTimeouts(triggers)
 	sc.fireToolCalls(triggers)
+	sc.fireTaskCreates(triggers)
 }
 
 // fireIntervals fires triggers whose interval has elapsed since last_fire.
@@ -227,6 +240,37 @@ func (sc *Scheduler) fireTaskTimeouts(triggers []*db.AgentTrigger) {
 		}
 	}
 	_ = sc.pg.SetSchedState(schedKeyLastTimeout, strconv.FormatInt(maxID, 10))
+}
+
+// fireTaskCreates fires on_task_create triggers for tasks newly created above the
+// persisted watermark (task id → no double-fire across restarts).
+func (sc *Scheduler) fireTaskCreates(triggers []*db.AgentTrigger) {
+	var want []*db.AgentTrigger
+	for _, tr := range triggers {
+		if tr.OnTaskCreate {
+			want = append(want, tr)
+		}
+	}
+	if len(want) == 0 {
+		return
+	}
+	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastTaskCreate), 10, 64)
+	events, err := sc.pg.NewTasksSince(last)
+	if err != nil || len(events) == 0 {
+		return
+	}
+	maxID := last
+	for _, e := range events {
+		if e.NodeID > maxID {
+			maxID = e.NodeID
+		}
+		msgCtx := fmt.Sprintf("\n\n【本次由任务创建触发】\n任务ID: #%d\n任务描述: %s\n任务目标: %s",
+			e.TaskID, e.TaskDesc, e.TaskGoal)
+		for _, tr := range want {
+			sc.s.StartTriggeredRun(tr.AgentKey, fmt.Sprintf("任务创建触发 · task#%d", e.TaskID), tr.TaskCreateMessage+msgCtx, e.TaskID, true)
+		}
+	}
+	_ = sc.pg.SetSchedState(schedKeyLastTaskCreate, strconv.FormatInt(maxID, 10))
 }
 
 // fireToolCalls fires on_tool_call triggers for tool calls (tool_result rows) above
