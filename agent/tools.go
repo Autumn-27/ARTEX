@@ -332,13 +332,31 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 					"denominator": cov.Denominator,
 					"tested":      cov.Tested,
 					"by_type":     cov.ByType,
-					"note":        "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：容器型资产/大量枚举会让它偏低，勿据此认为已测完；可以通过相关工具增加任务测试范围",
+					"note":        "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：容器型资产/大量枚举会让它偏低，勿据此认为已测完；scope 是当前任务测试范围的根资产（root_domain/subdomain/ip/cidr/company 原始行），即覆盖度分母的边界、本任务授权/圈定的目标本身；可用 add_task_scope 增补范围、list_untested_assets 看未测的具体资产【通常不调用list_untested_assets，按照任务推进即可】；",
 				}
 				if cov.ScopeRows == 0 {
 					m["pct"] = nil
 					m["status"] = "范围未锚定"
 				} else {
 					m["pct"] = cov.Pct
+				}
+				// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
+				// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。
+				if rows, err := t.as.ListTaskScope(t.taskID); err == nil && len(rows) > 0 {
+					scope := make([]map[string]any, 0, len(rows))
+					for _, r := range rows {
+						e := map[string]any{"kind": r.Kind, "source": r.Source}
+						switch {
+						case r.Domain != "":
+							e["value"] = r.Domain
+						case r.Net != "":
+							e["value"] = r.Net
+						case r.CompanyID != nil:
+							e["company_id"] = *r.CompanyID
+						}
+						scope = append(scope, e)
+					}
+					m["scope"] = scope
 				}
 				out["coverage"] = m
 			}
