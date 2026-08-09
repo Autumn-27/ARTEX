@@ -517,3 +517,109 @@ export const conversationMessages: Record<number, Activity[]> = {
     { seq: 7, worker: "mainagent", ts: T("2026-07-24T16:01:00Z"), kind: "text", summary: "越权面有两条：① /v1/orders?id= 是自增数字 id → 典型 IDOR，改 id 试读他人订单；② JWT 用 HS256，试 john/hashcat 爆密钥→可伪造任意 sub 越权。我把这两条各派生成一个意图。建议先做 IDOR（成本低、影响直接）。" },
   ],
 };
+
+// ── 资产测试覆盖度（/tasks/{id}/coverage）──
+export const coverage = {
+  scope_rows: 4,
+  denominator: 26,
+  tested: 11,
+  pct: 11 / 26,
+  by_type: [
+    { type: "subdomain", total: 6, tested: 4 },
+    { type: "service", total: 9, tested: 4 },
+    { type: "endpoint", total: 8, tested: 2 },
+    { type: "ip", total: 3, tested: 1 },
+  ],
+};
+
+// ── 资产覆盖图（/tasks/{id}/coverage-graph）──
+export const coverageGraph = {
+  nodes: [
+    { key: "c:1", kind: "company", label: "Acme Corp", tested: false, in_scope: false, company_id: 1 },
+    { key: "a:1", kind: "root_domain", label: "acme.com", tested: false, in_scope: false, asset_id: 1, domain: "acme.com", company_id: 1 },
+    { key: "a:2", kind: "subdomain", label: "www.acme.com", tested: true, in_scope: true, asset_id: 2, domain: "www.acme.com", root_domain: "acme.com" },
+    { key: "a:3", kind: "subdomain", label: "api.acme.com", tested: true, in_scope: true, asset_id: 3, domain: "api.acme.com", root_domain: "acme.com" },
+    { key: "a:4", kind: "subdomain", label: "admin.acme.com", tested: false, in_scope: true, asset_id: 4, domain: "admin.acme.com", root_domain: "acme.com" },
+    { key: "a:5", kind: "service", label: "www.acme.com", tested: true, in_scope: true, asset_id: 5, domain: "www.acme.com", url: "https://www.acme.com", port: 443, page_title: "Acme 首页", status_code: 200 },
+    { key: "a:6", kind: "endpoint", label: "https://www.acme.com/search", tested: true, in_scope: true, asset_id: 6, url: "https://www.acme.com/search?q=", domain: "www.acme.com" },
+    { key: "a:7", kind: "service", label: "api.acme.com", tested: true, in_scope: true, asset_id: 7, domain: "api.acme.com", url: "https://api.acme.com", port: 443, page_title: "API Gateway", status_code: 401 },
+    { key: "a:8", kind: "endpoint", label: "https://api.acme.com/v1/orders", tested: false, in_scope: true, asset_id: 8, url: "https://api.acme.com/v1/orders?id=", domain: "api.acme.com" },
+    { key: "a:9", kind: "service", label: "admin.acme.com", tested: false, in_scope: true, asset_id: 9, domain: "admin.acme.com", url: "https://admin.acme.com", port: 443, page_title: "后台登录", status_code: 200 },
+    { key: "a:10", kind: "ip", label: "203.0.113.10", tested: true, in_scope: true, asset_id: 10, ip: "203.0.113.10", company_id: 1 },
+  ],
+  edges: [
+    { src: "a:1", dst: "c:1" },
+    { src: "a:2", dst: "a:1" },
+    { src: "a:3", dst: "a:1" },
+    { src: "a:4", dst: "a:1" },
+    { src: "a:5", dst: "a:2" },
+    { src: "a:6", dst: "a:5" },
+    { src: "a:7", dst: "a:3" },
+    { src: "a:8", dst: "a:7" },
+    { src: "a:9", dst: "a:4" },
+    { src: "a:10", dst: "c:1" },
+  ],
+};
+
+// ── 资产在本任务关联的意图/事实/发现（/tasks/{id}/asset-refs）──
+export function assetRefsFor(_assetId: number) {
+  return {
+    intents: [
+      { id: 12, kind: "intent", state: "done", summary: "对 www.acme.com 搜索接口做 SQL 注入探测" },
+      { id: 18, kind: "intent", state: "running", summary: "枚举 api.acme.com 的对象越权 (IDOR)" },
+    ],
+    facts: [
+      { id: 34, kind: "fact", state: "confirmed", summary: "search?q= 参数可注入，报错回显 MySQL 语法错误" },
+    ],
+    findings: [
+      { id: 41, kind: "finding", state: "confirmed", summary: "[高] SQL 注入 www.acme.com/search?q=" },
+    ],
+  };
+}
+
+// ── 工作空间文件管理器（/workspace/*，demo：静态示例树）──
+const WS_TREE: Record<string, { name: string; dir: boolean; size: number; content?: string }[]> = {
+  "": [
+    { name: "t-001", dir: true, size: 0 },
+    { name: "transcripts", dir: true, size: 0 },
+    { name: "notes.md", dir: false, size: 96, content: "# 工作区笔记\n\n（demo）这是工作空间根目录下的示例文件，可在线编辑并保存。\n" },
+  ],
+  "t-001": [
+    { name: "i12", dir: true, size: 0 },
+    { name: "recon.txt", dir: false, size: 64, content: "acme.com\nwww.acme.com\napi.acme.com\nadmin.acme.com\n" },
+  ],
+  "t-001/i12": [
+    { name: "exploit.py", dir: false, size: 220, content: "#!/usr/bin/env python3\n# (demo) SQLi PoC — www.acme.com/search?q=\nimport requests\n\nr = requests.get('https://www.acme.com/search', params={'q': \"1' OR '1'='1\"})\nprint(r.status_code, len(r.text))\n" },
+    { name: "response.html", dir: false, size: 180, content: "<!-- (demo) 抓到的响应体片段 -->\n<html><body>MySQL error near ''1'='1'</body></html>\n" },
+  ],
+  transcripts: [
+    { name: "exp1-worker-i12.jsonl", dir: false, size: 512, content: "（demo）原始 LLM 对话记录示例，此处省略。" },
+  ],
+};
+
+const wsClean = (p: string) => p.replace(/^\/+|\/+$/g, "");
+
+export function workspaceList(path: string) {
+  const key = wsClean(path);
+  const items = WS_TREE[key] ?? [];
+  const now = Date.parse("2026-08-09T03:00:00Z");
+  return {
+    path: key,
+    entries: items.map((it, i) => ({
+      name: it.name,
+      path: key ? `${key}/${it.name}` : it.name,
+      dir: it.dir,
+      size: it.size,
+      mtime: now - i * 3_600_000,
+    })),
+  };
+}
+
+export function workspaceRead(path: string) {
+  const key = wsClean(path);
+  const slash = key.lastIndexOf("/");
+  const parent = slash >= 0 ? key.slice(0, slash) : "";
+  const name = slash >= 0 ? key.slice(slash + 1) : key;
+  const f = (WS_TREE[parent] ?? []).find((x) => x.name === name && !x.dir);
+  return { path: key, size: f?.size ?? 0, binary: false, content: f?.content ?? "" };
+}

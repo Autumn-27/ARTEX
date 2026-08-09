@@ -144,6 +144,7 @@ export const api = {
   workspaceDelete: (path: string) =>
     del<{ ok: boolean }>(`/workspace/delete?path=${encodeURIComponent(path)}`),
   workspaceUpload: async (dir: string, files: File[]) => {
+    if (MOCK) return { uploaded: files.length };
     const fd = new FormData();
     for (const f of files) fd.append("file", f);
     const token = getToken();
@@ -156,12 +157,17 @@ export const api = {
     return r.json() as Promise<{ uploaded: number }>;
   },
   workspaceDownload: async (path: string) => {
-    const token = getToken();
-    const r = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, {
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    });
-    if (!r.ok) throw new Error(`下载失败: ${r.status}`);
-    const blob = await r.blob();
+    let blob: Blob;
+    if (MOCK) {
+      blob = new Blob([`（demo）${path} 的下载内容示例。`], { type: "text/plain" });
+    } else {
+      const token = getToken();
+      const r = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      if (!r.ok) throw new Error(`下载失败: ${r.status}`);
+      blob = await r.blob();
+    }
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = objUrl;
