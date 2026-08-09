@@ -15,6 +15,7 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -110,6 +111,7 @@ export default function TasksPage() {
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [llmProfile, setLlmProfile] = React.useState<string>(ACTIVE_PROFILE); // sentinel = active
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
+  const [seedFirstIntent, setSeedFirstIntent] = React.useState(true); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
@@ -171,12 +173,13 @@ export default function TasksPage() {
     try {
       const pid = llmProfile === ACTIVE_PROFILE ? undefined : Number(llmProfile);
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
-      await api.createTask(description.trim(), goal.trim(), pid, timeoutSec);
+      await api.createTask(description.trim(), goal.trim(), pid, timeoutSec, seedFirstIntent);
       toast.success("任务已创建");
       setDescription("");
       setGoal("");
       setLlmProfile(ACTIVE_PROFILE);
       setTimeoutMin("");
+      setSeedFirstIntent(true);
       setOpen(false);
       load();
     } catch (e) {
@@ -298,6 +301,15 @@ export default function TasksPage() {
                   />
                   <p className="text-muted-foreground text-xs">
                     到点后触发优雅收尾（各 agent 写回 + planner 终局判定），任务进入 timeout 终态。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox checked={seedFirstIntent} onCheckedChange={(v) => setSeedFirstIntent(!!v)} />
+                    直接下发首个意图（描述+目标）
+                  </label>
+                  <p className="text-muted-foreground text-xs">
+                    开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner 接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
                   </p>
                 </div>
               </div>

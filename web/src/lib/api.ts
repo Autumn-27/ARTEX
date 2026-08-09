@@ -109,8 +109,14 @@ export const api = {
 
   // ---- tasks ----
   tasks: () => get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
-  createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number) =>
-    post<Task>("/tasks", { description, goal, llm_profile_id: llmProfileId ?? null, timeout_seconds: timeoutSeconds ?? 0 }),
+  createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number, seedFirstIntent?: boolean) =>
+    post<Task>("/tasks", {
+      description,
+      goal,
+      llm_profile_id: llmProfileId ?? null,
+      timeout_seconds: timeoutSeconds ?? 0,
+      seed_first_intent: seedFirstIntent ?? true,
+    }),
   deleteTask: (id: string) => del<{ deleted: number }>(`/tasks/${id}`),
   controlTask: (id: string, action: "pause" | "resume") => post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),
   setActive: (id: string) => post<{ active: string }>("/active", { id }),

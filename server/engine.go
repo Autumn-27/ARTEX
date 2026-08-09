@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/llm"
 )
 
 // model_error（provider/API 故障：LLM 层瞬时重试耗尽，或流已开始后中途断流）
@@ -367,7 +367,12 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		go e.workerLoop(ctx, t, fmt.Sprintf("work#%d", i+1))
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
-	t.Notify()                         // kick the first planning round (acted on once LLM is ready)
+	// 仅在 frontier 为空时才 kick 首轮规划:普通任务(空 frontier)照常触发;带种子意图的
+	// 任务 frontier 已非空 → 跳过首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone
+	// 唤醒 planner。重启自动恢复时 frontier 通常也非空 → 顺带避免白烧一轮。
+	if fr, _ := t.Store.Frontier(1); len(fr) == 0 {
+		t.Notify() // kick the first planning round (acted on once LLM is ready)
+	}
 }
 
 func (e *Engine) plannerLoop(ctx context.Context, t *Task) {

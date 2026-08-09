@@ -926,10 +926,11 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskReq struct {
-	Description    string `json:"description"`
-	Goal           string `json:"goal"`
-	LLMProfileID   *int64 `json:"llm_profile_id,omitempty"` // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	TimeoutSeconds int    `json:"timeout_seconds"`          // 任务级超时(秒);0/省略=不限时
+	Description     string `json:"description"`
+	Goal            string `json:"goal"`
+	LLMProfileID    *int64 `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	TimeoutSeconds  int    `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	SeedFirstIntent *bool  `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认开启。CTF 常一 work 解决,省掉开跑前的 planner 轮。
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -960,6 +961,12 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
 	// seed initial asset(s) from goal/description so the event-driven loop has a root.
 	s.seed(t, req.Description+" "+req.Goal)
+	// 种子意图(默认开启):直接把"描述+目标"作为一条待办意图写入 frontier,worker 轮询即可
+	// 领取开跑,省掉开跑前的首轮 planner LLM;跑完由 NotifyDone 正常唤醒 planner 判定/补充。
+	// CTF 场景常一个 work 就解决。仅显式传 false 才关闭。
+	if req.SeedFirstIntent == nil || *req.SeedFirstIntent {
+		s.seedFirstIntent(t)
+	}
 	// Return immediately — goal decomposition is async so the UI isn't blocked.
 	writeJSON(w, 201, t)
 	// Background: emit round-0 marker, decompose goals via LLM, then start engine.
@@ -1086,6 +1093,24 @@ func (s *Server) seed(t *Task, text string) {
 	}
 	log.Printf("[seed] task %s: 目标站点 %s", t.ID, u)
 	t.Notify()
+}
+
+// seedFirstIntent writes ONE open intent (summary = 描述+目标) into the task's
+// frontier at creation, so a worker can claim and run it immediately without first
+// waiting a planner round. Mirrors a planner top-level intent: it links from the
+// origin fact (RelDerivedFrom) so it still traces back to a fact node. Best-effort —
+// a failure just falls back to the normal planner-driven flow.
+func (s *Server) seedFirstIntent(t *Task) {
+	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", t.Goal, t.Description)
+	id, err := t.Store.AddIntent(map[string]any{"summary": summary}, 8, nil, "seed")
+	if err != nil {
+		log.Printf("[seed] task %s: 下发种子意图失败: %v", t.ID, err)
+		return
+	}
+	if origin, _ := t.Store.OriginFactID(); origin > 0 {
+		_ = t.Store.Link(origin, db.RelDerivedFrom, id)
+	}
+	log.Printf("[seed] task %s: 已下发种子意图 #%d", t.ID, id)
 }
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
