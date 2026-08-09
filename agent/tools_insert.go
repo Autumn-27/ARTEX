@@ -521,6 +521,45 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 	)
 }
 
+// deleteAssetsByHost hard-deletes every asset tied to one host (exact match).
+func (t *ToolSet) deleteAssetsByHost() actool.CoreTool {
+	return writeTool(
+		"delete_assets_by_host",
+		"按 host 精确删除资产：删掉该 host 的域名/子域名，以及其下的服务(service)、接口(endpoint)。\n"+
+			"host 完全匹配(小写、去空格),不是模糊/通配。\n"+
+			"传根域名(如 example.com)会连带删除它的子域名及其服务/接口;传子域名(如 a.example.com)或 IP 只删该 host 自身及其服务/接口。\n"+
+			"⚠️ 硬删除且作用于全局资产库(跨任务共享),不可撤销;请先用 list_assets 确认范围再删。",
+		obj(map[string]any{
+			"host": str("要删除的 host:域名/子域名/IP。完全匹配,如 example.com 或 a.example.com 或 1.2.3.4"),
+		}, "host"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.as == nil {
+				return actool.Errorf("delete_assets_by_host 未启用: AssetStore 未初始化"), nil
+			}
+			var a struct {
+				Host string `json:"host"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if strings.TrimSpace(a.Host) == "" {
+				return actool.Errorf("host 不能为空"), nil
+			}
+			counts, err := t.as.DeleteByHost(a.Host)
+			if err != nil {
+				return actool.Errorf("删除失败: " + err.Error()), nil
+			}
+			var total int64
+			for _, n := range counts {
+				total += n
+			}
+			return jsonResult(map[string]any{
+				"host":            a.Host,
+				"deleted":         total,
+				"deleted_by_type": counts,
+			})
+		},
+	)
+}
+
 // listCompanies lets an agent enumerate companies (企业) with their scope + asset count.
 func (t *ToolSet) listCompanies() actool.CoreTool {
 	return readTool(

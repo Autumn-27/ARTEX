@@ -15,16 +15,16 @@ import (
 
 // Asset is a row in the assets table.
 type Asset struct {
-	ID          int64   `json:"id"`
-	Type        string  `json:"type"`
-	CompanyID   *int64  `json:"company_id,omitempty"`
-	TaskIDs     []int64 `json:"task_ids"`
-	Domain      string  `json:"domain,omitempty"`
-	RootDomain  string  `json:"root_domain,omitempty"`
-	IP          string  `json:"ip,omitempty"`
-	CSegment    string  `json:"c_segment,omitempty"`
-	Port        *int    `json:"port,omitempty"`
-	ICP         string  `json:"icp,omitempty"`
+	ID         int64   `json:"id"`
+	Type       string  `json:"type"`
+	CompanyID  *int64  `json:"company_id,omitempty"`
+	TaskIDs    []int64 `json:"task_ids"`
+	Domain     string  `json:"domain,omitempty"`
+	RootDomain string  `json:"root_domain,omitempty"`
+	IP         string  `json:"ip,omitempty"`
+	CSegment   string  `json:"c_segment,omitempty"`
+	Port       *int    `json:"port,omitempty"`
+	ICP        string  `json:"icp,omitempty"`
 	// ip fields
 	BoundDomains []string         `json:"bound_domains,omitempty"`
 	OpenPorts    []map[string]any `json:"open_ports,omitempty"`
@@ -986,7 +986,6 @@ const assetSelectCols = `SELECT id, type, company_id, array_to_json(task_ids)::t
        COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
 FROM assets`
 
-
 // GetByIDs returns assets with the given ids (order preserved by id array order).
 func (s *AssetStore) GetByIDs(ids []int64) ([]*Asset, error) {
 	if len(ids) == 0 {
@@ -1014,6 +1013,38 @@ func (s *AssetStore) DeleteByCompanyID(companyID int64) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// DeleteByHost hard-deletes every asset whose host exactly matches the given value:
+// root_domain / subdomain / service / endpoint (they carry the host in domain or
+// root_domain) plus an ip asset and its services/endpoints (ip column). The host is
+// normalized the same way it is stored (DomainKey: lowercase/trim/strip trailing dot)
+// so matching is exact, not fuzzy. Passing a root domain also removes its subdomains
+// and their services/endpoints (they carry root_domain = that host); passing a
+// subdomain/IP removes only that host's own assets. Referencing exploration_anchors
+// rows are cleaned by ON DELETE CASCADE. Returns rows deleted, grouped by type.
+func (s *AssetStore) DeleteByHost(host string) (map[string]int64, error) {
+	h := DomainKey(host)
+	if h == "" {
+		return nil, fmt.Errorf("host is required")
+	}
+	rows, err := s.db.Query(`
+DELETE FROM assets
+WHERE domain = $1 OR root_domain = $1 OR ip = $1
+RETURNING type`, h)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int64{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		counts[t]++
+	}
+	return counts, rows.Err()
 }
 
 // DeleteByIDs hard-deletes assets by their IDs. Returns the number of rows deleted.
