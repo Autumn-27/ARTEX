@@ -12,6 +12,7 @@ import type {
   Tool, Conversation, AgentTrigger,
   InterceptRule, InterceptPending, InterceptApprovalRow,
   TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData, CoverageAssetRefs,
+  WorkspaceListing, WorkspaceFile,
   CommandRecord, LLMRecordItem, LLMRecordDetail,
 } from "@/lib/types";
 
@@ -130,6 +131,46 @@ export const api = {
   // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
   taskAssetRefs: (id: string, assetId: number) =>
     get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
+
+  // ---- workspace file manager (workDir) ----
+  workspaceList: (path = "") =>
+    get<WorkspaceListing>(`/workspace/list?path=${encodeURIComponent(path)}`),
+  workspaceRead: (path: string) =>
+    get<WorkspaceFile>(`/workspace/read?path=${encodeURIComponent(path)}`),
+  workspaceWrite: (path: string, content: string) =>
+    post<{ ok: boolean; path: string }>(`/workspace/write`, { path, content }),
+  workspaceMkdir: (path: string) =>
+    post<{ ok: boolean; path: string }>(`/workspace/mkdir`, { path }),
+  workspaceDelete: (path: string) =>
+    del<{ ok: boolean }>(`/workspace/delete?path=${encodeURIComponent(path)}`),
+  workspaceUpload: async (dir: string, files: File[]) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f);
+    const token = getToken();
+    const r = await fetch(`/api/workspace/upload?path=${encodeURIComponent(dir)}`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`上传失败: ${r.status}`);
+    return r.json() as Promise<{ uploaded: number }>;
+  },
+  workspaceDownload: async (path: string) => {
+    const token = getToken();
+    const r = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    });
+    if (!r.ok) throw new Error(`下载失败: ${r.status}`);
+    const blob = await r.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = path.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objUrl);
+  },
 
   // ---- assets ----
   // Server-side paginated: pass limit/offset, get back the page + full match total.

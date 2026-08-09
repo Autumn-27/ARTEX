@@ -485,6 +485,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
+
+	// 工作空间文件管理器（针对 workDir）
+	mux.HandleFunc("GET /api/workspace/list", s.wsList)
+	mux.HandleFunc("GET /api/workspace/read", s.wsRead)
+	mux.HandleFunc("POST /api/workspace/write", s.wsWrite)
+	mux.HandleFunc("POST /api/workspace/mkdir", s.wsMkdir)
+	mux.HandleFunc("DELETE /api/workspace/delete", s.wsDelete)
+	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
+	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("POST /api/active", s.setActive)

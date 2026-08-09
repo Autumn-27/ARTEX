@@ -178,6 +178,26 @@ export interface CoverageAssetRefs {
   findings: CoverageAssetRef[];
 }
 
+// ---- Workspace file manager (workDir) ----
+export interface WorkspaceEntry {
+  name: string;
+  path: string; // workspace-relative, forward slashes
+  dir: boolean;
+  size: number;
+  mtime: number; // unix millis
+}
+export interface WorkspaceListing {
+  path: string;
+  entries: WorkspaceEntry[];
+}
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+  binary: boolean;
+  too_large?: boolean;
+  content?: string;
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;
