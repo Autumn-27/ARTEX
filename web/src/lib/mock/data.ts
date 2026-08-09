@@ -623,3 +623,51 @@ export function workspaceRead(path: string) {
   const f = (WS_TREE[parent] ?? []).find((x) => x.name === name && !x.dir);
   return { path: key, size: f?.size ?? 0, binary: false, content: f?.content ?? "" };
 }
+
+// ── 工具执行历史（/commands）──
+export const commandRecords = [
+  { id: 1, exploration_id: 1, worker: "worker-1", tool: "bash", command: JSON.stringify({ command: "curl -s 'https://www.acme.com/search?q=test'" }), output: "HTTP/1.1 200 OK\nContent-Length: 12034\n<html>… 搜索结果页 …</html>", is_error: false, created_at: T("2026-08-09T02:10:00Z") },
+  { id: 2, exploration_id: 1, worker: "worker-1", tool: "bash", command: JSON.stringify({ command: "sqlmap -u 'https://www.acme.com/search?q=1' --batch --dbs" }), output: "[*] available databases [2]:\n[*] acme_prod\n[*] information_schema\nback-end DBMS: MySQL >= 5.7", is_error: false, created_at: T("2026-08-09T02:12:30Z") },
+  { id: 3, exploration_id: 1, worker: "worker-2", tool: "bash", command: JSON.stringify({ command: "ffuf -u https://api.acme.com/FUZZ -w common.txt -mc 200,401,403" }), output: "v1       [Status: 200]\nhealth   [Status: 200]\norders   [Status: 401]\nadmin    [Status: 403]", is_error: false, created_at: T("2026-08-09T02:15:00Z") },
+  { id: 4, exploration_id: 1, worker: "worker-2", tool: "bash", command: JSON.stringify({ command: "nmap -sV -p- 203.0.113.10" }), output: "PORT    STATE SERVICE VERSION\n22/tcp  open  ssh     OpenSSH 8.9\n443/tcp open  https   nginx 1.24", is_error: false, created_at: T("2026-08-09T02:18:00Z") },
+  { id: 5, exploration_id: 1, worker: "worker-1", tool: "bash", command: JSON.stringify({ command: "curl -s https://admin.acme.com/login --data 'user=admin&pass=admin123'" }), output: "curl: (28) Operation timed out after 10000 ms", is_error: true, created_at: T("2026-08-09T02:20:00Z") },
+];
+
+// ── LLM 录制（/llm/records、/llm/records/{id}）──
+export const llmRecords = [
+  { id: 1, ts: T("2026-08-09T02:10:02Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-worker-i12", task_id: "t-001", worker: "worker-1", latency_ms: 3210, input_tokens: 8421, output_tokens: 512, cache_read: 6000, cache_write: 1200, status: "ok" },
+  { id: 2, ts: T("2026-08-09T02:11:40Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-planner", task_id: "t-001", worker: "planner", latency_ms: 4180, input_tokens: 12044, output_tokens: 733, cache_read: 9000, cache_write: 1500, status: "ok" },
+  { id: 3, ts: T("2026-08-09T02:15:20Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-worker-i18", task_id: "t-001", worker: "worker-2", latency_ms: 2890, input_tokens: 7311, output_tokens: 421, cache_read: 5200, cache_write: 900, status: "ok" },
+  { id: 4, ts: T("2026-08-09T02:16:05Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-worker-i18", task_id: "t-001", worker: "worker-2", latency_ms: 900, input_tokens: 7600, output_tokens: 0, cache_read: 5200, cache_write: 0, status: "error", error: "429 Too Many Requests（已退避重试）" },
+];
+
+export function llmRecordDetail(id: number) {
+  const item = llmRecords.find((r) => r.id === id) ?? llmRecords[0];
+  return {
+    ...item,
+    request_body: JSON.stringify(
+      {
+        model: item.model,
+        system: "你是一个授权渗透测试系统的「执行者」…（省略）",
+        messages: [
+          { role: "user", content: "开始执行 system 提示里的这条意图：只做它、只产生事实、做完即停。" },
+        ],
+        tools: ["bash", "insert_assets", "record_fact", "report_finding"],
+      },
+      null,
+      2,
+    ),
+    response_body: JSON.stringify(
+      {
+        stop_reason: item.status === "error" ? "error" : "tool_use",
+        content: [
+          { type: "text", text: "对 search?q= 做注入探测，先用报错型 payload 验证。" },
+          { type: "tool_use", name: "bash", input: { command: "curl -s 'https://www.acme.com/search?q=1%27'" } },
+        ],
+        usage: { input_tokens: item.input_tokens, output_tokens: item.output_tokens },
+      },
+      null,
+      2,
+    ),
+  };
+}

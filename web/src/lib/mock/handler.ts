@@ -99,7 +99,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/chat") return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
   if (path === "/gc") return { removed: 0 };
 
+  // ── 工具执行历史 ──
+  if (path === "/commands" && m === "GET") return { commands: D.commandRecords, total: D.commandRecords.length };
+
   // ── LLM ──
+  if (path === "/llm/records" && m === "GET") return { records: D.llmRecords, total: D.llmRecords.length };
+  if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") return D.llmRecordDetail(Number(seg[2]));
   if (path === "/llm" && m === "GET") return D.llmConfig;
   if (path === "/llm" && m === "POST") return { ok: true };
   if (path === "/llm/test") return { ok: true, latency_ms: 128, model: String(b.model ?? "claude-opus-4-8") };
