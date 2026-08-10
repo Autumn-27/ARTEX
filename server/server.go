@@ -530,9 +530,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/audit", s.getAudit)
 	mux.HandleFunc("POST /api/gc", s.gc)
 	mux.HandleFunc("GET /api/traffic", s.getTraffic)
+	mux.HandleFunc("GET /api/traffic/hosts", s.getTrafficHosts)
+	mux.HandleFunc("DELETE /api/traffic", s.deleteTraffic)
+	mux.HandleFunc("DELETE /api/traffic/hosts", s.deleteTrafficHosts)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
+	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
+	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
@@ -1535,6 +1540,81 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 		"size":      size,
 		"exchanges": trafficDTOs(ex),
 	})
+}
+
+// getTrafficHosts returns distinct recorded hosts with counts, for the page's
+// target picker (pick a host → filter the list, then delete it).
+func (s *Server) getTrafficHosts(w http.ResponseWriter, r *http.Request) {
+	tr := s.m.Traffic()
+	if tr == nil {
+		writeJSON(w, 200, map[string]any{"hosts": []any{}})
+		return
+	}
+	hosts, err := tr.Hosts()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"hosts": hosts})
+}
+
+// deleteTraffic removes recorded traffic for every host containing the query's
+// host substring (the page's host filter is substring-based, so what you
+// filtered is what gets deleted): index rows + each host's file tree, then
+// garbage-collects blobs no remaining exchange references. Empty host → 400.
+// Returns the number of exchanges deleted.
+func (s *Server) deleteTraffic(w http.ResponseWriter, r *http.Request) {
+	tr := s.m.Traffic()
+	if tr == nil {
+		writeErr(w, 404, "traffic disabled")
+		return
+	}
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	if host == "" {
+		writeErr(w, 400, "missing host")
+		return
+	}
+	n, err := tr.DeleteHost(host)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": n})
+}
+
+// deleteTrafficHosts removes traffic for a set of EXACT hosts (JSON body
+// {"hosts": [...]}) — the batch path for the page's multi-select delete. Exact
+// match, so picking "api.example.com" never sweeps "api.example.com.cn".
+// Returns the number of exchanges deleted.
+func (s *Server) deleteTrafficHosts(w http.ResponseWriter, r *http.Request) {
+	tr := s.m.Traffic()
+	if tr == nil {
+		writeErr(w, 404, "traffic disabled")
+		return
+	}
+	var req struct {
+		Hosts []string `json:"hosts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid body")
+		return
+	}
+	hosts := make([]string, 0, len(req.Hosts))
+	for _, h := range req.Hosts {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	if len(hosts) == 0 {
+		writeErr(w, 400, "missing hosts")
+		return
+	}
+	n, err := tr.DeleteHostsExact(hosts)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": n})
 }
 
 // getTrafficExchange returns the full raw request/response of one exchange,

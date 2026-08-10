@@ -403,6 +403,12 @@ export interface TrafficDetail {
   resp: string;
 }
 
+// One distinct recorded host with its exchange count (target picker).
+export interface TrafficHost {
+  host: string;
+  count: number;
+}
+
 // ---- App settings (runtime toggles) ----
 export interface Settings {
   traffic_capture: boolean;
@@ -656,4 +662,10 @@ export interface LLMRecordItem {
 export interface LLMRecordDetail extends LLMRecordItem {
   request_body: string;
   response_body: string;
+}
+
+// One distinct task with its LLM-record count (task picker on the records page).
+export interface LLMTask {
+  task_id: string;
+  count: number;
 }

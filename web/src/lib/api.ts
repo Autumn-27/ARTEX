@@ -7,13 +7,13 @@ import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
   Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, Activity,
-  Audit, TrafficResp, TrafficDetail, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
+  Audit, TrafficResp, TrafficDetail, TrafficHost, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
   Tool, Conversation, AgentTrigger,
   InterceptRule, InterceptPending, InterceptApprovalRow,
   TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData, CoverageAssetRefs,
   WorkspaceListing, WorkspaceFile,
-  CommandRecord, LLMRecordItem, LLMRecordDetail,
+  CommandRecord, LLMRecordItem, LLMRecordDetail, LLMTask,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -91,7 +91,7 @@ const get = <T>(p: string) => http<T>(p);
 const post = <T>(p: string, body?: unknown) => http<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 const put = <T>(p: string, body?: unknown) => http<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
 const patch = <T>(p: string, body?: unknown) => http<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
-const del = <T>(p: string) => http<T>(p, { method: "DELETE" });
+const del = <T>(p: string, body?: unknown) => http<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
 
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
@@ -253,6 +253,11 @@ export const api = {
     ),
   trafficExchange: (id: string) =>
     get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
+  trafficHosts: () => get<{ hosts: TrafficHost[] }>(`/traffic/hosts`),
+  trafficDeleteHost: (host: string) =>
+    del<{ deleted: number }>(`/traffic?host=${encodeURIComponent(host)}`),
+  trafficDeleteHosts: (hosts: string[]) =>
+    del<{ deleted: number }>(`/traffic/hosts`, { hosts }),
 
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
@@ -543,13 +548,17 @@ export const api = {
   },
 
   // ---- LLM records ----
-  llmRecords: (params?: { model?: string; session?: string; page?: number; size?: number }) => {
+  llmRecords: (params?: { model?: string; session?: string; task?: string; page?: number; size?: number }) => {
     const sp = new URLSearchParams();
     if (params?.model) sp.set("model", params.model);
     if (params?.session) sp.set("session", params.session);
-    sp.set("page", String(params?.page ?? 0));
+    if (params?.task) sp.set("task", params.task);
+    if (params?.page !== undefined) sp.set("page", String(params.page));
     sp.set("size", String(params?.size ?? 50));
     return get<{ records: LLMRecordItem[]; total: number }>(`/llm/records?${sp}`);
   },
   llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
+  llmTasks: () => get<{ tasks: LLMTask[] }>(`/llm/records/tasks`),
+  llmRecordsDeleteTask: (task: string) =>
+    del<{ deleted: number }>(`/llm/records?task=${encodeURIComponent(task)}`),
 };
