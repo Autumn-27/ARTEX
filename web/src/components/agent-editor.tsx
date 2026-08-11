@@ -51,6 +51,9 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [preview, setPreview] = React.useState("");
   const [maxTurns, setMaxTurns] = React.useState("0");
   const [runSecs, setRunSecs] = React.useState("600");
+  // "" = 跟随(未绑定)；否则为 profile id 字符串
+  const [llmProfileId, setLlmProfileId] = React.useState("");
+  const [llmProfiles, setLlmProfiles] = React.useState<NonNullable<AgentDetail["llm_profiles"]>>([]);
   const [webSearch, setWebSearch] = React.useState(false);
   const [interactiveShell, setInteractiveShell] = React.useState(false);
   const [wrapup, setWrapup] = React.useState("");
@@ -87,6 +90,8 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setSkillVisible(d.visibility?.skill ?? []);
         setMaxTurns(String(d.agent?.max_turns ?? 0));
         setRunSecs(String(d.agent?.run_seconds ?? 600));
+        setLlmProfileId(d.agent?.llm_profile_id != null ? String(d.agent.llm_profile_id) : "");
+        setLlmProfiles(d.llm_profiles ?? []);
         setWebSearch(!!d.agent?.web_search);
         setInteractiveShell(!!d.agent?.interactive_shell);
         setWrapup(d.wrapup_prompt ?? "");
@@ -173,9 +178,17 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   }
   async function saveConfig() {
     try {
-      const n = Math.max(0, Math.floor(Number(maxTurns) || 0));
-      const rs = Math.max(0, Math.floor(Number(runSecs) || 0));
-      await api.saveAgentConfig(agentKey, { max_turns: n, run_seconds: rs, web_search: webSearch, interactive_shell: interactiveShell });
+      // 只提交本 agent 实际展示的字段，避免把未显示项(如 goals 的 max_turns)覆盖成默认。
+      const patch: Parameters<typeof api.saveAgentConfig>[1] = {
+        llm_profile_id: llmProfileId === "" ? null : Number(llmProfileId),
+      };
+      if (showConfig) {
+        patch.max_turns = Math.max(0, Math.floor(Number(maxTurns) || 0));
+        patch.run_seconds = Math.max(0, Math.floor(Number(runSecs) || 0));
+      }
+      if (showWebSearch) patch.web_search = webSearch;
+      if (showInteractiveShell) patch.interactive_shell = interactiveShell;
+      await api.saveAgentConfig(agentKey, patch);
       toast.success("已保存运行配置（立即生效）");
       reload();
     } catch (e) {
@@ -248,6 +261,8 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const showWebSearch = agentKey !== "goals";
   // interactive shell (持久 PTY 会话工具族) 同样对除 goals 外的 agent 开放;无全局门控。
   const showInteractiveShell = agentKey !== "goals";
+  // 每个 agent(含 goals/mainagent)都跑在某个 LLM 上,故「默认模型」绑定对所有 agent 开放。
+  const showLLM = true;
   // triggers (P3) only attach to custom agents.
   const isCustom = !!detail && !detail.agent?.builtin;
 
@@ -265,8 +280,31 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       {/* 配置 + 提示词 */}
       <TabsContent value="prompt" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         <div className="grid gap-4">
-          {(showConfig || showWebSearch || showInteractiveShell) && (
+          {(showLLM || showConfig || showWebSearch || showInteractiveShell) && (
             <div className="grid gap-3 rounded-md border p-3">
+              {showLLM && (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="llm-profile" className="text-xs">默认模型（LLM 配置）</Label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Select value={llmProfileId || "__follow__"} onValueChange={(v) => setLlmProfileId(v === "__follow__" ? "" : v)}>
+                      <SelectTrigger id="llm-profile" className="h-8 w-72">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__follow__">跟随任务 / 全局激活配置</SelectItem>
+                        {llmProfiles.map((p) => (
+                          <SelectItem key={p.id} value={String(p.id)}>
+                            {p.name}（{p.model}）{p.is_default ? " · 默认" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <span className="text-muted-foreground max-w-md text-xs">
+                      为该 Agent 绑定固定 LLM 配置（点「保存配置」生效）。优先级：Agent 绑定 &gt; 任务/会话指定 &gt; 全局激活。
+                    </span>
+                  </div>
+                </div>
+              )}
               <div className="flex flex-wrap items-end gap-3">
                 {showConfig && (
                   <>

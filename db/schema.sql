@@ -307,6 +307,8 @@ CREATE TABLE IF NOT EXISTS agents (
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NULL DEFAULT 'by_task';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
+-- per-agent LLM 绑定(agent 级默认模型):列自初版即在上方 CREATE 中,此 ALTER 仅为极旧库兜底(幂等)。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

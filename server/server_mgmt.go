@@ -220,6 +220,8 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		RunSeconds       *int  `json:"run_seconds"`
 		WebSearch        *bool `json:"web_search"`
 		InteractiveShell *bool `json:"interactive_shell"`
+		// llm_profile_id 三态:字段缺省=不动;显式 null=解绑(跟随任务/全局);数字=绑定该 profile。
+		LLMProfileID json.RawMessage `json:"llm_profile_id"`
 		// P3 触发后处理策略(三者一起可选,提供任一即整体写入;未提供则不动)。
 		TriggerRunMode     *string `json:"trigger_run_mode"`
 		TriggerMergeMode   *string `json:"trigger_merge_mode"`
@@ -228,6 +230,25 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	profileChanged := false
+	if req.LLMProfileID != nil { // key present (数字 或 null)
+		var id *int64
+		if err := json.Unmarshal(req.LLMProfileID, &id); err != nil {
+			writeErr(w, 400, "llm_profile_id 格式错误")
+			return
+		}
+		if id != nil { // 绑定:校验目标 profile 有效
+			if _, ok := s.loadProfileConfig(*id); !ok {
+				writeErr(w, 400, "指定的 LLM 配置不存在或无效")
+				return
+			}
+		}
+		if err := pg.SetAgentLLMProfile(a.Key, id); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		profileChanged = true
 	}
 	if req.MaxTurns != nil {
 		mt := *req.MaxTurns
@@ -279,7 +300,12 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// rebuild the live agents so the new max_turns/run_seconds apply without a restart.
+	// an agent's LLM binding change also invalidates pinned-task / per-profile caches
+	// so their next round re-resolves each agent's bound model.
+	if profileChanged {
+		s.invalidateProfileAgents()
+	}
+	// rebuild the live agents so the new max_turns/run_seconds/binding apply without a restart.
 	s.cfgMu.Lock()
 	cfg, on := s.llmCfg, s.llmOn
 	s.cfgMu.Unlock()
@@ -313,9 +339,19 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 	if sk == nil {
 		sk = []string{}
 	}
+	// 可选 LLM 配置列表(id/name/model/是否默认),供前端渲染 "默认模型" 下拉;当前绑定见 agent.llm_profile_id。
+	profs, _ := pg.ListProfiles()
+	llmProfiles := make([]map[string]any, 0, len(profs))
+	for _, p := range profs {
+		llmProfiles = append(llmProfiles, map[string]any{
+			"id": p.ID, "name": p.Name, "model": p.Model, "is_default": p.IsDefault,
+		})
+	}
 	writeJSON(w, 200, map[string]any{
 		"agent": agentDTO(a), "prompt": cur, "variables": vars, "versions": vers,
 		"visibility":               map[string]any{"mcp": mcp, "skill": sk},
+		"llm_profiles":             llmProfiles, // 可绑定的 LLM 配置候选
+
 		"wrapup_prompt":            a.WrapupPrompt,                  // 已保存的收尾提示词(空=用内置默认)
 		"wrapup_default":           agent.WrapupDefault(a.Key),      // 内置默认(供占位/恢复默认)
 		"wrapup_max_turns":         a.WrapupMaxTurns,                // 已保存的收尾轮数(0=用内置默认)

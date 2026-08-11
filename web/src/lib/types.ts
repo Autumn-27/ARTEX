@@ -456,6 +456,7 @@ export interface Agent {
   role: string;
   builtin: boolean;
   enabled: boolean;
+  llm_profile_id?: number | null; // 绑定的 LLM 配置；null/absent = 跟随任务/会话/全局
   max_turns?: number; // 0 = 无限制
   run_seconds?: number; // worker 单次运行墙钟上限(秒)；0 = 无限制
   web_search?: boolean; // 是否启用网络搜索(受系统全局开关门控)
@@ -490,6 +491,8 @@ export interface AgentDetail {
   variables: PromptVar[];
   versions: PromptVersion[];
   visibility: { mcp: number[]; skill: string[] };
+  // 可绑定的 LLM 配置候选(供「默认模型」下拉)；当前绑定见 agent.llm_profile_id
+  llm_profiles?: { id: number; name: string; model: string; is_default: boolean }[];
   wrapup_prompt?: string; // 已保存的收尾提示词(空=用内置默认)
   wrapup_default?: string; // 内置默认收尾提示词(占位/恢复默认)
   wrapup_max_turns?: number; // 已保存的收尾轮数(0=用内置默认)

@@ -62,11 +62,16 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	return specs
 }
 
-// goalsLLMConfig resolves the LLM config for goal decomposition: the task's pinned
-// profile if any, else the global active profile (same source the engine runs on).
+// goalsLLMConfig resolves the LLM config for goal decomposition by the standard
+// precedence: the goals agent's own binding → the task's pinned profile → the global
+// active profile (same source the engine runs on).
 func (s *Server) goalsLLMConfig(t *Task) (agent.Config, bool) {
-	if t != nil && t.LLMProfileID != nil {
-		if cfg, ok := s.loadProfileConfig(*t.LLMProfileID); ok {
+	var pin *int64
+	if t != nil {
+		pin = t.LLMProfileID
+	}
+	if eff := s.effectiveProfileForAgent("goals", pin); eff != nil {
+		if cfg, ok := s.loadProfileConfig(*eff); ok {
 			return cfg, true
 		}
 	}

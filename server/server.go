@@ -78,12 +78,27 @@ type Server struct {
 	profMu         sync.Mutex
 	profAgents     map[int64]*profBundle
 	profChatAgents map[int64]*agent.ChatAgent // per-profile ChatAgent cache (chat page)
+
+	// provByProfile caches ONE provider per LLM profile id so every agent bound or
+	// pinned to the same profile shares a single provider instance — hence one rate
+	// limiter. Separate from profAgents (whole planner/worker pairs). The globally-active
+	// provider (built in applyLLM) lives OUTSIDE this cache, so binding an agent to the
+	// currently-active profile builds a second instance — harmless (that binding equals
+	// leaving it unset), just not deduped. Cleared alongside profAgents on profile edits.
+	provCacheMu   sync.Mutex
+	provByProfile map[int64]*provEntry
 }
 
 // profBundle is a planner/worker pair built from one LLM profile.
 type profBundle struct {
 	pl *agent.Planner
 	wk *agent.Worker
+}
+
+// provEntry is a cached provider + its config for one LLM profile id.
+type provEntry struct {
+	prov llm.Provider
+	cfg  agent.Config
 }
 
 // triggeredRun is one queued P3 trigger fire awaiting its turn for an agent.
@@ -105,7 +120,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
-		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{}}
+		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
+		provByProfile: map[int64]*provEntry{}}
 	// per-task LLM: a task pinned to a specific profile runs on that profile's
 	// dedicated planner/worker; unpinned tasks fall back to the global active pair.
 	s.engine.SetAgentResolver(func(t *Task) (*agent.Planner, *agent.Worker) {
@@ -307,21 +323,24 @@ func (s *Server) webSearchFor(key string) agent.WebSearchOpts {
 	return o
 }
 
-// buildPlannerWorker builds a planner+worker pair on an already-constructed provider
-// + cfg, with all engine callbacks / proxy / web-search / memory wiring. Shared by the
-// global apply path (applyLLM) and the per-profile path (agentsForProfile), so a task
-// pinned to a specific profile behaves identically to the active one — just a different LLM.
-func (s *Server) buildPlannerWorker(prov llm.Provider, cfg agent.Config) (*agent.Planner, *agent.Worker) {
+// buildPlannerWorker builds a planner+worker pair. Each agent resolves its OWN LLM by
+// precedence agent-binding → pin → the passed global fallback (gProv/gCfg), so planner
+// and worker can run on different models (e.g. a stronger planner, a cheaper worker).
+// pinID is the task's pinned profile (nil on the global active path). With no agent
+// binding and no pin, both fall back to gProv/gCfg — identical to the previous single-
+// provider behavior. Shared by applyLLM (global) and agentsForProfile (per-task pin).
+func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent.Config) (*agent.Planner, *agent.Worker) {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts")) // raw LLM conversation logs
-	win := cfg.CompactionWindow()                                    // context window in tokens (compaction)
 	// traffic host tools flow through ToolAugment for every agent and are filtered by
 	// the tools-table binding (default = worker), so worker behavior is unchanged.
-	wk := agent.NewWorker(prov, cfg.Model, s.m.dir, tx, win, s.agentMaxTurns("worker"))
+	wProv, wCfg := s.providerForAgent("worker", pinID, gProv, gCfg)
+	wk := agent.NewWorker(wProv, wCfg.Model, s.m.dir, tx, wCfg.CompactionWindow(), s.agentMaxTurns("worker"))
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
-	pl := agent.NewPlanner(prov, cfg.Model, s.m.dir, tx, win, s.agentMaxTurns("planner"))
+	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
+	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
 	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
@@ -341,13 +360,17 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	profName := s.llmProf
 	s.cfgMu.Unlock()
 	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, s.m.LLMRecordEnabled)
-	pl, wk := s.buildPlannerWorker(prov, cfg)
+	pl, wk := s.buildPlannerWorker(nil, prov, cfg)
 	s.engine.UseLLM(pl, wk)
 
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
+	// mainagent resolves its own binding (→ global fallback); chat stays the GLOBAL
+	// fallback since one ChatAgent serves many agent keys — its per-agent binding is
+	// resolved at Chat time (runConversationSync → chatAgentForProfile).
+	mProv, mCfg := s.providerForAgent("mainagent", nil, prov, cfg)
 	s.cfgMu.Lock()
-	s.mainAgent = agent.NewMainAgent(prov, cfg.Model, s.m.dir, tx, win, s.agentMaxTurns("mainagent"))
+	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
@@ -384,31 +407,88 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	return cfg, true
 }
 
-// agentsForProfile returns the dedicated planner/worker for a specific LLM profile,
-// built + cached on first use (tasks on the same profile share one provider + limiter).
-// nil,nil when the profile is invalid → the caller falls back to the global active pair.
-func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
-	s.profMu.Lock()
-	defer s.profMu.Unlock()
-	if b := s.profAgents[id]; b != nil {
-		return b.pl, b.wk
+// effectiveProfileForAgent resolves the LLM profile id an agent should run on, by
+// precedence: agent binding (agents.llm_profile_id) → pin (task/conversation) → nil
+// (caller falls back to the global active profile). A binding to a deleted profile
+// can't happen (FK ON DELETE SET NULL); an otherwise-invalid one is dropped downstream
+// by loadProfileConfig, letting the caller fall back.
+func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 {
+	if s.m.pg != nil && agentKey != "" {
+		if a, _ := s.m.pg.GetAgentByKey(agentKey); a != nil && a.LLMProfileID != nil {
+			return a.LLMProfileID
+		}
 	}
+	return pinID
+}
+
+// providerForProfile returns a cached provider+cfg for a profile id, so every agent
+// bound/pinned to the same profile shares one provider instance (one rate limiter).
+// ok=false when the profile is missing/invalid → caller falls back to the global pair.
+func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
+	s.provCacheMu.Lock()
+	if e := s.provByProfile[id]; e != nil {
+		s.provCacheMu.Unlock()
+		return e.prov, e.cfg, true
+	}
+	s.provCacheMu.Unlock()
 	cfg, ok := s.loadProfileConfig(id)
 	if !ok {
-		return nil, nil
+		return nil, agent.Config{}, false
 	}
 	prov, err := cfg.NewProvider()
 	if err != nil {
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
-		return nil, nil
+		return nil, agent.Config{}, false
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
 	}
-	pl, wk := s.buildPlannerWorker(prov, cfg)
-	s.profAgents[id] = &profBundle{pl: pl, wk: wk}
-	log.Printf("[engine] built dedicated planner/worker for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
+	s.provCacheMu.Lock()
+	if e := s.provByProfile[id]; e != nil { // lost the race → keep the winner
+		prov, cfg = e.prov, e.cfg
+	} else {
+		s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg}
+		log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
+	}
+	s.provCacheMu.Unlock()
+	return prov, cfg, true
+}
+
+// providerForAgent returns the provider+cfg one agent should run on: its bound/pinned
+// profile if that resolves, else the passed global fallback (gProv/gCfg).
+func (s *Server) providerForAgent(agentKey string, pinID *int64, gProv llm.Provider, gCfg agent.Config) (llm.Provider, agent.Config) {
+	if eff := s.effectiveProfileForAgent(agentKey, pinID); eff != nil {
+		if prov, cfg, ok := s.providerForProfile(*eff); ok {
+			return prov, cfg
+		}
+	}
+	return gProv, gCfg
+}
+
+// agentsForProfile returns the dedicated planner/worker for a task pinned to a specific
+// LLM profile, built + cached on first use (tasks on the same pin share one pair). Each
+// agent still honors its own binding first (via buildPlannerWorker), falling back to this
+// pinned profile. nil,nil when the profile is invalid → caller uses the global active pair.
+func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
+	s.profMu.Lock()
+	b := s.profAgents[id]
+	s.profMu.Unlock()
+	if b != nil {
+		return b.pl, b.wk
+	}
+	prov, cfg, ok := s.providerForProfile(id)
+	if !ok {
+		return nil, nil
+	}
+	pl, wk := s.buildPlannerWorker(&id, prov, cfg)
+	s.profMu.Lock()
+	if ex := s.profAgents[id]; ex != nil { // lost the race → keep the winner
+		pl, wk = ex.pl, ex.wk
+	} else {
+		s.profAgents[id] = &profBundle{pl: pl, wk: wk}
+	}
+	s.profMu.Unlock()
 	return pl, wk
 }
 
@@ -416,40 +496,41 @@ func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
 // per profile id. Returns nil if the profile is missing or has no API key.
 func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	s.profMu.Lock()
-	defer s.profMu.Unlock()
-	if ca := s.profChatAgents[id]; ca != nil {
-		return ca
+	cached := s.profChatAgents[id]
+	s.profMu.Unlock()
+	if cached != nil {
+		return cached
 	}
-	cfg, ok := s.loadProfileConfig(id)
+	prov, cfg, ok := s.providerForProfile(id)
 	if !ok {
 		return nil
 	}
-	prov, err := cfg.NewProvider()
-	if err != nil {
-		log.Printf("[chat] build provider for LLM profile %d failed: %v", id, err)
-		return nil
-	}
-	// Wrap with recorder, tagged with this profile's name.
-	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
-	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	win := cfg.CompactionWindow()
-	ca := agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win)
+	ca := agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
-	s.profChatAgents[id] = ca
+	s.profMu.Lock()
+	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
+		ca = ex
+	} else {
+		s.profChatAgents[id] = ca
+	}
+	s.profMu.Unlock()
 	return ca
 }
 
-// invalidateProfileAgents drops the per-profile agent cache so a profile save/activate/
-// delete rebuilds pinned tasks' planner/worker on their next round.
+// invalidateProfileAgents drops the per-profile agent + provider caches so a profile
+// save/activate/delete — or an agent's binding change — rebuilds pinned tasks' planner/
+// worker (and re-resolves each agent's bound model) on their next round.
 func (s *Server) invalidateProfileAgents() {
 	s.profMu.Lock()
 	s.profAgents = map[int64]*profBundle{}
 	s.profChatAgents = map[int64]*agent.ChatAgent{}
 	s.profMu.Unlock()
+	s.provCacheMu.Lock()
+	s.provByProfile = map[int64]*provEntry{}
+	s.provCacheMu.Unlock()
 }
 
 func (s *Server) mainAgentRef() *agent.MainAgent {

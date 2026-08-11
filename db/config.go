@@ -123,6 +123,7 @@ type Agent struct {
 	Role             string `json:"role"`
 	Builtin          bool   `json:"builtin"`
 	Enabled          bool   `json:"enabled"`
+	LLMProfileID     *int64 `json:"llm_profile_id"`    // 绑定的 LLM 配置;nil=跟随任务/会话 pin,再回退全局激活
 	MaxTurns         int    `json:"max_turns"`         // 单次运行最大轮次;0=不限制
 	RunSecs          int    `json:"run_seconds"`       // worker 单次运行墙钟上限(秒);0=不限制
 	WebSearch        bool   `json:"web_search"`        // 是否启用网络搜索(受系统全局开关门控)
@@ -141,11 +142,16 @@ type Agent struct {
 	TriggerMaxParallel int    `json:"trigger_max_parallel"`
 }
 
-const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'by_task'),COALESCE(trigger_max_parallel,5)`
+const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'by_task'),COALESCE(trigger_max_parallel,5),llm_profile_id`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
-	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel)
+	var prof sql.NullInt64 // llm_profile_id 可空:未绑定时为 NULL
+	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof)
+	if err == nil && prof.Valid {
+		v := prof.Int64
+		a.LLMProfileID = &v
+	}
 	return &a, err
 }
 
@@ -259,6 +265,14 @@ func (d *DB) SetAgentMaxTurns(key string, maxTurns int) error {
 		maxTurns = 0
 	}
 	_, err := d.Exec(`UPDATE agents SET max_turns=$1 WHERE key=$2`, maxTurns, key)
+	return err
+}
+
+// SetAgentLLMProfile binds an agent to a specific LLM profile (id != nil), or clears
+// the binding (id == nil) so the agent follows the task/conversation pin, else the
+// global active profile. Precedence at runtime: agent binding → task/conv pin → active.
+func (d *DB) SetAgentLLMProfile(key string, id *int64) error {
+	_, err := d.Exec(`UPDATE agents SET llm_profile_id=$1 WHERE key=$2`, id, key)
 	return err
 }
 

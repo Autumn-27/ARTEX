@@ -321,9 +321,10 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 		delete(s.chatCancel, busyKey)
 		s.chatMu.Unlock()
 	}()
+	// precedence: the conversation agent's own binding → this conversation's pin → global.
 	ca := s.chatAgentRef()
-	if c.LLMProfileID != nil {
-		if pa := s.chatAgentForProfile(*c.LLMProfileID); pa != nil {
+	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
+		if pa := s.chatAgentForProfile(*eff); pa != nil {
 			ca = pa
 		}
 	}

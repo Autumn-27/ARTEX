@@ -304,6 +304,7 @@ type AgentDTO struct {
 	RunSecs          int    `json:"run_seconds"`
 	WebSearch        bool   `json:"web_search"`
 	InteractiveShell bool   `json:"interactive_shell"`
+	LLMProfileID     *int64 `json:"llm_profile_id"` // 绑定的 LLM 配置;null=跟随任务/全局
 	// P3 触发后处理策略(仅自定义 agent 有意义)。
 	TriggerRunMode     string `json:"trigger_run_mode"`
 	TriggerMergeMode   string `json:"trigger_merge_mode"`
@@ -327,6 +328,7 @@ func agentDTO(a *db.Agent) AgentDTO {
 		RunSecs:            a.RunSecs,
 		WebSearch:          a.WebSearch,
 		InteractiveShell:   a.InteractiveShell,
+		LLMProfileID:       a.LLMProfileID,
 		TriggerRunMode:     a.TriggerRunMode,
 		TriggerMergeMode:   a.TriggerMergeMode,
 		TriggerMaxParallel: a.TriggerMaxParallel,
