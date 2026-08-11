@@ -521,6 +521,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
+	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
 	mux.HandleFunc("GET /api/exploration/activity/stream", s.streamActivity)
 	mux.HandleFunc("GET /api/exploration/activity/{seq}", s.activityDetail)
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
@@ -1255,11 +1256,34 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) intents(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
+		// Back-compat: bare list shape when the task can't be resolved.
 		writeJSON(w, 200, []any{})
 		return
 	}
-	in, _ := t.Store.ListByKind(db.KindIntent, 300)
-	writeJSON(w, 200, taskNodeDTOs(in))
+	q := r.URL.Query()
+	limit := min(atoiDefault(q.Get("limit"), 300), 500)
+	// No paging params → preserve the legacy bare-array response so existing callers
+	// (and the poll) keep working unchanged.
+	if q.Get("before") == "" && q.Get("page") == "" {
+		in, err := t.Store.ListByKind(db.KindIntent, limit)
+		if err != nil {
+			log.Printf("[intents] task=%s limit=%d: %v", t.ID, limit, err)
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, taskNodeDTOs(in))
+		return
+	}
+	// Paged form: ?before=<id> (or ?page as a marker) → {items, has_more} so the
+	// worker session list can reach past the old fixed 300 boundary on scroll.
+	before := int64(atoiDefault(q.Get("before"), 0))
+	in, hasMore, err := t.Store.ListByKindPage(db.KindIntent, before, limit)
+	if err != nil {
+		log.Printf("[intents] task=%s before=%d limit=%d: %v", t.ID, before, limit, err)
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"items": taskNodeDTOs(in), "has_more": hasMore})
 }
 
 // explorationGraph returns the whole exploration chain (task graph) as nodes+edges.
@@ -1291,10 +1315,74 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	}
 	items, cursor, err := t.Store.ActivityList(intentPtr, since, limit)
 	if err != nil {
+		log.Printf("[activity] task=%s since=%d limit=%d intent=%v: %v", t.ID, since, limit, intentPtr, err)
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor})
+}
+
+// parseActivitySession maps a stable session key (main | plan | intent:<ID>) to a
+// DB session filter. Goal Agent + Planner both live under worker="planner" (the
+// single Plan session); a Worker session is one intent, keyed by its node id.
+func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
+	switch {
+	case sess == "" || sess == "main":
+		return db.ActivitySessionFilter{Worker: "mainagent"}, true
+	case sess == "plan":
+		return db.ActivitySessionFilter{Worker: "planner"}, true
+	case strings.HasPrefix(sess, "intent:"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(sess, "intent:"), 10, 64)
+		if err != nil {
+			return db.ActivitySessionFilter{}, false
+		}
+		return db.ActivitySessionFilter{NodeID: &id}, true
+	}
+	return db.ActivitySessionFilter{}, false
+}
+
+// activityHistory serves one reverse-paginated page of a session's activity history.
+// The latest page (no ?before) opens a session; ?before=<id> pulls the older page on
+// scroll-up. snapshot_cursor is the TASK-level max id at query time — the client uses
+// it to open the single task SSE at since=snapshot_cursor so history (id<=cursor) and
+// the live tail (id>cursor) meet with no gap and no overlap.
+func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	if t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	q := r.URL.Query()
+	sess := q.Get("session")
+	filter, ok := parseActivitySession(sess)
+	if !ok {
+		writeErr(w, 400, "bad session")
+		return
+	}
+	before := int64(atoiDefault(q.Get("before"), 0))
+	limit := min(atoiDefault(q.Get("limit"), 200), 500) // cap so one request can't pull an unbounded slice
+	snapshot, err := t.Store.ActivityMaxID()
+	if err != nil {
+		log.Printf("[activity/history] task=%s session=%s snapshot: %v", t.ID, sess, err)
+		writeErr(w, 500, err.Error())
+		return
+	}
+	items, hasMore, err := t.Store.ActivityPage(filter, before, limit)
+	if err != nil {
+		log.Printf("[activity/history] task=%s session=%s before=%d limit=%d: %v", t.ID, sess, before, limit, err)
+		writeErr(w, 500, err.Error())
+		return
+	}
+	earliest := before
+	if len(items) > 0 {
+		earliest = items[0].ID
+	}
+	writeJSON(w, 200, map[string]any{
+		"items":           activityDTOs(items),
+		"snapshot_cursor": snapshot,
+		"earliest_cursor": earliest,
+		"has_more":        hasMore,
+	})
 }
 
 // tokenStats returns per-worker token usage (input/output/cache read/write) for a
@@ -1471,7 +1559,16 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 			intentPtr = &n
 		}
 	}
+	// Cursor precedence: the browser's automatic reconnect sends Last-Event-ID (the
+	// last id it received) — trust it over the query so an auto-reconnect resumes
+	// exactly where it dropped. A fresh/manual connect has no header and passes
+	// since=<snapshot_cursor> from the history page instead.
 	since := int64(atoiDefault(r.URL.Query().Get("since"), 0))
+	if le := r.Header.Get("Last-Event-ID"); le != "" {
+		if n, err := strconv.ParseInt(le, 10, 64); err == nil {
+			since = n
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1483,18 +1580,37 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	ch, unsub := s.engine.Broadcaster().Subscribe(t.ID)
 	defer unsub()
 
+	// Emit a standard SSE id: line so the browser echoes it as Last-Event-ID on
+	// auto-reconnect (see cursor precedence above).
 	sendSSE := func(a db.Activity) {
 		b, _ := json.Marshal(activityDTO(a))
-		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b)
 		flusher.Flush()
 	}
 
-	items, cursor, _ := t.Store.ActivityList(intentPtr, since, 2000)
-	for _, a := range items {
-		sendSSE(a)
-	}
-	if cursor > since {
-		since = cursor
+	// Compensate the DB backlog after `since` in batches until caught up. This is the
+	// gap between the history snapshot and the live tail — NOT the first-page history
+	// (that's the /activity/history endpoint). A long task can have far more than one
+	// batch, so loop instead of a single fixed read; on a query error log it and close
+	// so the client reconnects and retries from its last id (broadcast is lossy — the
+	// DB is the source of truth). The Broadcaster keeps buffering live events meanwhile;
+	// the id<=since skip below drops any that this replay already covered.
+	const replayBatch = 500
+	for {
+		items, cursor, err := t.Store.ActivityList(intentPtr, since, replayBatch)
+		if err != nil {
+			log.Printf("[activity/stream] task=%s replay since=%d: %v", t.ID, since, err)
+			return
+		}
+		for _, a := range items {
+			sendSSE(a)
+		}
+		if cursor > since {
+			since = cursor
+		}
+		if len(items) < replayBatch {
+			break
+		}
 	}
 	flusher.Flush()
 

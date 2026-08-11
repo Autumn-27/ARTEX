@@ -247,6 +247,36 @@ export const api = {
     return get<{ items: Activity[]; cursor: number }>(`/exploration/activity?${q.toString()}`).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0 }));
   },
   activityDetail: (id: number, task?: string) => get<{ detail: string }>(`/exploration/activity/${id}${tq(task)}`),
+  // Reverse-paginated session history. session = "main" | "plan" | "intent:<id>".
+  // before=0 → latest page; before=<id> → the older page ending before that id.
+  // snapshotCursor is the TASK-level max id at query time — open the task SSE at
+  // since=snapshotCursor so history (id≤cursor) and the live tail (id>cursor) meet
+  // gap-free. hasMore = still-older steps exist (drives scroll-up loading).
+  activityHistory: (task: string, session: string, before = 0, limit = 200) => {
+    const q = new URLSearchParams({ session, limit: String(limit) });
+    if (task) q.set("task", task);
+    if (before > 0) q.set("before", String(before));
+    return get<{ items: Activity[]; snapshot_cursor: number; earliest_cursor: number; has_more: boolean }>(
+      `/exploration/activity/history?${q.toString()}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      snapshotCursor: r.snapshot_cursor ?? 0,
+      earliestCursor: r.earliest_cursor ?? 0,
+      hasMore: !!r.has_more,
+    }));
+  },
+  // Paged worker (intent) session list — reaches past the legacy fixed 300 cap.
+  // before=0 → newest page; before=<id> → older page. has_more = older intents exist.
+  intentsPage: (task: string, before = 0, limit = 300) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (task) q.set("task", task);
+    q.set("before", String(before > 0 ? before : 0));
+    q.set("page", "1"); // marker so the backend returns the paged {items,has_more} shape
+    return get<{ items: TaskNode[]; has_more: boolean }>(`/exploration/intents?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      hasMore: !!r.has_more,
+    }));
+  },
 
   // ---- traffic / audit / report / chat ----
   audit: (task?: string) => get<Audit>(`/audit${tq(task)}`),

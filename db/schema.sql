@@ -187,6 +187,9 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
+-- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
+-- can't distinguish them); this covers reverse pagination of those sessions.
+CREATE INDEX IF NOT EXISTS idx_act_worker ON activity(exploration_id, worker, id);
 
 -- =====================================================================
 -- C. LLM profiles

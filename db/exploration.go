@@ -267,6 +267,32 @@ WHERE exploration_id=$1 AND kind=$2 ORDER BY id DESC LIMIT $3`, s.expID, kind, l
 	return scanNodes(rows)
 }
 
+// ListByKindPage returns one newest-first page of nodes of a kind for reverse
+// pagination: up to `limit` nodes with id < `before` (before<=0 = the newest page).
+// hasMore reports whether still-older nodes exist, so a client (e.g. the worker
+// session list) can page past the old fixed cap instead of losing older intents.
+func (s *ExplorationStore) ListByKindPage(kind string, before int64, limit int) ([]*Node, bool, error) {
+	if limit <= 0 {
+		limit = 300
+	}
+	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
+WHERE exploration_id=$1 AND kind=$2 AND ($3 <= 0 OR id < $3)
+ORDER BY id DESC LIMIT $4`, s.expID, kind, before, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	nodes, err := scanNodes(rows)
+	if err != nil {
+		return nil, false, err
+	}
+	hasMore := len(nodes) > limit
+	if hasMore {
+		nodes = nodes[:limit]
+	}
+	return nodes, hasMore, nil
+}
+
 // GetNode returns one node of this exploration by id (nil, nil if not found).
 func (s *ExplorationStore) GetNode(id int64) (*Node, error) {
 	n, err := scanNode(s.db.QueryRow(`SELECT `+nodeCols+` FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, id, s.expID))
@@ -558,6 +584,90 @@ FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, 
 		out = append(out, a)
 	}
 	return out, cursor, rows.Err()
+}
+
+// ActivitySessionFilter selects one UI "session" within a task's activity stream.
+// Exactly one field is meaningful:
+//   - Worker != ""  → filter by worker name (Main = "mainagent", Plan = "planner").
+//     Goal Agent 的第 0 轮拆解也以 worker="planner" 落库，故 Plan 会话完整覆盖 Goal+Planner。
+//   - NodeID != nil → a Worker session, filtered by node_id (= intent id).
+// A zero value (both empty) matches the whole task (no session filter).
+type ActivitySessionFilter struct {
+	Worker string
+	NodeID *int64
+}
+
+func (f ActivitySessionFilter) cond(argStart int) (string, []any) {
+	switch {
+	case f.NodeID != nil:
+		return fmt.Sprintf(" AND node_id=$%d", argStart), []any{*f.NodeID}
+	case f.Worker != "":
+		return fmt.Sprintf(" AND worker=$%d", argStart), []any{f.Worker}
+	default:
+		return "", nil
+	}
+}
+
+// ActivityPage returns one page for reverse (newest-first) pagination of a session:
+// up to `limit` steps ending before id `before` (exclusive; before<=0 = the latest
+// page), returned in ASCENDING id order for direct display. hasMore reports whether
+// still-older steps exist before the returned window (so the client can stop loading
+// on scroll-up). Summary-only columns — detail is lazy-loaded via ActivityDetail.
+func (s *ExplorationStore) ActivityPage(f ActivitySessionFilter, before int64, limit int) ([]Activity, bool, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	args := []any{s.expID}
+	cond, cargs := f.cond(len(args) + 1)
+	args = append(args, cargs...)
+	beforeArg := len(args) + 1
+	args = append(args, before)
+	limitArg := len(args) + 1
+	args = append(args, limit+1) // one extra row to detect older history
+	q := fmt.Sprintf(`SELECT `+cols+`
+FROM activity WHERE exploration_id=$1%s AND ($%d <= 0 OR id < $%d)
+ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	desc := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.CreatedAt,
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			return nil, false, err
+		}
+		desc = append(desc, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(desc) > limit
+	if hasMore {
+		desc = desc[:limit]
+	}
+	// reverse the newest-first window into ascending id order for display.
+	out := make([]Activity, len(desc))
+	for i, a := range desc {
+		out[len(desc)-1-i] = a
+	}
+	return out, hasMore, nil
+}
+
+// ActivityMaxID returns the task's current maximum activity id (0 when empty). It is
+// the task-level snapshot cursor handed to the SSE stream so history (id<=cursor) and
+// the live tail (id>cursor) meet with no gap — deliberately task-level, not per
+// session, since one SSE covers the whole task.
+func (s *ExplorationStore) ActivityMaxID() (int64, error) {
+	var max sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(id) FROM activity WHERE exploration_id=$1`, s.expID).Scan(&max)
+	if err != nil {
+		return 0, err
+	}
+	return max.Int64, nil
 }
 
 // ActivityDetail lazily returns the full detail blob for one step.

@@ -14,6 +14,8 @@ import {
   CircleXIcon,
   CircleSlashIcon,
   ShieldAlertIcon,
+  WifiOffIcon,
+  RotateCwIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Transcript } from "@/components/transcript";
@@ -37,6 +39,70 @@ import type {
   TaskNode,
   TokenTotal,
 } from "@/lib/types";
+
+// ── Reliability model (see docs/task-session-history-sse-remediation.md) ──────────
+// The task's activity is NO LONGER one unbounded `allActivity` array replayed from
+// SSE since=0. Instead:
+//   • Each UI session (main | plan | intent:<id>) has its own lazily-loaded, reverse-
+//     paginated cache (SessionState below). Opening a session loads only its latest
+//     page; scrolling up pages older history in.
+//   • A single task-level SSE (opened at since=snapshot_cursor from the first history
+//     page) tails ALL agents' new activity; frames are dispatched by session_key.
+//   • History + SSE meet gap-free at snapshot_cursor and are merged by seq (dedup),
+//     so refresh / tab-switch / sleep / reconnect never drop the newest records.
+
+const PAGE = 200; // history page size
+const MAX_KEEP = 4000; // per-session in-memory cap; older pages re-fetched on scroll-up
+const STREAM_WINDOW_MS = 5000; // "live" = activity seen within this window
+
+// One session's lazily-loaded, reverse-paginated cache. `lastTs`/`unread` are kept
+// live even for sessions that were never opened, so the list shows liveness + unread
+// without holding their full history.
+type SessionState = {
+  items: Activity[];
+  loaded: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean; // older history remains above the loaded window
+  earliestSeq: number; // earliest loaded id — reverse-pagination anchor
+  unread: number;
+  lastTs: string; // most-recent activity time (drives live badge; updated even when unloaded)
+  error?: string;
+};
+type SessionStore = Record<string, SessionState>;
+
+function emptyState(): SessionState {
+  return {
+    items: [],
+    loaded: false,
+    loading: false,
+    loadingMore: false,
+    hasMore: false,
+    earliestSeq: 0,
+    unread: 0,
+    lastTs: "",
+  };
+}
+
+// sessionKeyOf routes an activity to its stable session key. worker="planner" covers
+// BOTH the Goal Agent's round-0 decomposition and the Planner (single Plan session).
+function sessionKeyOf(a: Activity): string {
+  if (a.worker === "mainagent") return "main";
+  if (a.worker === "planner") return "plan";
+  if (a.intent_id) return `intent:${a.intent_id}`;
+  return "unknown";
+}
+
+// mergeBySeq unions two activity lists by seq (dedup) in ascending seq order. Every
+// data source — latest page, older page, SSE compensation, live tail — goes through
+// this, so history responses can never clobber live records received meanwhile.
+function mergeBySeq(current: Activity[], incoming: Activity[]): Activity[] {
+  if (!incoming.length) return current;
+  const bySeq = new Map<number, Activity>();
+  for (const a of current) bySeq.set(a.seq, a);
+  for (const a of incoming) bySeq.set(a.seq, a);
+  return [...bySeq.values()].sort((p, q) => p.seq - q.seq);
+}
 
 // statusIcon maps a session status to its icon. Worker terminal states are
 // distinct & color-coded: 完成(绿勾圈) / 取消停止(琥珀斜杠圈) / 出错(红叉圈) /
@@ -83,7 +149,7 @@ const roleMeta = {
 
 // The main-agent session is the interactive entry point of this tab and has no
 // dedicated backend "sessions" endpoint — it is a fixed UI affordance whose
-// transcript is the full live activity stream for the task.
+// transcript is the main-agent activity stream (worker="mainagent") for the task.
 const MAIN_ID = "s-main";
 const MAIN_SESSION: Session = {
   id: MAIN_ID,
@@ -96,8 +162,8 @@ const MAIN_SESSION: Session = {
 
 // The planner session is, like the main-agent session, a fixed UI affordance with
 // no dedicated backend "sessions" endpoint — its transcript is every activity step
-// the planner emits (worker === "planner", which carries no intent_id since the
-// planner is what generates intents).
+// the planner emits (worker === "planner", which also carries the Goal Agent's
+// round-0 decomposition; the planner carries no intent_id since it generates intents).
 const PLANNER_ID = "s-planner";
 const PLANNER_SESSION: Session = {
   id: PLANNER_ID,
@@ -107,6 +173,13 @@ const PLANNER_SESSION: Session = {
   live: true,
   last_activity: "",
 };
+
+// keyForSession maps a UI Session → its stable store key (main | plan | intent:<id>).
+function keyForSession(s: Session): string {
+  if (s.role === "mainagent") return "main";
+  if (s.role === "planner") return "plan";
+  return `intent:${s.intent_id}`;
+}
 
 // Map an exploration intent (TaskNode) state → a session status the UI renders.
 function intentStatus(state: string): SessionStatus {
@@ -147,12 +220,14 @@ function SessionItem({
   active,
   displayTitle,
   hasPending,
+  unread,
   onClick,
 }: {
   s: Session;
   active: boolean;
   displayTitle: string;
   hasPending?: boolean;
+  unread?: number;
   onClick: () => void;
 }) {
   const icon =
@@ -180,6 +255,11 @@ function SessionItem({
       {hasPending && (
         <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />
       )}
+      {!active && unread ? (
+        <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+          {unread > 99 ? "99+" : unread}
+        </span>
+      ) : null}
       {s.live && (
         <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
           <span className="size-1 animate-pulse rounded-full bg-blue-500" />
@@ -192,21 +272,121 @@ function SessionItem({
 
 export function SessionsTab({ taskId }: { taskId: string }) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
-  // Live activity stream — the primary data for this tab.
-  const [allActivity, setAllActivity] = React.useState<Activity[]>([]);
-  // Worker sessions derived from exploration intents.
+  // Per-session lazily-loaded caches, keyed by session_key (main | plan | intent:<id>).
+  const [store, setStore] = React.useState<SessionStore>({});
+  // Worker sessions derived from exploration intents (paged past the old 300 cap).
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
+  const [olderIntents, setOlderIntents] = React.useState<TaskNode[]>([]);
+  const [intentsHasMore, setIntentsHasMore] = React.useState(false);
+  const [loadingOlderIntents, setLoadingOlderIntents] = React.useState(false);
   // Local-only chat messages overlaid onto the main-agent transcript.
   const [chatExtra, setChatExtra] = React.useState<Activity[]>([]);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
-  const [loaded, setLoaded] = React.useState(false);
+  // SSE connection state — surfaced so a dropped realtime link is visible, never
+  // silently shown as "no messages".
+  const [sseLive, setSseLive] = React.useState(false);
   // Whole-task token total (all agents), polled from the backend aggregate.
   const [taskTokens, setTaskTokens] = React.useState<TokenTotal | null>(null);
   // Pending intercept requests for this task — used to show warning icons on sessions.
   const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
 
+  // Refs backing SSE/loading without re-render churn.
+  const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
+  const esRef = React.useRef<EventSource | null>(null);
+  const activeKeyRef = React.useRef("main"); // current session key (for SSE dispatch/unread)
+  const atBottomRef = React.useRef(true); // transcript pinned to bottom?
+  // Per-key request token: a stale response for a key is ignored (guards fast
+  // latest/older interleaving). Writes are ALWAYS keyed, so a late response can only
+  // touch its own session cache — never the currently-viewed one (see §7.5).
+  const reqTokenRef = React.useRef<Record<string, number>>({});
+  // Keys with a latest-page load in flight — dedups the double trigger where the
+  // first-load effect and the active-session effect both want "main" on mount (the
+  // former also opens the SSE, so it must not be pre-empted).
+  const loadingKeysRef = React.useRef<Set<string>>(new Set());
+
+  // ── store helpers ──────────────────────────────────────────────────────────────
+  const patchStore = React.useCallback(
+    (key: string, fn: (s: SessionState) => SessionState) => {
+      setStore((prev) => ({ ...prev, [key]: fn(prev[key] ?? emptyState()) }));
+    },
+    [],
+  );
+
+  // Load a session's LATEST page (before=0) on first open. Keyed + request-token
+  // guarded so a switch away can't corrupt the view.
+  const loadSession = React.useCallback(
+    (key: string) => {
+      if (MOCK) return; // MOCK preloads everything up front
+      if (loadingKeysRef.current.has(key)) return; // already in flight (e.g. main on mount)
+      loadingKeysRef.current.add(key);
+      const token = (reqTokenRef.current[key] ?? 0) + 1;
+      reqTokenRef.current[key] = token;
+      patchStore(key, (s) => ({ ...s, loading: true, error: undefined }));
+      api
+        .activityHistory(taskId, key, 0, PAGE)
+        .then((r) => {
+          if (reqTokenRef.current[key] !== token) return; // superseded
+          if (r.snapshotCursor > snapshotRef.current) snapshotRef.current = r.snapshotCursor;
+          patchStore(key, (s) => {
+            const items = mergeBySeq(r.items, s.items); // keep any live frames arrived meanwhile
+            return {
+              ...s,
+              items,
+              loaded: true,
+              loading: false,
+              hasMore: r.hasMore,
+              earliestSeq: items.length ? items[0].seq : 0,
+              unread: 0,
+              error: undefined,
+            };
+          });
+        })
+        .catch((e) => {
+          if (reqTokenRef.current[key] !== token) return;
+          patchStore(key, (s) => ({ ...s, loading: false, error: (e as Error).message || "加载失败" }));
+        })
+        .finally(() => loadingKeysRef.current.delete(key));
+    },
+    [taskId, patchStore],
+  );
+
+  // Load one older page (scroll-up) for a session, preserving scroll position.
+  const loadEarlier = React.useCallback(
+    (key: string, viewport: () => HTMLElement | null) => {
+      const st = store[key];
+      if (!st || st.loadingMore || !st.hasMore || !st.earliestSeq) return;
+      const vp = viewport();
+      const prevH = vp?.scrollHeight ?? 0;
+      const prevTop = vp?.scrollTop ?? 0;
+      patchStore(key, (s) => ({ ...s, loadingMore: true }));
+      api
+        .activityHistory(taskId, key, st.earliestSeq, PAGE)
+        .then((r) => {
+          patchStore(key, (s) => {
+            const items = mergeBySeq(r.items, s.items);
+            return {
+              ...s,
+              items,
+              loadingMore: false,
+              hasMore: r.hasMore,
+              earliestSeq: items.length ? items[0].seq : s.earliestSeq,
+            };
+          });
+          requestAnimationFrame(() => {
+            const v = viewport();
+            if (v) v.scrollTop = prevTop + (v.scrollHeight - prevH);
+          });
+        })
+        .catch(() => {
+          patchStore(key, (s) => ({ ...s, loadingMore: false }));
+        });
+    },
+    [taskId, store, patchStore],
+  );
+
+  // ── task token total (whole task, all agents) ───────────────────────────────────
   React.useEffect(() => {
     let alive = true;
     const load = () =>
@@ -241,67 +421,140 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const id = setInterval(() => setTick((t) => t + 1), 1500);
     return () => clearInterval(id);
   }, []);
-  // A session is "streaming" only if its agent emitted activity in the last few
-  // seconds (i.e. SSE actually in flight) — not a hardcoded always-on flag.
-  const STREAM_WINDOW_MS = 5000;
-  const streamingFor = React.useCallback(
-    (w: string) => {
-      let latest = 0;
-      for (const a of allActivity) {
-        if (a.worker === w) {
-          const t = Date.parse(a.ts);
-          if (t > latest) latest = t;
-        }
-      }
-      return latest > 0 && Date.now() - latest < STREAM_WINDOW_MS;
-    },
-    [allActivity],
-  );
-  const mainLive = streamingFor("mainagent");
-  const plannerLive = streamingFor("planner");
 
-  // Live activity stream via SSE: the endpoint replays history after since=0 then
-  // tails each new step. EventSource auto-reconnects; on reconnect history replays
-  // and the seq dedup below keeps it gap-free without duplicates.
+  // ── first load + single task SSE ────────────────────────────────────────────────
+  // On task open: load Main's latest page, take the task-level snapshot cursor from
+  // it, THEN open ONE task SSE at since=snapshot_cursor. History covers id≤cursor and
+  // the SSE covers id>cursor with no gap. The SSE tails ALL agents; frames are routed
+  // by session_key. EventSource auto-reconnects and (via our `id:` lines → Last-Event-
+  // ID) resumes from the DB, so a dropped realtime link self-heals; seq-merge dedups.
   React.useEffect(() => {
-    setAllActivity([]);
-    setLoaded(false);
-    // Mock demo：无 SSE 后端，一次性拉取活动快照（执行过程）。
+    setStore({});
+    setChatExtra([]);
+    setSseLive(false);
+    setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
+    snapshotRef.current = 0;
+    reqTokenRef.current = {};
+    // Reserve "main" so the active-session effect (which also fires for main on mount)
+    // won't double-load it and pre-empt the SSE opened here.
+    loadingKeysRef.current = new Set(["main"]);
+    let alive = true;
+
+    // MOCK demo: no SSE backend — pull one activity snapshot and bucket by session.
     if (MOCK) {
       api
         .activity(taskId)
-        .then((r) => setAllActivity(r.items))
-        .catch(() => {})
-        .finally(() => setLoaded(true));
-      return;
+        .then((r) => {
+          if (!alive) return;
+          const buckets: SessionStore = {};
+          for (const a of r.items) {
+            const k = sessionKeyOf(a);
+            if (!buckets[k]) buckets[k] = emptyState();
+            buckets[k].items.push(a);
+          }
+          for (const k of Object.keys(buckets)) {
+            const st = buckets[k];
+            st.items.sort((p, q) => p.seq - q.seq);
+            st.loaded = true;
+            st.hasMore = false;
+            st.earliestSeq = st.items.length ? st.items[0].seq : 0;
+            st.lastTs = st.items.length ? st.items[st.items.length - 1].ts : "";
+          }
+          buckets.main ??= { ...emptyState(), loaded: true };
+          setStore(buckets);
+        })
+        .catch(() => setStore({ main: { ...emptyState(), loaded: true } }));
+      return () => {
+        alive = false;
+      };
     }
-    const es = new EventSource(
-      sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=0`),
-    );
-    es.onopen = () => setLoaded(true);
-    es.onmessage = (e) => {
-      try {
-        const a = JSON.parse(e.data) as Activity;
-        setAllActivity((prev) =>
-          prev.some((x) => x.seq === a.seq)
-            ? prev
-            : [...prev, a].sort((p, q) => p.seq - q.seq),
+
+    const token = (reqTokenRef.current.main ?? 0) + 1;
+    reqTokenRef.current.main = token;
+    patchStore("main", (s) => ({ ...s, loading: true }));
+    api
+      .activityHistory(taskId, "main", 0, PAGE)
+      .then((r) => {
+        if (!alive || reqTokenRef.current.main !== token) return;
+        snapshotRef.current = r.snapshotCursor;
+        patchStore("main", (s) => {
+          const items = mergeBySeq(r.items, s.items);
+          return {
+            ...s,
+            items,
+            loaded: true,
+            loading: false,
+            hasMore: r.hasMore,
+            earliestSeq: items.length ? items[0].seq : 0,
+            unread: 0,
+          };
+        });
+        // Open the single task SSE from the snapshot cursor.
+        const es = new EventSource(
+          sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
         );
-      } catch {
-        /* ignore malformed frame */
-      }
+        esRef.current = es;
+        es.onopen = () => setSseLive(true);
+        es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
+        es.onmessage = (e) => {
+          let a: Activity;
+          try {
+            a = JSON.parse(e.data) as Activity;
+          } catch {
+            return; // ignore malformed frame
+          }
+          const k = sessionKeyOf(a);
+          setStore((prev) => {
+            const cur = prev[k] ?? emptyState();
+            const activeK = activeKeyRef.current;
+            // Merge into sessions that are loaded, actively loading, or the current
+            // view (so returning is instant + a frame that lands mid-load isn't lost).
+            // A cold, inactive session only tracks liveness + unread until it's opened.
+            if (!cur.loaded && !cur.loading && k !== activeK) {
+              return { ...prev, [k]: { ...cur, lastTs: a.ts, unread: cur.unread + 1 } };
+            }
+            let items = mergeBySeq(cur.items, [a]);
+            // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
+            // but never while the user is reading this session's history (scrolled up).
+            let hasMore = cur.hasMore;
+            let earliestSeq = cur.earliestSeq;
+            const trimmable = k !== activeK || atBottomRef.current;
+            if (trimmable && items.length > MAX_KEEP) {
+              items = items.slice(items.length - MAX_KEEP);
+              hasMore = true;
+              earliestSeq = items[0].seq;
+            }
+            const unread = k === activeK ? 0 : cur.unread + 1;
+            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
+          });
+        };
+      })
+      .catch((err) => {
+        if (!alive || reqTokenRef.current.main !== token) return;
+        patchStore("main", (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
+      })
+      .finally(() => loadingKeysRef.current.delete("main"));
+
+    return () => {
+      alive = false;
+      esRef.current?.close();
+      esRef.current = null;
     };
-    return () => es.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
-  // Worker session list derives from exploration intents — poll lightly (changes
-  // far less often than the activity stream).
+  // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
     let active = true;
     const load = () =>
-      api.intents(taskId).then((nodes) => {
-        if (active) setIntents(nodes);
-      }).catch(() => {});
+      api
+        .intentsPage(taskId, 0, 300)
+        .then((r) => {
+          if (!active) return;
+          setIntents(r.items);
+          setIntentsHasMore(r.hasMore);
+        })
+        .catch(() => {});
     load();
     const t = setInterval(load, 5000);
     return () => {
@@ -310,18 +563,43 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     };
   }, [taskId]);
 
+  const loadOlderIntents = React.useCallback(() => {
+    if (loadingOlderIntents) return;
+    const all = [...intents, ...olderIntents];
+    const minId = all.reduce((m, n) => Math.min(m, Number(n.id)), Infinity);
+    if (!Number.isFinite(minId)) return;
+    setLoadingOlderIntents(true);
+    api
+      .intentsPage(taskId, minId, 300)
+      .then((r) => {
+        setOlderIntents((prev) => {
+          const seen = new Set([...intents, ...prev].map((n) => n.id));
+          return [...prev, ...r.items.filter((n) => !seen.has(n.id))];
+        });
+        setIntentsHasMore(r.hasMore);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingOlderIntents(false));
+  }, [taskId, intents, olderIntents, loadingOlderIntents]);
+
+  // Combined, de-duplicated worker list (newest first page + older loaded pages).
+  const allIntents = React.useMemo(() => {
+    const byId = new Map<string, TaskNode>();
+    for (const n of olderIntents) byId.set(n.id, n);
+    for (const n of intents) byId.set(n.id, n); // fresh poll wins over older snapshot
+    return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
+  }, [intents, olderIntents]);
+
   const workerSessions = React.useMemo(
-    () => intents.map(intentToSession),
-    [intents],
+    () => allIntents.map(intentToSession),
+    [allIntents],
   );
 
-  // For each worker session (intent), derive the display title from the latest
-  // activity summary (so the list shows what's actually happening, not the raw
-  // intent payload). Fall back to payload when no activity exists yet.
-  // Also store the full TaskNode for the hover-JSON tooltip.
+  // For each worker session (intent), derive the display title from the intent
+  // payload summary. Also store the full TaskNode for the hover-JSON tooltip.
   const sessionMeta = React.useMemo(() => {
     const map = new Map<string, { title: string; json: unknown }>();
-    for (const node of intents) {
+    for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
       if (node.payload) {
@@ -333,12 +611,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           title = node.payload.trim() || title;
         }
       }
-      // Hover JSON: full node with payload replaced by parsed object for readability
       const json = { ...node, payload: parsedPayload };
       map.set(node.id, { title, json });
     }
     return map;
-  }, [intents]);
+  }, [allIntents]);
 
   // Returns true if any pending intercept belongs to this session.
   // Worker agent_name format: "work#N · #intentID". Main/planner match by role key.
@@ -355,6 +632,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     },
     [pendingIntercepts],
   );
+
+  // Liveness from each session's last-seen activity time (kept fresh by the 1.5s tick).
+  const recentLive = React.useCallback(
+    (key: string) => {
+      const ts = store[key]?.lastTs;
+      if (!ts) return false;
+      const t = Date.parse(ts);
+      return t > 0 && Date.now() - t < STREAM_WINDOW_MS;
+    },
+    [store],
+  );
+  const mainLive = recentLive("main");
+  const plannerLive = recentLive("plan");
 
   const sessions = React.useMemo(
     () => [
@@ -374,47 +664,49 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
   const isMain = active.role === "mainagent";
   const isPlanner = active.role === "planner";
+  const activeKey = keyForSession(active);
+  const activeState = store[activeKey];
 
-  // Main agent is the human↔orchestrator CONSOLE: it shows only the conversation
-  // (the user's messages + the main agent's own replies/steps), used to steer the
-  // run — NOT the planner/worker activity firehose (those live in their own
-  // sessions). The planner session shows only planner steps; a worker session
-  // shows only the activity for its intent.
+  // Keep the SSE dispatcher's notion of the active session current, and lazily load
+  // + clear unread whenever the active session changes.
+  React.useEffect(() => {
+    activeKeyRef.current = activeKey;
+    const st = store[activeKey];
+    if (!st || (!st.loaded && !st.loading)) {
+      loadSession(activeKey);
+    } else if (st.unread) {
+      patchStore(activeKey, (s) => ({ ...s, unread: 0 }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey]);
+
+  // Main agent is the human↔orchestrator CONSOLE: only the conversation (user msgs +
+  // the main agent's own replies/steps). Planner session shows planner steps; a
+  // worker session shows only its intent's activity, led by the intent objective.
   const activity = React.useMemo(() => {
+    const items = activeState?.items ?? [];
     if (isMain) {
-      // The conversation is persisted server-side in the activity stream
-      // (worker="mainagent"), so it survives reloads. chatExtra is only an
-      // optimistic local echo — drop any entry the persisted (SSE) copy already
-      // covers, so messages don't show twice once the backend round-trips.
-      const mine = allActivity.filter((a) => a.worker === "mainagent");
-      const seen = new Set(mine.map((a) => `${a.kind} ${a.summary}`));
-      const pending = chatExtra.filter(
-        (a) => !seen.has(`${a.kind} ${a.summary}`),
-      );
-      return [...mine, ...pending].sort((a, b) => a.seq - b.seq);
+      // chatExtra is an optimistic local echo — drop any entry the persisted (SSE)
+      // copy already covers so messages don't show twice after the backend round-trips.
+      const seen = new Set(items.map((a) => `${a.kind} ${a.summary}`));
+      const pending = chatExtra.filter((a) => !seen.has(`${a.kind} ${a.summary}`));
+      return [...items, ...pending].sort((a, b) => a.seq - b.seq);
     }
-    if (isPlanner) {
-      return allActivity.filter((a) => a.worker === "planner");
-    }
-    // Worker session: the intent is NOT shown as the header title — instead it
-    // leads the transcript as a right-aligned "user"-style message (the task
-    // handed to this worker), followed by its execution steps.
-    const steps = allActivity.filter(
-      (a) => a.intent_id === active.intent_id || a.worker === active.id,
-    );
+    if (isPlanner) return items;
+    // Worker session: the intent leads the transcript as a right-aligned "user"-style
+    // message (the task handed to this worker), followed by its execution steps.
     const intentTitle = sessionMeta.get(active.id)?.title ?? active.title;
     const intentMsg: Activity = {
       seq: -1, // sorts/leads before any real step (real seq ≥ 0)
-      worker: steps[0]?.worker ?? active.id, // reuse the lane so no worker chips appear
+      worker: items[0]?.worker ?? active.id, // reuse the lane so no worker chips appear
       ts: active.last_activity || "",
       kind: "intent", // LLM-generated objective — rendered as a distinct (non-human) bubble
       summary: intentTitle,
     };
-    return [intentMsg, ...steps];
-  }, [isMain, isPlanner, allActivity, chatExtra, active.intent_id, active.id, active.title, active.last_activity, sessionMeta]);
+    return [intentMsg, ...items];
+  }, [isMain, isPlanner, activeState, chatExtra, active.id, active.title, active.last_activity, sessionMeta]);
 
-  // seq of this session's most-recent TodoWrite call — for the Todo popover shown in
-  // the worker/planner footer (in place of the old read-only replay notice).
+  // seq of this session's most-recent TodoWrite call — for the Todo popover.
   const latestTodoSeq = React.useMemo(() => {
     for (let i = activity.length - 1; i >= 0; i--) {
       const a = activity[i];
@@ -423,21 +715,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     return null;
   }, [activity]);
 
-  // Per-session token total, live. Each run (one captureRunSession) reports
-  // cumulative usage per model turn via kind='usage', then a final kind='result'.
-  // Total = sum of COMPLETED runs' results + the current in-progress run's latest
-  // usage. A 'result' adds to the sum and clears the live partial; a 'usage'
-  // overwrites the live partial. So a running work counts up live; a finished one
-  // shows its final result. (activity is seq-sorted.)
+  // Per-session token total, live. Sum COMPLETED runs' results + the current run's
+  // latest usage. Computed over the loaded pages (the running/just-finished run whose
+  // totals matter sits on the latest page). (activity is seq-sorted.)
   const tokenTotal = React.useMemo(() => {
-    let i = 0,
-      o = 0,
-      cr = 0,
-      cw = 0; // completed
-    let li = 0,
-      lo = 0,
-      lcr = 0,
-      lcw = 0; // live in-progress
+    let i = 0, o = 0, cr = 0, cw = 0; // completed
+    let li = 0, lo = 0, lcr = 0, lcw = 0; // live in-progress
     for (const a of activity) {
       if (a.kind === "result") {
         i += a.input_tokens ?? 0;
@@ -452,19 +735,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         lcw = a.cache_write_tokens ?? 0;
       }
     }
-    const I = i + li,
-      O = o + lo,
-      CR = cr + lcr,
-      CW = cw + lcw;
+    const I = i + li, O = o + lo, CR = cr + lcr, CW = cw + lcw;
     return { i: I, o: O, cr: CR, cw: CW, any: I + O + CR + CW > 0 };
   }, [activity]);
 
   // Run duration = span from this session's first step to its last (for a live
-  // session, "now" so it ticks up — the 1.5s setTick above re-renders it). Derived
-  // purely from activity timestamps (Activity.ts), the only per-step time we have.
+  // session, "now" so it ticks up — the 1.5s setTick above re-renders it).
   const runDuration = React.useMemo(() => {
-    let min = Infinity,
-      max = 0;
+    let min = Infinity, max = 0;
     for (const a of activity) {
       const t = Date.parse(a.ts);
       if (!Number.isFinite(t)) continue;
@@ -478,7 +756,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const atBottomRef = React.useRef(true);
   const viewport = React.useCallback(
     () =>
       (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ??
@@ -490,10 +767,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     if (!vp) return;
     const onScroll = () => {
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
+      if (vp.scrollTop <= 80) loadEarlier(activeKeyRef.current, viewport); // near top → older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, activeId]);
+  }, [viewport, activeId, loadEarlier]);
   // open/switch a session → jump to the latest (bottom)
   React.useLayoutEffect(() => {
     const vp = viewport();
@@ -518,7 +796,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   function send() {
     const text = input.trim();
     if (!text || sending) return;
-    const base = [...allActivity, ...chatExtra];
+    const base = [...(store.main?.items ?? []), ...chatExtra];
     const nextSeq = Math.max(0, ...base.map((a) => a.seq)) + 1;
     const userMsg: Activity = {
       seq: nextSeq,
@@ -549,13 +827,40 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       .finally(() => setSending(false));
   }
 
+  const mainLoaded = !!store.main?.loaded;
+  // What the transcript pane should show for the active session.
+  const showLoader = !activeState || (activeState.loading && !activeState.loaded);
+
   return (
     <TooltipProvider delayDuration={300}>
     <div className="grid h-[calc(100vh-13rem)] grid-cols-1 gap-4 lg:grid-cols-[18rem_1fr]">
       {/* Left: session list */}
       <div className="flex flex-col overflow-hidden rounded-lg border bg-card">
         <div className="border-b px-3 py-2">
-          <div className="text-xs font-medium text-muted-foreground">会话列表</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-medium text-muted-foreground">会话列表</div>
+            {!MOCK && (
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 text-[10px]",
+                  sseLive ? "text-emerald-500" : "text-amber-500",
+                )}
+                title={sseLive ? "实时连接正常" : "实时连接中断，正在自动重连（历史仍可见）"}
+              >
+                {sseLive ? (
+                  <>
+                    <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
+                    实时
+                  </>
+                ) : (
+                  <>
+                    <WifiOffIcon className="size-3" />
+                    重连中
+                  </>
+                )}
+              </span>
+            )}
+          </div>
           {taskTokens && (
             <div
               className="mt-1 text-[11px] tabular-nums text-muted-foreground"
@@ -587,14 +892,29 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         active={s.id === activeId}
                         displayTitle={meta?.title ?? s.title}
                         hasPending={hasPendingForSession(s)}
+                        unread={store[keyForSession(s)]?.unread}
                         onClick={() => setActiveId(s.id)}
                       />
                     );
                   })}
+                  {role === "worker" && intentsHasMore && (
+                    <button
+                      onClick={loadOlderIntents}
+                      disabled={loadingOlderIntents}
+                      className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+                    >
+                      {loadingOlderIntents ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <RotateCwIcon className="size-3.5" />
+                      )}
+                      加载更早的 Worker
+                    </button>
+                  )}
                 </div>
               );
             })}
-            {loaded && !workerSessions.length && (
+            {mainLoaded && !workerSessions.length && (
               <div className="px-2 py-1 text-xs text-muted-foreground">
                 暂无运行中的 Worker 会话。
               </div>
@@ -630,6 +950,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               实时
             </span>
           )}
+          {activeState?.hasMore && (
+            <span className="text-[10px] text-muted-foreground" title="向上滚动加载更早历史">
+              ↑ 更早历史
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
             {tokenTotal.any && (
               <span title="input / cache(read) / output tokens">
@@ -657,10 +982,24 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
         >
           <div className="min-w-0 max-w-full p-4" ref={contentRef}>
-            {!loaded ? (
+            {activeState?.loadingMore && (
+              <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                加载更早历史…
+              </div>
+            )}
+            {showLoader ? (
               <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
                 <Loader2Icon className="size-3.5 animate-spin" />
                 加载活动流…
+              </div>
+            ) : activeState?.error ? (
+              <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
+                <CircleXIcon className="size-3.5" />
+                加载失败：{activeState.error}
+                <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => loadSession(activeKey)}>
+                  重试
+                </Button>
               </div>
             ) : activity.length ? (
               <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
