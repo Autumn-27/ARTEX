@@ -102,7 +102,7 @@ func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, as *db
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
-	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{})
+	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{Now: nowStr()})
 	tools := []actool.CoreTool{submitTool}
 	// Wire add_task_scope only when we have a real asset store + task to write to.
 	// The scope-extraction tail is appended in lockstep so the prompt never asks for

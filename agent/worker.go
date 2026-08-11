@@ -184,7 +184,7 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
 func workerSystem(proxyAddr, runDir string) string {
-	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr})
+	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, Now: nowStr()})
 	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
 }
 

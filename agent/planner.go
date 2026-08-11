@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
@@ -160,7 +159,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 宁可不生成，也不要重复或硬凑。简洁、克制、高效。`
 
 func plannerSystem(goal, workDir string) string {
-	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, Now: time.Now().Format("2006-01-02 15:04:05 MST")})
+	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 

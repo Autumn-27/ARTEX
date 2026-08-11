@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"text/template"
+	"time"
 )
 
 // PromptOverride, if set, returns the stored system-prompt template for an agent
@@ -15,9 +16,15 @@ var PromptOverride func(agentKey string) (string, bool)
 // user template referencing a catalog variable renders; referencing anything else
 // fails template execution and falls back to the built-in default.
 type PlannerVars struct{ Goal, Scope, AssetSummary, Now string }
-type WorkerVars struct{ ProxyAddr, WorkerName string }
-type MainVars struct{ Goal, AssetSummary, FindingsSummary string }
+type WorkerVars struct{ ProxyAddr, WorkerName, Now string }
+type MainVars struct{ Goal, AssetSummary, FindingsSummary, Now string }
 type GoalsVars struct{ EngagementDescription, Now string }
+
+// nowStr is the server-local wall-clock string exposed as the universal {{.Now}}
+// prompt variable. renderSystem runs on every agent turn/round, so this is fresh
+// each run — a prompt can subtract it from a fixed start stamp to reason about
+// elapsed time (e.g. a timed benchmark's "last N hours" window).
+func nowStr() string { return time.Now().Format("2006-01-02 15:04:05 MST") }
 
 // renderSystem returns the rendered system-prompt BODY (段 [A]) for agentKey.
 // Precedence: the DB-stored template (if any) over the built-in default template

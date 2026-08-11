@@ -303,6 +303,7 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	cur, _ := pg.CurrentPrompt(a.ID)
 	vars, _ := pg.PromptVars(a.ID)
+	vars = withGlobalVars(vars)
 	vers, _ := pg.ListPromptVersions(a.ID)
 	if vers == nil {
 		vers = []db.PromptVersion{}
@@ -339,7 +340,7 @@ func (s *Server) pgSavePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vars, _ := pg.PromptVars(a.ID)
-	if bad := validateTemplate(body.Template, vars); bad != "" {
+	if bad := validateTemplate(body.Template, withGlobalVars(vars)); bad != "" {
 		writeErr(w, 400, bad)
 		return
 	}
@@ -495,7 +496,7 @@ func (s *Server) pgPromptVars(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"variables": vars})
+	writeJSON(w, 200, map[string]any{"variables": withGlobalVars(vars)})
 }
 
 func (s *Server) pgPreviewPrompt(w http.ResponseWriter, r *http.Request) {
@@ -512,7 +513,7 @@ func (s *Server) pgPreviewPrompt(w http.ResponseWriter, r *http.Request) {
 	if body.Template == "" {
 		body.Template, _ = pg.CurrentPrompt(a.ID)
 	}
-	rendered, err := renderPrompt(body.Template, vars, body.Sample)
+	rendered, err := renderPrompt(body.Template, withGlobalVars(vars), body.Sample)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"rendered": "", "error": err.Error()})
 		return
@@ -1705,6 +1706,20 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- prompt template helpers (Go text/template + catalog 白名单) ---
+
+// globalPromptVars are runtime variables available to EVERY agent (built-in and
+// custom) regardless of its per-agent catalog. Each agent's render path fills them
+// (see agent.nowStr, rendered fresh each turn), so a prompt may always reference
+// {{.Now}} — e.g. subtract it from a fixed start stamp to reason about elapsed time.
+var globalPromptVars = []db.PromptVar{
+	{Name: "Now", Description: "服务端当前时间（每次运行实时刷新；可与固定起始时间相减判断已用时长）", Example: "2026-08-11 14:30:00 CST", Source: "runtime"},
+}
+
+// withGlobalVars appends the universal runtime vars onto an agent's own catalog,
+// so validation / the UI variable list / preview all recognize {{.Now}} etc.
+func withGlobalVars(vars []db.PromptVar) []db.PromptVar {
+	return append(append([]db.PromptVar{}, vars...), globalPromptVars...)
+}
 
 // validateTemplate parses the template and rejects any {{.Var}} not in the catalog.
 // Returns "" if valid, otherwise an error message.

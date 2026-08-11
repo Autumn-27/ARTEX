@@ -55,7 +55,7 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 不要编造发现；只根据工具返回的真实数据回答。`
 
 func mainAgentSystem(goal, workDir string) string {
-	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal})
+	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
