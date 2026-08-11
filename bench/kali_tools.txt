@@ -1,0 +1,37 @@
+本机为 Kali 环境，以下工具已预装，可在 bash 中直接调用（无需安装）：
+
+[Web/渗透/recon]
+nmap masscan ffuf sqlmap nikto hydra john
+ncat socat nc(netcat)
+curl wget dig(dnsutils) dirb(小字典 /usr/share/dirb/wordlists) jq ripgrep(rg)
+nuclei(最新版；官方 POC 库已离线预置在 /opt/nuclei-templates)
+  离线用法（禁联网更新）：nuclei -duc -t /opt/nuclei-templates -u <目标URL>
+  指定模板/标签：nuclei -duc -t /opt/nuclei-templates -tags cve,sqli -u <目标>
+
+[离线漏洞知识库(参考资料，用 rg/grep/cat 查阅)]
+/opt/nuclei-templates  —— nuclei 官方模板(按 cve/技术/协议组织的 yaml)
+/opt/awesome-poc       —— Awesome-POC(Threekiii)漏洞利用 writeup 集(markdown，按产品/组件/漏洞组织)
+/opt/eee-poc           —— eeeeeeeeee-code/POC，大量 CVE/组件 POC 脚本(可直接参考/改用)
+  用法示例：rg -l "Shiro|fastjson|Struts2|CVE-2022" /opt/awesome-poc /opt/eee-poc
+  遇到已知组件/CVE 时，先在这三个库里查打法/现成 POC，再动手
+
+[逆向/pwn/二进制/内存]
+gdb(带 gef 增强) radare2(r2) objdump readelf nm strings file
+xxd hexdump binwalk ltrace strace patchelf upx checksec qemu-user-static
+python3 -c 'import pwn'（pwntools）  ROPgadget  ropper  one_gadget
+python3 -c 'import capstone, unicorn, keystone, z3'（反汇编/模拟/汇编/求解引擎）
+
+[内网/横向/隧道/AD]
+impacket（命令前缀 impacket-*：impacket-secretsdump / impacket-psexec /
+  impacket-wmiexec / impacket-smbclient / impacket-GetUserSPNs / impacket-ntlmrelayx 等）
+nxc / netexec（SMB/WinRM/LDAP/MSSQL 批量认证/枚举/喷洒，内网头号工具：nxc smb <网段> -u u -p p ...）
+evil-winrm（WinRM 交互 shell：evil-winrm -i <IP> -u <用户> -p <密码>）
+chisel（TCP/UDP over HTTP 隧道，内网转发/pivoting：服务端 chisel server -p PORT --reverse，
+  客户端 chisel client SERVER:PORT R:socks）
+proxychains4（把任意工具的流量走代理/socks：proxychains4 nmap ... ；配置 /etc/proxychains4.conf）
+
+[运行时]
+python3 + pip  node + npm
+
+说明：需要交互式调试用 gdb（gef 已启用）；写 exploit 用 pwntools；
+搜 ROP gadget 用 ROPgadget/ropper；跨架构运行用 qemu-*-static。

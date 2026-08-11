@@ -1,0 +1,29 @@
+# ARTEX 腾讯 TSec Benchmark 测评镜像 —— 本地一键 build + run。
+# 与生产用的 docker-compose.yml(多服务:artex+postgres)互不影响。
+# 用法：
+#   cp bench/.env.example bench/.env   # 填 LLM_API_KEY / BENCHMARK_TOKEN 等
+#   docker compose -f docker-compose.bench.yml up --build      # 构建并前台运行(看日志)
+#   docker compose -f docker-compose.bench.yml up --build -d   # 后台
+#   docker compose -f docker-compose.bench.yml logs -f
+#   docker compose -f docker-compose.bench.yml down            # 停止(加 -v 连数据卷一起删)
+# 浏览器：http://localhost:8787（用 ADMIN_PASSWORD 登录）
+
+services:
+  artex-bench:
+    build:
+      context: .
+      dockerfile: Dockerfile.bench
+    image: artex-bench:latest
+    container_name: artex-bench
+    env_file:
+      - bench/.env
+    # 与物理机共享网络：容器直接用宿主网络栈，可直连宿主/VPN 上的靶机网络。
+    # host 模式下不用 ports 映射，容器直接绑宿主端口：8787(UI/API)、8788(代理)、
+    # 以及内部 PostgreSQL 5432 —— 请确保宿主这三个端口空闲（本地测前先停掉占用它们的服务）。
+    network_mode: host
+    volumes:
+      - artex_bench_data:/app/data   # jwt.key 等持久化(一次性沙箱可不留)
+    restart: "no"
+
+volumes:
+  artex_bench_data:
