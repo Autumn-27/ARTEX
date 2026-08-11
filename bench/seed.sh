@@ -33,9 +33,12 @@ put_prompt planner "$PROMPTS/planner.md"
 put_prompt worker  "$PROMPTS/worker.md"
 put_prompt challenge_review "$PROMPTS/challenge_review.md"
 # tec_benchmark：把提示词占位符 {{BENCHMARK_TOKEN}} / {{BENCHMARK_BASE_URL}} 用运行时
-# env 的 BENCHMARK_TOKEN / BENCHMARK_BASE_URL(平台自动分发)替换
+# env 的 BENCHMARK_TOKEN / BENCHMARK_BASE_URL(平台自动分发)替换；再把 {{BENCHMARK_START_TIME}}
+# 替换为 seed 运行时刻(≈ 测评开始)，格式与 ARTEX 注入的 {{.Now}} 一致，便于 agent 相减算已用时长。
+# 注意：{{.Now}} 带点号，不会被这里的 sed 误替，留给 ARTEX 每轮实时渲染。
 TEC_TMP="$(mktemp)"
-sed "s|{{BENCHMARK_TOKEN}}|${BENCHMARK_TOKEN:-}|g; s|{{BENCHMARK_BASE_URL}}|${BENCHMARK_BASE_URL:-}|g" \
+BENCHMARK_START_TIME="${BENCHMARK_START_TIME:-$(date "+%Y-%m-%d %H:%M:%S %Z")}"
+sed "s|{{BENCHMARK_TOKEN}}|${BENCHMARK_TOKEN:-}|g; s|{{BENCHMARK_BASE_URL}}|${BENCHMARK_BASE_URL:-}|g; s|{{BENCHMARK_START_TIME}}|${BENCHMARK_START_TIME}|g" \
   "$PROMPTS/tec_benchmark.md" > "$TEC_TMP"
 put_prompt tec_benchmark "$TEC_TMP"; rm -f "$TEC_TMP"
 
