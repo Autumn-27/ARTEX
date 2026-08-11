@@ -80,7 +80,7 @@ func main() {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
-	srv := server.New(ctx, mgr, skillDir, *dataDir)
+	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

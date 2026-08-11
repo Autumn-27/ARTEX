@@ -22,7 +22,7 @@ func TestCoreTaskLifecyclePG(t *testing.T) {
 	}
 	defer m.Close()
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td)
+	s := New(context.Background(), m, td, td, td)
 	h := s.Handler()
 	tok, err := signJWT(s.jwtKey)
 	if err != nil {

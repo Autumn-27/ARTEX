@@ -39,5 +39,8 @@ Thumbs.db
 /server/webui/dist/
 /dist/
 
+# JWT 签名密钥（运行时生成，存项目根，绝不提交）
+/jwt.key
+
 # Docker 部署生成的本地环境（含密码/密钥，不提交）
 .env

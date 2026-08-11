@@ -22,10 +22,26 @@ const (
 	keyChars       = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
 
-// loadOrCreateJWTKey reads the 32-byte signing key from dataDir/jwt.key.
-// On first run it generates a cryptographically random key and persists it.
-func loadOrCreateJWTKey(dataDir string) ([]byte, error) {
-	path := filepath.Join(dataDir, jwtKeyFilename)
+// loadOrCreateJWTKey reads the 32-byte signing key from keyDir/jwt.key. keyDir is
+// the project base dir (next to the executable), NOT the browsable workspace root
+// (dataDir) — the signing key must never be listable/downloadable via the file
+// manager. Legacy installs kept it at dataDir/jwt.key; if present there and not yet
+// at the new location, it is migrated (key preserved, so sessions stay valid) and
+// the old file removed so it disappears from the workspace. On first run a random
+// key is generated and persisted.
+func loadOrCreateJWTKey(keyDir, dataDir string) ([]byte, error) {
+	path := filepath.Join(keyDir, jwtKeyFilename)
+	// one-time migration out of the old in-workspace location.
+	if legacy := filepath.Join(dataDir, jwtKeyFilename); legacy != path {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if data, rerr := os.ReadFile(legacy); rerr == nil {
+				if werr := os.WriteFile(path, data, 0o600); werr == nil {
+					_ = os.Remove(legacy)
+					log.Printf("[auth] JWT key 已从 %s 迁移到 %s（移出可浏览工作区）", legacy, path)
+				}
+			}
+		}
+	}
 	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) >= 32 {
 		return []byte(strings.TrimSpace(string(data))), nil
 	}
