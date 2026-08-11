@@ -110,6 +110,54 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ---
 
+## 更新升级
+
+> 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
+
+### 方式一：一键更新脚本（推荐）
+
+```bash
+cd ARTEX
+./update.sh
+```
+
+脚本先可选 `git pull` 拉取最新代码，再让你选 **① Docker 更新** 或 **② 本地编译更新**（与 `install.sh` 对应）：
+
+- **① Docker**：可指定目标镜像 tag（回车沿用 `.env` 的 `ARTEX_TAG`，缺省 `latest`）→ `docker compose pull` → `docker compose up -d`（换新镜像重启即自动迁移）。
+- **② 本地**：重建前端静态产物 → 重新编译 `./artex`（完成后重启进程生效）。
+
+### 方式二：Docker Compose（手动）
+
+```bash
+cd ARTEX
+git pull                       # 更新 compose / 脚本（可选）
+# 指定版本：在 .env 设 ARTEX_TAG=v0.2.0；不设则用 latest
+docker compose pull artex
+docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
+docker image prune -f          # 清理旧镜像（可选）
+```
+
+### 方式三：预编译二进制（Releases）
+
+到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
+
+```bash
+cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
+./artex
+```
+
+### 方式四：从源码编译
+
+```bash
+git pull
+cd web && npm ci && npm run build:static && cd ..
+cp -r web/out server/webui/dist
+CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
+# 重启 ./artex
+```
+
+---
+
 ## 配置
 
 **数据库**（`config.json`，或用环境变量 `ARTEX_PG_DSN` 覆盖）：
