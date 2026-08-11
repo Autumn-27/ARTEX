@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -14,7 +15,15 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// isFKViolation reports whether err is a Postgres foreign-key violation (SQLSTATE
+// 23503) — e.g. an activity insert whose exploration_id has no parent row.
+func isFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
 
 // model_error（provider/API 故障：LLM 层瞬时重试耗尽，或流已开始后中途断流）
 // 收场的 work 不是「试过没做完」也不是真失败，而是外部抖动。默认把它当永久
@@ -273,6 +282,19 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) {
 		// trace — a tool_use whose tool_result was lost shows as "执行中" forever.
 		log.Printf("[activity] task %s 重试后仍失败、丢弃该记录 (kind=%s tool=%s tuid=%s): %v",
 			t.ID, r.Kind, r.Tool, r.ToolUseID, err)
+		// On the FK-parent failure (23503) probe the live DB so the next occurrence
+		// records WHY the exploration is unreachable instead of just that it is.
+		if isFKViolation(err) {
+			storeID := t.Store.ID()
+			exists, refs, maxID, dErr := e.m.pg.ExplorationDiag(storeID)
+			if dErr != nil {
+				log.Printf("[activity] task %s FK 诊断查询失败 (store.expID=%d task.ExpID=%d): %v",
+					t.ID, storeID, t.ExpID, dErr)
+			} else {
+				log.Printf("[activity] task %s FK 诊断: store.expID=%d task.ExpID=%d exploration存在=%v 引用它的task数=%d 当前MAX(exploration.id)=%d",
+					t.ID, storeID, t.ExpID, exists, refs, maxID)
+			}
+		}
 		e.touch(t.ID)
 		return
 	}
@@ -300,8 +322,8 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 			}
 			return id, nil
 		}
-		log.Printf("[activity] task %s 写入失败 (第 %d/3 次, worker=%s kind=%s tool=%s): %v",
-			t.ID, attempt, r.Worker, r.Kind, r.Tool, err)
+		log.Printf("[activity] task %s 写入失败 (第 %d/3 次, worker=%s kind=%s tool=%s expID=%d): %v",
+			t.ID, attempt, r.Worker, r.Kind, r.Tool, t.Store.ID(), err)
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
 	return 0, err

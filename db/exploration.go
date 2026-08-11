@@ -398,6 +398,23 @@ RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Cl
 	return id, err
 }
 
+// ExplorationDiag probes, at the moment of an activity FK violation (23503), why the
+// parent row is unreachable. It reports whether the exploration row still exists, how
+// many task rows reference it (a live task should keep exactly 1 — and RESTRICT on
+// tasks.exploration_id means the exploration CANNOT be deleted while that row lives),
+// and the current MAX(explorations.id). Together these tell apart the failure modes:
+//   - expExists=false, taskRefs=0 → the whole row set is gone (DB reset / wrong DB).
+//   - expExists=false, taskRefs=1 → impossible under RESTRICT; would mean a broken FK.
+//   - expExists=true              → the write's expID is NOT this exploration (stale/
+//     wrong id in the in-memory store); compare against Store.ID().
+func (d *DB) ExplorationDiag(expID int64) (expExists bool, taskRefs int, maxExpID int64, err error) {
+	err = d.QueryRow(`SELECT
+		EXISTS(SELECT 1 FROM explorations WHERE id=$1),
+		(SELECT COUNT(*) FROM tasks WHERE exploration_id=$1),
+		COALESCE((SELECT MAX(id) FROM explorations),0)`, expID).Scan(&expExists, &taskRefs, &maxExpID)
+	return
+}
+
 // TokenTotal sums token usage across ALL workers for this exploration (whole-task
 // total). Same source as TokenStatsByWorker (kind='result' rows), just ungrouped.
 func (s *ExplorationStore) TokenTotal() (TokenUsage, error) {

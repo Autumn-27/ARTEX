@@ -31,7 +31,9 @@ const levelDot: Record<LogLine["level"], string> = {
 
 function fmtTime(ts: string) {
   const d = new Date(ts);
-  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString("zh-CN", { hour12: false });
+  if (isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export default function LogsPage() {
