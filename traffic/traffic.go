@@ -11,12 +11,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,7 +57,7 @@ type Traffic struct {
 	dir   string
 	addr  string
 	db    *sql.DB
-	wmu   sync.Mutex
+	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
 	seq   atomic.Int64
 	proxy *mproxy.Proxy
 	// pass is the set of hosts whose MITM interception failed for a proxy/protocol
@@ -186,6 +188,10 @@ func proxyCausedErr(err error) bool {
 }
 
 func (t *Traffic) record(f *mproxy.Flow) {
+	// The write lock covers blob + tree + index writes, so DeleteHost (and its
+	// blob GC) can run under the same lock without racing a concurrent record.
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
 	host := f.Request.URL.Hostname()
 	method := f.Request.Method
 	tmpl := db.TemplatePath(f.Request.URL.EscapedPath())
@@ -221,12 +227,10 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	_ = os.WriteFile(filepath.Join(exDir, "meta.json"), []byte(meta), 0o644)
 
 	rel, _ := filepath.Rel(t.dir, exDir)
-	t.wmu.Lock()
 	_, _ = t.db.Exec(`INSERT OR REPLACE INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		id, now.Unix(), host, method, tmpl, f.Request.URL.String(), f.Response.StatusCode, ct,
 		len(f.Request.Body), len(f.Response.Body), rel)
-	t.wmu.Unlock()
 }
 
 // bodyOrBlob returns the body inline if small, else stores it content-addressed
@@ -384,11 +388,155 @@ func (t *Traffic) Get(id string) (req, resp string, err error) {
 	return string(rb), string(pb), nil
 }
 
+// HostCount is one distinct recorded host plus its exchange count.
+type HostCount struct {
+	Host  string `json:"host"`
+	Count int    `json:"count"`
+}
+
+// Hosts returns distinct recorded hosts with exchange counts, most recent
+// activity first — powers the page's target picker.
+func (t *Traffic) Hosts() ([]HostCount, error) {
+	rows, err := t.db.Query(`SELECT host, COUNT(*) AS n, MAX(ts) AS last FROM exchanges GROUP BY host ORDER BY last DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HostCount
+	for rows.Next() {
+		var h HostCount
+		var last int64
+		if err := rows.Scan(&h.Host, &h.Count, &last); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // Count returns total recorded exchanges.
 func (t *Traffic) Count() (int, error) {
 	var n int
 	err := t.db.QueryRow(`SELECT COUNT(*) FROM exchanges`).Scan(&n)
 	return n, err
+}
+
+// DeleteHost removes every recorded exchange whose host contains the given
+// substring — mirroring the UI's host filter, so what you filtered is what gets
+// deleted: the index rows plus each matched host's file tree (<dir>/<host>/…).
+// Content-addressed blobs in _blobs are shared across hosts, so instead of
+// deleting by host they are garbage-collected afterwards: any blob no longer
+// referenced by a remaining exchange tree is removed (frees the data volume).
+// Returns rows deleted.
+func (t *Traffic) DeleteHost(host string) (int64, error) {
+	like := "%" + host + "%"
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	// Collect distinct matched hosts first (index is the source of truth for
+	// tree names) so the trees are removed even if the DELETE row count is 0.
+	rows, err := t.db.Query(`SELECT DISTINCT host FROM exchanges WHERE host LIKE ?`, like)
+	if err != nil {
+		return 0, err
+	}
+	var hosts []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		hosts = append(hosts, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	res, err := t.db.Exec(`DELETE FROM exchanges WHERE host LIKE ?`, like)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	for _, h := range hosts {
+		os.RemoveAll(filepath.Join(t.dir, sanitize(h)))
+	}
+	if n > 0 {
+		_ = t.gcBlobs()
+	}
+	return n, nil
+}
+
+// DeleteHostsExact removes recorded exchanges for a set of EXACT hosts (the
+// batch path for the page's multi-select delete): index rows + each host's file
+// tree, then one blob-GC pass. Exact match — unlike DeleteHost's substring —
+// so picking "api.example.com" never sweeps "api.example.com.cn". Returns rows
+// deleted. Duplicate hosts are harmless (idempotent deletes, single tree pass).
+func (t *Traffic) DeleteHostsExact(hosts []string) (int64, error) {
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	var deleted int64
+	removed := make(map[string]bool)
+	for _, h := range hosts {
+		res, err := t.db.Exec(`DELETE FROM exchanges WHERE host=?`, h)
+		if err != nil {
+			return deleted, err
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+		if !removed[h] {
+			os.RemoveAll(filepath.Join(t.dir, sanitize(h)))
+			removed[h] = true
+		}
+	}
+	if deleted > 0 {
+		_ = t.gcBlobs()
+	}
+	return deleted, nil
+}
+
+// gcBlobs removes content-addressed blobs in _blobs that no remaining exchange
+// tree references. References appear as "@blob sha256:<hex>" lines inside the
+// tree's request.http/response.http files (see bodyOrBlob). Best-effort: walk
+// errors only skip cleanup of the affected files. Callers must hold wmu so this
+// never races a concurrent record() writing a fresh blob + tree.
+func (t *Traffic) gcBlobs() error {
+	refs := make(map[string]struct{})
+	blobRe := regexp.MustCompile(`@blob sha256:([0-9a-f]{64})`)
+	err := filepath.WalkDir(t.dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			// _blobs/_index/_ca never contain references; skip their subtrees.
+			if p != t.dir && strings.HasPrefix(d.Name(), "_") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if n := d.Name(); n != "request.http" && n != "response.http" {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		for _, m := range blobRe.FindAllSubmatch(b, -1) {
+			refs[string(m[1])] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(filepath.Join(t.dir, "_blobs", "sha256"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		h := strings.TrimSuffix(d.Name(), ".bin")
+		if _, ok := refs[h]; !ok {
+			os.Remove(p)
+		}
+		return nil
+	})
 }
 
 // query returns one page of exchange metadata filtered by host and/or a url

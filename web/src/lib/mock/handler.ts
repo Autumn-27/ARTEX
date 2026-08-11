@@ -90,6 +90,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── traffic / audit / settings ──
   if (path === "/audit") return D.audit;
+  if (path === "/traffic" && m === "DELETE") return { deleted: 0 };
+  if (path === "/traffic/hosts" && m === "DELETE") return { deleted: (b.hosts as unknown[])?.length ?? 0 };
+  if (path === "/traffic/hosts") return { hosts: D.trafficHosts };
   if (path === "/traffic") return D.traffic;
   if (path === "/traffic/exchange") return D.trafficDetail;
   if (path === "/settings" && m === "GET") return D.settings;
@@ -104,6 +107,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── LLM ──
   if (path === "/llm/records" && m === "GET") return { records: D.llmRecords, total: D.llmRecords.length };
+  if (path === "/llm/records" && m === "DELETE") return { deleted: 0 };
+  if (path === "/llm/records/tasks") return { tasks: D.llmTasks };
   if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") return D.llmRecordDetail(Number(seg[2]));
   if (path === "/llm" && m === "GET") return D.llmConfig;
   if (path === "/llm" && m === "POST") return { ok: true };

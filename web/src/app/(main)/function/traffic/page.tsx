@@ -8,7 +8,20 @@ import {
   ChevronRightIcon,
   XIcon,
   Loader2Icon,
+  Trash2Icon,
+  ListChecksIcon,
 } from "lucide-react";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -29,9 +42,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
-import type { TrafficExchange, TrafficResp, TrafficDetail } from "@/lib/types";
+import type { TrafficExchange, TrafficResp, TrafficDetail, TrafficHost } from "@/lib/types";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -78,6 +97,14 @@ export default function TrafficPage() {
   const [detail, setDetail] = React.useState<TrafficDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
 
+  const [hosts, setHosts] = React.useState<TrafficHost[]>([]); // target picker
+  const [selectedHosts, setSelectedHosts] = React.useState<string[]>([]); // checked in picker
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+
+  const [deleteMode, setDeleteMode] = React.useState<"filter" | "selected" | null>(null); // null = dialog closed
+  const [deleting, setDeleting] = React.useState(false);
+  const [reloadTick, setReloadTick] = React.useState(0); // manual refetch trigger
+
   // Debounce both filters so we don't refetch on every keystroke.
   React.useEffect(() => {
     const t = setTimeout(() => setHostQ(host.trim()), 300);
@@ -97,20 +124,55 @@ export default function TrafficPage() {
   // through history isn't yanked out from under the user.
   React.useEffect(() => {
     let alive = true;
-    const load = () =>
+    const load = () => {
       api
         .traffic(page, size, hostQ, method, queryQ)
         .then((r) => {
           if (alive) setTraffic(r);
         })
         .catch(() => {});
+      api
+        .trafficHosts()
+        .then((r) => {
+          if (alive) setHosts(r.hosts ?? []);
+        })
+        .catch(() => {});
+    };
     load();
-    const t = page === 0 ? setInterval(load, 5000) : null;
+    const t = setInterval(() => {
+      if (page !== 0) return; // only auto-refresh the newest page
+      load();
+    }, 5000);
     return () => {
       alive = false;
-      if (t) clearInterval(t);
+      clearInterval(t);
     };
-  }, [page, size, hostQ, method, queryQ]);
+  }, [page, size, hostQ, method, queryQ, reloadTick]);
+
+  // Delete traffic for the current host filter (substring) or the checked
+  // hosts (exact batch), then refetch.
+  const allSelected = hosts.length > 0 && hosts.every((h) => selectedHosts.includes(h.host));
+
+  const confirmDelete = () => {
+    setDeleting(true);
+    const p =
+      deleteMode === "selected"
+        ? api.trafficDeleteHosts(selectedHosts)
+        : api.trafficDeleteHost(hostQ);
+    p.then(() => {
+        setDeleteMode(null);
+        setSelected(null);
+        setDetail(null);
+        if (deleteMode === "selected") {
+          setSelectedHosts([]);
+          setPickerOpen(false);
+        }
+        setPage(0);
+        setReloadTick((t) => t + 1);
+      })
+      .catch(() => {})
+      .finally(() => setDeleting(false));
+  };
 
   // Lazy-load the raw request/response for the selected exchange.
   React.useEffect(() => {
@@ -177,6 +239,76 @@ export default function TrafficPage() {
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
+        <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="h-8">
+              <ListChecksIcon className="size-3.5" />
+              {selectedHosts.length > 0 ? `选择目标（${selectedHosts.length}）` : "选择目标…"}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            className="w-80 p-0 data-open:animate-none data-closed:animate-none"
+            align="start"
+            collisionPadding={16}
+          >
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <span className="text-xs font-medium text-muted-foreground">按目标批量删除</span>
+              {hosts.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => setSelectedHosts(allSelected ? [] : hosts.map((h) => h.host))}
+                >
+                  {allSelected ? "取消全选" : "全选"}
+                </Button>
+              )}
+            </div>
+            <div className="max-h-64 overflow-y-auto">
+              {hosts.length === 0 ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  暂无流量记录
+                </div>
+              ) : (
+                hosts.map((h) => (
+                  <label
+                    key={h.host}
+                    className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent"
+                  >
+                    <Checkbox
+                      checked={selectedHosts.includes(h.host)}
+                      onCheckedChange={() =>
+                        setSelectedHosts((prev) =>
+                          prev.includes(h.host)
+                            ? prev.filter((x) => x !== h.host)
+                            : [...prev, h.host],
+                        )
+                      }
+                    />
+                    <span className="truncate font-mono">{h.host}</span>
+                    <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+                      {h.count}
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+            <div className="border-t p-2">
+              <Button
+                variant="destructive"
+                size="sm"
+                className="w-full"
+                disabled={selectedHosts.length === 0}
+                onClick={() => {
+                  setDeleteMode("selected");
+                  setPickerOpen(false);
+                }}
+              >
+                删除选中（{selectedHosts.length}）
+              </Button>
+            </div>
+          </PopoverContent>
+        </Popover>
         <div className="relative w-48">
           <Input
             placeholder="host…"
@@ -185,6 +317,17 @@ export default function TrafficPage() {
             className="h-8"
           />
         </div>
+        <Button
+          variant="destructive"
+          size="sm"
+          className="h-8"
+          disabled={!hostQ || deleting}
+          title={hostQ ? undefined : "先在左侧选择目标或输入 host"}
+          onClick={() => setDeleteMode("filter")}
+        >
+          <Trash2Icon className="size-3.5" />
+          删除该目标
+        </Button>
         <div className="relative max-w-sm flex-1">
           <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -378,6 +521,51 @@ export default function TrafficPage() {
           </Card>
         )}
       </div>
+
+      <AlertDialog open={deleteMode !== null} onOpenChange={(o) => { if (!o) setDeleteMode(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {deleteMode === "selected"
+                ? `删除选中的 ${selectedHosts.length} 个目标的全部流量？`
+                : "删除该目标的全部流量？"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteMode === "selected" ? (
+                <>
+                  将永久删除{" "}
+                  <span className="font-semibold tabular-nums">{selectedHosts.length}</span>{" "}
+                  个目标（
+                  <span className="font-mono">
+                    {selectedHosts.slice(0, 3).join("、")}
+                    {selectedHosts.length > 3 ? "…" : ""}
+                  </span>
+                  ）的所有流量记录（含请求/响应原文），此操作不可撤销。
+                </>
+              ) : (
+                <>
+                  将永久删除 host 包含{" "}
+                  <span className="font-mono font-semibold">{hostQ}</span>{" "}
+                  的所有流量记录（含请求/响应原文），此操作不可撤销。
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                confirmDelete();
+              }}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

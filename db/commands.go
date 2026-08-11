@@ -152,7 +152,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 }
 
 // ListLLMRecords returns paginated LLM records with optional filters.
-func (d *DB) ListLLMRecords(model, session string, page, size int) ([]LLMRecord, int, error) {
+func (d *DB) ListLLMRecords(model, session, task string, page, size int) ([]LLMRecord, int, error) {
 	if size <= 0 {
 		size = 50
 	}
@@ -172,6 +172,11 @@ func (d *DB) ListLLMRecords(model, session string, page, size int) ([]LLMRecord,
 	if session != "" {
 		where += fmt.Sprintf(` AND session_id ILIKE $%d`, argN)
 		args = append(args, "%"+session+"%")
+		argN++
+	}
+	if task != "" {
+		where += fmt.Sprintf(` AND COALESCE(task_id,'') = $%d`, argN)
+		args = append(args, task)
 		argN++
 	}
 
@@ -202,6 +207,42 @@ func (d *DB) ListLLMRecords(model, session string, page, size int) ([]LLMRecord,
 		out = append(out, r)
 	}
 	return out, total, rows.Err()
+}
+
+// LLMTask is one distinct task with its LLM-record count.
+type LLMTask struct {
+	TaskID string `json:"task_id"`
+	Count  int    `json:"count"`
+}
+
+// LLMTasks returns distinct non-empty task_ids with record counts, most recent
+// first — powers the LLM-records page's task picker.
+func (d *DB) LLMTasks() ([]LLMTask, error) {
+	rows, err := d.Query(`SELECT task_id, COUNT(*) AS n FROM llm_records
+WHERE COALESCE(task_id,'') <> '' GROUP BY task_id ORDER BY MAX(id) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LLMTask
+	for rows.Next() {
+		var t LLMTask
+		if err := rows.Scan(&t.TaskID, &t.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DeleteLLMRecords removes every LLM record for one exact task_id — the same
+// match the page's task picker/filter uses. Returns rows deleted.
+func (d *DB) DeleteLLMRecords(task string) (int64, error) {
+	res, err := d.Exec(`DELETE FROM llm_records WHERE COALESCE(task_id,'') = $1`, task)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // GetLLMRecord returns a single LLM record with full request/response bodies.

@@ -37,6 +37,7 @@ Thumbs.db
 # 内嵌前端的单二进制产物
 /artex
 /server/webui/dist/
+/dist/
 
 # Docker 部署生成的本地环境（含密码/密钥，不提交）
 .env

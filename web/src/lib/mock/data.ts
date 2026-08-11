@@ -8,7 +8,7 @@ import type {
   ConvTokenSummary, DailyTokenBucket, Edge, Finding, InterceptApprovalRow,
   InterceptPending, InterceptRule, LLMProfile, MCPServer, MCPTool, PromptVar,
   PromptVersion, Settings, SkillItem, Stats, TaskNode, Task, TokenTotal,
-  TokenUsage, Tool, TrafficResp, TrafficDetail,
+  TokenUsage, Tool, TrafficResp, TrafficDetail, TrafficHost, LLMTask,
 } from "@/lib/types";
 
 const T = (iso: string) => iso; // readability helper for timestamps
@@ -341,6 +341,11 @@ export const traffic: TrafficResp = {
   })),
 };
 
+// Distinct hosts with counts, derived from the exchanges above (target picker).
+const hostCounts: Record<string, number> = {};
+for (const [, host] of exchanges) hostCounts[host] = (hostCounts[host] ?? 0) + 1;
+export const trafficHosts: TrafficHost[] = Object.entries(hostCounts).map(([host, count]) => ({ host, count }));
+
 export const trafficDetail: TrafficDetail = {
   req: `GET /v1/orders?id=1002 HTTP/1.1
 Host: api.acme.com
@@ -640,6 +645,11 @@ export const llmRecords = [
   { id: 3, ts: T("2026-08-09T02:15:20Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-worker-i18", task_id: "t-001", worker: "worker-2", latency_ms: 2890, input_tokens: 7311, output_tokens: 421, cache_read: 5200, cache_write: 900, status: "ok" },
   { id: 4, ts: T("2026-08-09T02:16:05Z"), model: "claude-opus-4-8", profile_name: "默认", session_id: "exp1-worker-i18", task_id: "t-001", worker: "worker-2", latency_ms: 900, input_tokens: 7600, output_tokens: 0, cache_read: 5200, cache_write: 0, status: "error", error: "429 Too Many Requests（已退避重试）" },
 ];
+
+// Distinct tasks with counts, derived from llmRecords above (task picker).
+const llmTaskCounts: Record<string, number> = {};
+for (const r of llmRecords) if (r.task_id) llmTaskCounts[r.task_id] = (llmTaskCounts[r.task_id] ?? 0) + 1;
+export const llmTasks: LLMTask[] = Object.entries(llmTaskCounts).map(([task_id, count]) => ({ task_id, count }));
 
 export function llmRecordDetail(id: number) {
   const item = llmRecords.find((r) => r.id === id) ?? llmRecords[0];
