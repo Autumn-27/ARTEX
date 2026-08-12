@@ -99,18 +99,41 @@ echo '{"enabled":true,"on_task_timeout":true,"task_timeout_message":"有题目�
 echo '{"enabled":true,"on_task_create":true,"task_create_message":"有新题目任务被创建：检查历史是否做过同一 unique_code，若有则复用其事实/经验，通过 hint 注入本任务（忽略 base url 差异）。"}' \
   | post /api/agents/challenge_review/triggers "trigger challenge_review on_task_create"
 
-# ---------- 6) LLM：建 profile → 测连通 → 激活 ----------
+# ---------- 6) LLM：建两个 profile(plan 强模型 / work 弱模型) → 测连通 → 绑定 agent → 激活默认 ----------
+# 共用同一网关/密钥/格式，仅模型名不同：planner 走强模型(plan)、worker 走弱模型(work)。
+# 运行时模型解析优先级：Agent 绑定 > 任务/会话 pin > 全局激活。planner/worker 各自绑定后走
+# 各自 profile；未绑定的 agent(编排 tec_benchmark / challenge_review 等)走全局激活的默认(work)。
 log "配置 LLM ..."
-PID="$(jq -n --arg f "$LLM_FORMAT" --arg m "$LLM_MODEL" --arg u "${LLM_BASE_URL:-}" --arg k "${LLM_API_KEY:-}" \
-        '{name:"benchmark",format:$f,model:$m,base_url:$u,api_key:$k,reasoning_effort:""}' \
-       | curl -s -X POST "$API/api/llm/profiles" -H "$AUTH" -H "$CT" --data-binary @- | jq -r '.id // empty')"
-log "  profile id=$PID (thinking=默认/由模型决定)"
-TEST="$(jq -n --arg f "$LLM_FORMAT" --arg m "$LLM_MODEL" --arg u "${LLM_BASE_URL:-}" --arg k "${LLM_API_KEY:-}" \
-         '{provider:$f,model:$m,base_url:$u,api_key:$k,reasoning_effort:""}' \
-        | curl -s -X POST "$API/api/llm/test" -H "$AUTH" -H "$CT" --data-binary @-)"
-log "  测试连通: $TEST"
-if [ -n "$PID" ]; then
-  echo "{\"id\":$PID}" | post /api/llm/profiles/active "activate profile $PID"
+# 模型名：优先用专用变量；缺省回退旧的单一 LLM_MODEL；再回退字面默认。
+LLM_MODEL_PLAN="${LLM_MODEL_PLAN:-${LLM_MODEL:-deepseek-pro}}"
+LLM_MODEL_WORK="${LLM_MODEL_WORK:-${LLM_MODEL:-deepseek-flash}}"
+
+make_profile() { # $1=profile 名  $2=模型名  → stdout: 新建 profile 的 id
+  jq -n --arg n "$1" --arg f "$LLM_FORMAT" --arg m "$2" --arg u "${LLM_BASE_URL:-}" --arg k "${LLM_API_KEY:-}" \
+    '{name:$n,format:$f,model:$m,base_url:$u,api_key:$k,reasoning_effort:""}' \
+  | curl -s -X POST "$API/api/llm/profiles" -H "$AUTH" -H "$CT" --data-binary @- | jq -r '.id // empty'
+}
+test_llm() { # $1=模型名  → stdout: 连通测试结果
+  jq -n --arg f "$LLM_FORMAT" --arg m "$1" --arg u "${LLM_BASE_URL:-}" --arg k "${LLM_API_KEY:-}" \
+    '{provider:$f,model:$m,base_url:$u,api_key:$k,reasoning_effort:""}' \
+  | curl -s -X POST "$API/api/llm/test" -H "$AUTH" -H "$CT" --data-binary @-
+}
+
+PLAN_PID="$(make_profile plan "$LLM_MODEL_PLAN")"
+WORK_PID="$(make_profile work "$LLM_MODEL_WORK")"
+log "  plan profile id=$PLAN_PID model=$LLM_MODEL_PLAN"
+log "  work profile id=$WORK_PID model=$LLM_MODEL_WORK"
+log "  测试 plan 连通: $(test_llm "$LLM_MODEL_PLAN")"
+log "  测试 work 连通: $(test_llm "$LLM_MODEL_WORK")"
+
+# 绑定 agent 级默认模型：planner→plan、worker→work(llm_profile_id 三态，此处传数字=绑定)。
+[ -n "$PLAN_PID" ] && echo "{\"llm_profile_id\":$PLAN_PID}" | post /api/agents/planner/config "bind planner→plan#$PLAN_PID" PUT
+[ -n "$WORK_PID" ] && echo "{\"llm_profile_id\":$WORK_PID}" | post /api/agents/worker/config  "bind worker→work#$WORK_PID"  PUT
+
+# 全局激活默认 profile = work(弱模型)：未绑定的 agent(编排 tec_benchmark / challenge_review 等)都走它。
+# planner/worker 已各自绑定，不受此默认影响(Agent 绑定优先级更高)。
+if [ -n "$WORK_PID" ]; then
+  echo "{\"id\":$WORK_PID}" | post /api/llm/profiles/active "activate default profile work#$WORK_PID"
 fi
 
 log "seed 完成。"
