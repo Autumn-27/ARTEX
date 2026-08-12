@@ -189,7 +189,12 @@ class BenchClient:
         return st, ecode, (addrs if isinstance(addrs, list) else [])
 
     def close(self, code):
-        return _http("POST", f"{BENCH_BASE}/openapi/v1/challenges/close?unique_code={code}", self.h)
+        # 返回 (ok, ecode)：ok=True 表示平台确认已关闭
+        st, body = _http("POST", f"{BENCH_BASE}/openapi/v1/challenges/close?unique_code={code}", self.h)
+        ecode = (body or {}).get("code") if isinstance(body, dict) else None
+        # challenge_not_found 说明本就没这个活跃容器，视作已关闭（幂等）
+        ok = (st and 200 <= st < 300 and isinstance(body, dict) and body.get("closed")) or ecode == "challenge_not_found"
+        return bool(ok), ecode
 
     def hint(self, code):
         return _http("GET", f"{BENCH_BASE}/openapi/v1/challenges/hint?unique_code={code}", self.h)
@@ -213,22 +218,33 @@ class ArtexClient:
     def _auth(self):
         return {"Authorization": f"Bearer {self.token}"}
 
+    def _call(self, method, path, body=None):
+        """统一出口：401(token 过期) 时自动重登一次再重试，扛住 6h 长跑。"""
+        st, resp = _http(method, f"{ARTEX_API}{path}", self._auth(), body)
+        if st in (401, 403):
+            if self.login():
+                st, resp = _http(method, f"{ARTEX_API}{path}", self._auth(), body)
+        return st, resp
+
     def create_task(self, description, goal):
         payload = {"description": description, "goal": goal, "seed_first_intent": True}
         if PLAN_PROFILE_ID:
             payload["llm_profile_id"] = int(PLAN_PROFILE_ID)
-        st, body = _http("POST", f"{ARTEX_API}/api/tasks", self._auth(), payload)
-        return (body or {}).get("id") if isinstance(body, dict) else None
+        st, body = self._call("POST", "/api/tasks", payload)
+        # 只有 2xx + 拿到 id 才算成功；否则返回 None 让调用方回滚容器
+        if st and 200 <= st < 300 and isinstance(body, dict) and body.get("id"):
+            return body["id"]
+        return None
 
     def control(self, task_id, action):        # action = pause | resume
-        return _http("POST", f"{ARTEX_API}/api/tasks/{task_id}/control", self._auth(), {"action": action})
+        return self._call("POST", f"/api/tasks/{task_id}/control", {"action": action})
 
     def delete_task(self, task_id):
-        return _http("DELETE", f"{ARTEX_API}/api/tasks/{task_id}", self._auth())
+        return self._call("DELETE", f"/api/tasks/{task_id}")
 
     def last_activity(self):
         """返回 {task_id: last_activity_epoch}，用于进度看门狗。"""
-        st, body = _http("GET", f"{ARTEX_API}/api/tasks", self._auth())
+        st, body = self._call("GET", "/api/tasks")
         out = {}
         if isinstance(body, dict):
             for t in body.get("tasks", []):
@@ -237,7 +253,7 @@ class ArtexClient:
         return out
 
     def finding_count(self, task_id):
-        st, body = _http("GET", f"{ARTEX_API}/api/exploration/findings?task={task_id}", self._auth())
+        st, body = self._call("GET", f"/api/exploration/findings?task={task_id}")
         return len(body) if isinstance(body, list) else 0
 
 
@@ -303,6 +319,10 @@ class Scheduler:
         self.flag_total = {}       # code -> flag_count
         self.diff = {}             # code -> difficulty（easy/medium/hard，用于同族内排序）
         self._cmap = {}            # 本轮 challenges 快照
+        self.pending_close = {}    # code -> 已重试次数：close 失败/未确认停止的容器，逐轮重试回收
+        self.frozen = False        # VPN 断开冻结态
+        self.freeze_start = None
+        self._poll_seq = 0         # 轮次计数（用于 _activity 每轮缓存）
 
     # ---------- 预算记账 ----------
     def live_spent(self, now):
@@ -349,7 +369,14 @@ class Scheduler:
         self.log.emit("分类", info=f"易题 {len(self.easyQ)} 道 / 硬题 {len(HARD_ORDER)} 道")
 
         while self.clock.now() < DEADLINE_MIN:
+            self._poll_seq += 1
             now = self.clock.now()
+
+            # VPN 守卫：断开则冻结各槽预算 + 暂停任务，本轮不做解题处置
+            if self._vpn_guard(now):
+                self.clock.sleep(POLL_SEC)
+                continue
+
             try:
                 chs = self._challenges()
             except BenchEnded as e:
@@ -358,6 +385,7 @@ class Scheduler:
             cmap = {c["unique_code"]: c for c in chs}
             self._cmap = cmap                       # 供 _clean_restart 复用，避免 mid-slot 再请求
 
+            self._process_pending_close(cmap)       # 回收 close 失败/未确认的泄漏容器
             self._sync_solved(cmap)                 # 检测得分/通关
             for s in self.slots:                    # 逐槽处置
                 if s.busy:
@@ -479,6 +507,7 @@ class Scheduler:
                     return
                 self.log.emit("让位", s.code,
                               f"b族超floor仍停滞，保留{s.banked_flags}/{self.flag_total.get(s.code,'?')}flag释放槽")
+                self.given_up.add(s.code)      # 退役，不再重取；已 bank 的部分分保留
                 self._close_slot(s, now, reason="b_stall_release")
                 return
             if not s.restarted and self.wall_cap(s, now) >= W_MIN:
@@ -502,6 +531,7 @@ class Scheduler:
                 self.log.emit("延窗", s.code, f"b族续窗至 {s.window:.0f}min 保深链")
                 return
             self.log.emit("放弃", s.code, "b族达封顶，护带内收尾")
+            self.given_up.add(s.code)          # 退役，避免 _all_done 永假 / 被重取
             self._close_slot(s, now, reason="b_cap")
             return
         # 赌注题：near-miss 且可行 → 干净重启一次；否则放弃归池
@@ -579,7 +609,13 @@ class Scheduler:
         else:
             desc, goal = self._task_text(c, addrs)
             task_id = self.a.create_task(desc, goal)
-        # 落座
+        # 建任务失败 → 回滚：容器已起但没任务解它，立刻关容器 + 退回队列，绝不落座僵尸槽
+        if not task_id:
+            self.log.emit("建任务失败", code, "回滚：关容器、退回队列，不占槽")
+            self._close_container(code)
+            self._requeue(code)
+            return
+        # 落座（到此才算真正占用，hard_started 也在此登记）
         s.reset()
         s.code, s.task_id, s.addr = code, task_id, addrs
         s.started = now
@@ -590,7 +626,6 @@ class Scheduler:
             s.window = B_FLOOR[code]
         elif code in GAMBLES:
             s.kind = "gamble"
-            self.hard_started.add(code)
             s.window = max(W_MIN, min(self.gamble_target(now), self.wall_cap(s, now)))
         else:
             s.kind = "easy"
@@ -629,29 +664,94 @@ class Scheduler:
         self.spent_closed += s.elapsed(now)
         if s.kind == "easy" or s.code not in HARD_SET:
             self.easy_spent += s.elapsed(now)
-        if not self.simulate:
+        code = s.code
+        if not self.simulate and s.task_id:
             self.a.control(s.task_id, "pause")
-            self.b.close(s.code)
+        self.log.emit("关闭靶场", code, f"reason={reason} 用时{s.elapsed(now):.0f}min")
+        s.reset()                          # 先释放本地槽
+        self._close_container(code)        # 再关容器（失败进 pending_close 逐轮重试回收）
+
+    def _close_container(self, code):
+        """关平台容器并确认；失败则挂进 pending_close，主循环逐轮重试，防泄漏名额。"""
+        ok = self.sim.close(code) if self.simulate else self.b.close(code)[0]
+        if ok:
+            if code in self.pending_close:
+                self.pending_close.pop(code, None)
+                self.log.emit("回收容器", code, "泄漏容器已确认关闭")
         else:
-            self.sim.close(s.code)
-        self.log.emit("关闭靶场", s.code, f"reason={reason} 用时{s.elapsed(now):.0f}min")
-        s.reset()
+            self.pending_close[code] = self.pending_close.get(code, 0) + 1
+            self.log.emit("关容器失败", code, f"第{self.pending_close[code]}次，挂起重试防泄漏名额")
+
+    def _process_pending_close(self, cmap):
+        """逐轮回收泄漏容器：已 stopped 的清除，仍活跃的重试 close。"""
+        for code in list(self.pending_close):
+            status = (cmap.get(code) or {}).get("container_status", "stopped")
+            if status in ("stopped", "stop_pending"):
+                self.pending_close.pop(code, None)
+            else:
+                self._close_container(code)
+
+    def _requeue(self, code):
+        """建任务失败/需重排时把题退回合适队列（硬题不标 hard_started，可被重取）。"""
+        if code in HARD_SET:
+            self.hard_started.discard(code)        # 允许 _pick_next 再取
+        elif code not in self.easyQ and code not in self.deferQ:
+            self.easyQ.insert(0, code)
+
+    def _vpn_guard(self, now):
+        """VPN 断开检测。返回 True=当前冻结、本轮跳过解题。恢复时把停摆时长从各槽预算补偿掉。"""
+        ok = self.sim.vpn_ok() if self.simulate else self.b.vpn_ok()
+        if ok:
+            if self.frozen:
+                outage = now - self.freeze_start
+                for s in self.slots:
+                    if s.busy:
+                        if s.started is not None:
+                            s.started += outage           # 停摆不计入该题已跑时长
+                        if s.last_progress is not None:
+                            s.last_progress += outage     # 也不让停摆触发停滞看门狗
+                        if not self.simulate and s.task_id:
+                            self.a.control(s.task_id, "resume")
+                self.log.emit("VPN恢复", info=f"停摆 {outage:.0f}min：各槽预算已补偿、任务恢复（墙钟仍走）")
+                self.frozen = False
+            return False
+        # VPN 断
+        if not self.frozen:
+            self.frozen = True
+            self.freeze_start = now
+            for s in self.slots:
+                if s.busy and not self.simulate and s.task_id:
+                    self.a.control(s.task_id, "pause")
+            self.log.emit("VPN断开", info="冻结各槽预算 + 暂停任务，等待恢复")
+        return True
 
     def _clean_restart(self, s, now):
-        """清空上下文换思路：pause 旧任务 + 重建，靶场不动（保连接）。"""
+        """清空上下文换思路：pause+删旧任务 + 重建，靶场不动（保连接）。"""
         s.restarted = True
         if not self.simulate:
-            self.a.control(s.task_id, "pause")
-            self.a.delete_task(s.task_id)                 # 清掉旧任务上下文，彻底换思路
+            old = s.task_id
+            if old:
+                self.a.control(old, "pause")
+                self.a.delete_task(old)                   # 清掉旧任务上下文，彻底换思路
             # 用本轮已拉到的 challenge 文本重建（不再额外请求，避免 mid-slot 抛 BenchEnded）
             c = self._cmap.get(s.code, {"unique_code": s.code})
             desc, goal = self._task_text(c, s.addr)
-            if desc:
-                s.task_id = self.a.create_task(desc, goal)
+            new_id = self.a.create_task(desc, goal)
+            if new_id:
+                s.task_id = new_id
+            else:
+                # 重建失败：别留着已删的死 task_id 空跑，直接放弃该题让位
+                self.log.emit("放弃", s.code, "干净重启重建任务失败，让位")
+                self.given_up.add(s.code)
+                self._close_slot(s, now, reason="restart_failed")
+                return
         else:
             s.task_id = self.sim.spawn(s.code)
             self.sim.on_restart(s.code, now)
+        # 重置进度追踪：新任务 finding/活动从零起，别让旧计数误触发停滞看门狗
         s.last_progress = now
+        s.last_finding = 0
+        s.last_activity = 0.0
 
     def _all_done(self):
         if self.easyQ or self.deferQ:
@@ -672,14 +772,14 @@ class Scheduler:
                                      f"{','.join(solved_hard)}"))
         self.log.close()
 
-    # 真实模式每轮刷新一次 last_activity 映射
+    # 真实模式每轮（按轮次计数缓存）只拉一次 last_activity 映射
     @property
     def _activity(self):
         if self.simulate:
             return {}
-        if not hasattr(self, "_act_cache") or self._act_cache_at != self.clock.now():
+        if getattr(self, "_act_seq", -1) != self._poll_seq:
             self._act_cache = self.a.last_activity()
-            self._act_cache_at = self.clock.now()
+            self._act_seq = self._poll_seq
         return self._act_cache
 
 
@@ -687,12 +787,33 @@ class Scheduler:
 class Simulator:
     """用历史耗时脚本化题目解出时刻，让调度逻辑在本地端到端跑通。"""
     # (code, flag_count, 解出所需连续窗口min | None=永不解出)
-    def __init__(self, scenario="lucky", clock=None):
+    def __init__(self, scenario="lucky", clock=None, faults=False):
         self.state = {}       # code -> dict(status, addr, cf, opened_at, need, run_started, restarts)
         self.scenario = scenario
         self.clock = clock    # 共享调度器时钟，challenges() 每次读实时虚拟分钟
+        self.faults = faults  # 故障注入：建任务失败/关容器失败/VPN 断
         self._task_seq = 1000
+        self._spawn_fail_used = set()   # 每题只失败一次，验证回滚后能重来
+        self._close_fail_used = set()
         self._build()
+
+    # —— 故障注入（仅 --faults）——
+    def vpn_ok(self):
+        if self.faults and 100 <= self.clock.now() < 118:   # 模拟第 100~118min VPN 中断
+            return False
+        return True
+
+    def _inject_spawn_fail(self, code):
+        if self.faults and code in ("d-01", "a-18") and code not in self._spawn_fail_used:
+            self._spawn_fail_used.add(code)
+            return True
+        return False
+
+    def _inject_close_fail(self, code):
+        if self.faults and code in ("c-03", "f2-05") and code not in self._close_fail_used:
+            self._close_fail_used.add(code)
+            return True
+        return False
 
     def _build(self):
         # 54 易题：多数 <3min，几道慢题
@@ -758,6 +879,8 @@ class Simulator:
         return [s["addr"]]        # 与真实平台一致：container_addr 是数组
 
     def spawn(self, code):
+        if self._inject_spawn_fail(code):     # 建任务失败注入 → 验证 _launch 回滚
+            return None
         self._task_seq += 1
         return str(self._task_seq)
 
@@ -770,8 +893,11 @@ class Simulator:
             s["need"] = max(30, s["need"] - 20)
 
     def close(self, code):
+        if self._inject_close_fail(code):     # 关容器失败注入 → 验证 pending_close 重试回收
+            return False                       # 容器仍活跃（status 不变），下一轮重试才真关
         s = self.state[code]
         s["status"] = "stopped"; s["addr"] = None; s["run_started"] = None
+        return True
 
     def progressing(self, code, now):
         s = self.state[code]
@@ -788,11 +914,13 @@ def main():
     ap.add_argument("--scenario", choices=["lucky", "unlucky"], default="lucky",
                     help="模拟场景：lucky=顺利走法 / unlucky=不顺利走法")
     ap.add_argument("--poll-min", type=float, default=1.0, help="模拟虚拟步进(分钟)")
+    ap.add_argument("--faults", action="store_true",
+                    help="模拟故障注入：建任务失败/关容器失败/VPN 中断，验证容错路径")
     args = ap.parse_args()
 
     if args.simulate:
         clock = VirtualClock(step_min=args.poll_min)
-        sim = Simulator(scenario=args.scenario, clock=clock)
+        sim = Simulator(scenario=args.scenario, clock=clock, faults=args.faults)
         sched = Scheduler(bench=None, artex=None, clock=clock, simulate=True, sim=sim)
         sched.run()
         return
