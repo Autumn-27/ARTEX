@@ -381,6 +381,18 @@ ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
 	return scanNodes(rows)
 }
 
+// HasActiveIntent reports whether this exploration has any intent still in play
+// (state open OR running). Used to decide whether to kick the FIRST planner round:
+// a seeded task's intent may already have been claimed (open→running) by a worker
+// before the check, so counting only 'open' (Frontier) races with worker claim and
+// wrongly kicks a redundant first round. Counting open+running is race-proof.
+func (s *ExplorationStore) HasActiveIntent() (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, s.expID).Scan(&exists)
+	return exists, err
+}
+
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1

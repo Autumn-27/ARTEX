@@ -433,10 +433,12 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		go e.workerLoop(ctx, t, fmt.Sprintf("work#%d", i+1))
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
-	// 仅在 frontier 为空时才 kick 首轮规划:普通任务(空 frontier)照常触发;带种子意图的
-	// 任务 frontier 已非空 → 跳过首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone
-	// 唤醒 planner。重启自动恢复时 frontier 通常也非空 → 顺带避免白烧一轮。
-	if fr, _ := t.Store.Frontier(1); len(fr) == 0 {
+	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
+	// 是 open,或已被上面刚起的 worker 抢先 claim 成 running——两种都算「有活干」,一律跳过
+	// 首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone/心跳唤醒 planner。
+	// ⚠️ 不能用 Frontier(只数 open):worker 领取(open→running)与本检查存在竞态,会误 kick。
+	// 重启自动恢复时也可能只剩 running 意图,同样应跳过。
+	if has, _ := t.Store.HasActiveIntent(); !has {
 		t.Notify() // kick the first planning round (acted on once LLM is ready)
 	}
 }
