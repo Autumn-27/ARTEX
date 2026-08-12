@@ -201,12 +201,17 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	start := time.Now()
+	// MaxTokens 要给足：推理模型(如 deepseek-v4-pro)在给出答案前会先产出一大段
+	// 思考(实测对一句 "ping" 也能烧 ~2900 token)。若只给 32,模型会一直卡在"思考阶段"
+	// 就撞到输出上限(finish=length)、被截断,连接测试虽仍算通(err=nil)但显示成
+	// "已中断/length/resume" 一团糟。给足预算让它把 OK 干净吐完(finish=stop)。
+	// EscalateMaxTokens 保持 false:不因截断而抬额重试,避免 resume 循环空烧。
 	_, err = agentcore.Run(ctx, agentcore.Options{
 		Provider:       prov,
-		SystemPrompt:   []string{"你是连接测试。只回复 OK，不要别的。"},
+		SystemPrompt:   []string{"你是连接测试。直接输出两个字符 OK 即可，不要思考、不要解释、不要别的。"},
 		PermissionMode: acperm.ModeBypass,
 		MaxTurns:       1,
-		MaxTokens:      32,
+		MaxTokens:      8192,
 	}, "ping")
 	return time.Since(start), err
 }
