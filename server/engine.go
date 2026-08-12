@@ -511,12 +511,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// UI can separate rounds in the transcript (kind='round').
 		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 			Summary: fmt.Sprintf("第 %d 轮规划", e.nextPlannerRound(t.ID))})
-		// which intents' completion triggered this round (may be several — debounce
-		// coalesces a burst; empty for non-completion wakes like a new hint / heartbeat).
-		doneIntents := t.drainDone()
+		// what fired this round (worker done / finding; may be several — debounce
+		// coalesces a burst; empty for time/heartbeat wakes).
+		triggers := t.drainTriggers()
 		e.incInflight(t.ID)
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, doneIntents, emit)
+		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.decInflight(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:
@@ -611,7 +611,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 		wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.incInflight(t.ID) // 计入在跑,供收尾时序 drain 等待
-		reason, wrote, err := worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.Notify)
+		reason, wrote, err := worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 		// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 		// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
@@ -623,7 +623,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			if sleepCtx(workCtx, modelErrorRetryBackoff) {
 				break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 			}
-			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.Notify)
+			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
 		e.decInflight(t.ID)
 		// CAPTURE kill state BEFORE unregisterWork cancels workCtx. kill = this work's

@@ -73,11 +73,18 @@ type ToolSet struct {
 	// re-planned promptly (currently: a new hint). nil = no wake (the hint is still
 	// stored and read on the next round triggered by other events). debounced.
 	notify func()
+	// notifyFinding, if set, wakes the task's planner when this run reports a finding,
+	// carrying (intentID, summary) so the round can spell out which intent found what.
+	// Wired for workers; nil elsewhere → falls back to notify (bare wake).
+	notifyFinding func(intentID int64, summary string)
 }
 
 // SetNotify wires the planner-wake callback (see ToolSet.notify). Set by callers
 // that hold the task handle (main-agent chat, cross-task orchestration).
 func (t *ToolSet) SetNotify(fn func()) { t.notify = fn }
+
+// SetNotifyFinding wires the finding-wake callback (see ToolSet.notifyFinding).
+func (t *ToolSet) SetNotifyFinding(fn func(int64, string)) { t.notifyFinding = fn }
 
 // EnrichTrigger is the enrichment engine seen from the tool layer (see package
 // enrich). Kept as an interface here to avoid coupling agent → enrich.
@@ -647,8 +654,16 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 					_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> finding
 				}
 				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
-				if t.notify != nil {
-					t.notify() // 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）
+				// 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）。
+				// 优先带上下文(哪个意图+finding摘要);intent 用工具参数,缺省回退到 owner 意图。
+				if t.notifyFinding != nil {
+					iid := pid(a.IntentID)
+					if iid <= 0 {
+						iid = t.ownerNode
+					}
+					t.notifyFinding(iid, a.Summary)
+				} else if t.notify != nil {
+					t.notify()
 				}
 			} else {
 				// conversation context: no exploration store available, cannot record finding

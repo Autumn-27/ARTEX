@@ -91,18 +91,88 @@ func renderPlannerTodos(items []actool.Todo) string {
 	return b.String()
 }
 
-// renderDoneIntents surfaces the intent(s) whose completion triggered this round
-// so the planner looks first at their fresh yields (in the态势 below) before
-// deciding whether a new direction opened up. Empty for non-completion wakes.
-func renderDoneIntents(ids []int64) string {
-	if len(ids) == 0 {
+// TriggerEvent describes what concretely caused this planning round to fire, so
+// the planner looks first at the actual change instead of re-scanning the whole
+// overview. Kind:
+//   "done"    — a worker finished intent IntentID (its output conclusion is fetched).
+//   "finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
+type TriggerEvent struct {
+	Kind     string
+	IntentID int64
+	Detail   string
+}
+
+// renderTriggers spells out the change(s) that fired this round: for a finished
+// worker — which intent + its output conclusion; for a finding — which intent +
+// what was found. Empty for time/heartbeat wakes. Reads the store (best-effort;
+// a blank field never blocks the round).
+func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
+	if len(evs) == 0 || ts == nil {
 		return ""
 	}
-	parts := make([]string, len(ids))
-	for i, id := range ids {
-		parts[i] = fmt.Sprintf("#%d", id)
+	var b strings.Builder
+	b.WriteString("\n\n【本次触发本轮的实际变动（先看这里，再决定是否补方向）】：")
+	for _, ev := range evs {
+		sum := intentSummary(ts, ev.IntentID)
+		switch ev.Kind {
+		case "finding":
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, sum, ev.Detail))
+		default: // "done"
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, sum, workerOutput(ts, ev.IntentID)))
+		}
 	}
-	return "\n\n【本次触发本轮的、刚完成的意图】：" + strings.Join(parts, "、")
+	b.WriteString("\n（完整细节可 node_detail / get_worker_output / list_findings 再查。）")
+	return b.String()
+}
+
+// intentSummary reads an intent node's one-line summary (best-effort, "?" on miss).
+func intentSummary(ts *db.ExplorationStore, id int64) string {
+	n, err := ts.GetNode(id)
+	if err != nil || n == nil {
+		return "?"
+	}
+	var p map[string]any
+	if json.Unmarshal(n.Payload, &p) == nil {
+		if s, ok := p["summary"].(string); ok && s != "" {
+			return s
+		}
+	}
+	return "?"
+}
+
+// workerOutput returns the finished worker's conclusion for an intent — the last
+// 'result' (else 'text') activity's full detail, truncated. Same source get_worker_output uses.
+func workerOutput(ts *db.ExplorationStore, id int64) string {
+	acts, _, err := ts.ActivityList(&id, 0, 1000)
+	if err != nil {
+		return "(取输出失败)"
+	}
+	var pick *db.Activity
+	for i := range acts {
+		if acts[i].Kind == "result" {
+			pick = &acts[i]
+		} else if acts[i].Kind == "text" && pick == nil {
+			pick = &acts[i]
+		}
+	}
+	if pick == nil {
+		return "(该 work 尚无输出记录)"
+	}
+	out, _ := ts.ActivityDetail(pick.ID)
+	if out == "" {
+		out = pick.Summary
+	}
+	return truncOutput(out, 800)
+}
+
+// truncOutput caps a worker-output blob so the trigger context doesn't bloat the
+// system prompt every round; full text is one get_worker_output call away.
+func truncOutput(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + " …（已截断，完整见 get_worker_output）"
 }
 
 // renderGraphOverview folds the pre-computed graph_overview snapshot into the
@@ -167,11 +237,11 @@ func plannerSystem(goal, workDir string) string {
 // steps (so users can see how it reads the situation and judges goals — the
 // planner is the intent generator and was previously a black box). Returns whether
 // the planner judged the goal met.
-// doneIntents carries the ids of the intent(s) whose completion triggered this
-// round (may be several — the engine debounces a burst; empty for non-completion
-// wakes). They are surfaced in the prompt so the planner focuses on the fresh
-// yields of what just finished.
-func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, doneIntents []int64, emit func(db.Activity)) (met bool, reason string, err error) {
+// triggers carries the concrete change(s) that fired this round — worker(s) done
+// and/or finding(s) reported (may be several — the engine debounces a burst; empty
+// for time/heartbeat wakes). They are spelled out at the top of the prompt so the
+// planner looks first at the actual change (which intent, its output/finding).
+func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
 	tsx := NewToolSet(ts, "planner")
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -189,7 +259,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 关键态势（刚完成的意图 + 预取的完整图）放进 system prompt，而不是 user 输入：
 	// system 段永不被 compaction 压缩，长回合里也保证这份态势始终在场；轮内固定，还能吃到
 	// system 缓存。它落在指令之后、deferred 工具块之前（deferredSystem 保证块在最后）。
-	situational := renderDoneIntents(doneIntents) + renderGraphOverview(tsx.graphOverviewData())
+	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】直接注入 system,让它只做最后目标判定、不产新意图。
 	tc := taskClockFrom(ctx)
@@ -243,7 +313,13 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 态势（刚完成的意图 + 完整图）已在上面拼进 system prompt（抗压缩、轮内常驻）。这里
 	// 的 user 输入只留指令 + 跨唤醒待办（todo 是模型自己的规划便签，可再生，放 user 即可）。
-	input := "图发生了变化，请规划下一步：读取上方 system 里的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。绝不要为了“结束本轮”去调 goal_met——goal_met 会【立即结束整个任务】，只在你确认目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时才调；未达成就用 prove_goal 逐个标记、或什么都不调直接结束。**" +
+	// 开场白按「本轮有无具体变动」分两种：有变动 → 指向上方【实际变动】块；无变动
+	// (心跳定时巡检 / hint / 恢复等) → 别谎称"图发生了变化",转而提示顺带复查在跑意图。
+	lead := "刚有具体变动（见上方 system 的【本次触发本轮的实际变动】），据此规划下一步："
+	if len(triggers) == 0 {
+		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
+	}
+	input := lead + "读取上方 system 里的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。绝不要为了“结束本轮”去调 goal_met——goal_met 会【立即结束整个任务】，只在你确认目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时才调；未达成就用 prove_goal 逐个标记、或什么都不调直接结束。**" +
 		renderPlannerTodos(opts.Todos.List())
 	// 有 deadline 夹逼时加硬 ctx 兜底(软预算 + grace),防单轮卡死绕过轮边界软超时。
 	runCtx := ctx
