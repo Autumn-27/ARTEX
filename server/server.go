@@ -1016,7 +1016,8 @@ type createTaskReq struct {
 	Description     string `json:"description"`
 	Goal            string `json:"goal"`
 	LLMProfileID    *int64 `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	TimeoutSeconds  int    `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	TimeoutSeconds  int    `json:"timeout_seconds"`               // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int `json:"plan_heartbeat_seconds"`     // planner 心跳触发间隔(秒);0/省略=默认300(5min);下限=默认=300,低于自动抬到300
 	SeedFirstIntent *bool  `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认开启。CTF 常一 work 解决,省掉开跑前的 planner 轮。
 }
 
@@ -1040,7 +1041,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if req.TimeoutSeconds < 0 {
 		req.TimeoutSeconds = 0
 	}
-	t, err := s.m.CreateTask(req.Description, req.Goal, req.LLMProfileID, req.TimeoutSeconds)
+	t, err := s.m.CreateTask(req.Description, req.Goal, req.LLMProfileID, req.TimeoutSeconds, req.PlanHeartbeatSeconds)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

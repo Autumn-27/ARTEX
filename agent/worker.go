@@ -234,11 +234,13 @@ func renderWorkerGraphOverview(data map[string]any) string {
 
 // Execute runs one intent. hooks (the per-task Guard) gates every tool call; may
 // be nil. emit, if non-nil, receives one ActivityRecord per execution step.
+// notify, if non-nil, is called when this worker writes a finding (report_finding)
+// so the task's planner wakes mid-flight instead of waiting for the worker to finish.
 // Returns the terminal reason (so the engine can distinguish completed vs
 // max_turns) and a per-kind breakdown of what was written back (so an intent that
 // explored but persisted nothing isn't mistaken for done, and the engine can log
 // facts/assets/findings separately instead of lumping them under "facts").
-func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger) (harness.TerminalReason, WriteCounts, error) {
+func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notify func()) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetTaskID(taskID)
 	if as != nil {
@@ -246,6 +248,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	tsx.SetOwnerNode(intent.ID) // assets this worker discovers anchor to its intent → visible to the task
 	tsx.SetEnrich(enr)          // async DNS/HTTP auto-completion for assets this worker writes
+	tsx.SetNotify(notify)       // finding 写回时当场唤醒本任务 planner（report_finding 触发）
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).

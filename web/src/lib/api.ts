@@ -109,13 +109,14 @@ export const api = {
 
   // ---- tasks ----
   tasks: () => get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
-  createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number, seedFirstIntent?: boolean) =>
+  createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number, seedFirstIntent?: boolean, planHeartbeatSeconds?: number) =>
     post<Task>("/tasks", {
       description,
       goal,
       llm_profile_id: llmProfileId ?? null,
       timeout_seconds: timeoutSeconds ?? 0,
       seed_first_intent: seedFirstIntent ?? true,
+      plan_heartbeat_seconds: planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 300(5min)
     }),
   deleteTask: (id: string) => del<{ deleted: number }>(`/tasks/${id}`),
   controlTask: (id: string, action: "pause" | "resume") => post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),

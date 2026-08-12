@@ -441,74 +441,112 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	}
 }
 
+// plannerHeartbeatInterval 解析任务的 planner 心跳间隔。db.CreateTask 已归一
+// (低于 300 一律抬到 300);这里再兜一次底,防内存态异常值。
+func plannerHeartbeatInterval(t *Task) time.Duration {
+	sec := t.PlanHeartbeatSeconds
+	if sec < db.MinPlanHeartbeatSeconds { // 下限=默认=300(5min)
+		sec = db.MinPlanHeartbeatSeconds
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// resetPlannerTimer 安全重臂一个可能已触发的 Timer(标准 Stop→drain→Reset 模式)。
+func resetPlannerTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
 func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
+	interval := plannerHeartbeatInterval(t)
+	// 心跳定时器在 loop 入口臂 = 从任务 start 计时:即使是跳过首轮 planner 的 seed 任务
+	// (Run 里 frontier 非空不 kick 首轮)、这里一直阻塞,心跳也会在「任务 start + interval」
+	// 触发第一轮规划。之后每次唤醒(边沿/心跳)都重臂 = 距上次任意规划触发的时长。
+	heartbeat := time.NewTimer(interval)
+	defer heartbeat.Stop()
+
+	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
+	runRound := func(src string) {
+		// debounce: coalesce a burst of changes into one planning round
+		timer := time.NewTimer(e.debounce)
+	drain:
+		for {
+			select {
+			case <-t.notify:
+			case <-timer.C:
+				break drain
+			}
+		}
+		planner, _ := e.snapshotFor(t)
+		if planner == nil {
+			return // idle until LLM configured
+		}
+		if e.IsPaused(t.ID) {
+			return // user-paused: don't plan
+		}
+		// terminal task (goals all met → done, or failed): the run is over. A
+		// resume/nudge — e.g. auto-resume of the active task on restart — must NOT
+		// re-plan (it would burn an LLM round and re-confirm a settled result).
+		if isTerminalStatus(t.Status) {
+			return
+		}
+		// 任务级超时收尾中:丢弃普通唤醒——worker 收尾写回、Resume 的 Notify 都不再
+		// 触发常规规划轮;终局那一轮由协调器(settleTask)直接驱动,不走这里。
+		if e.isSettling(t.ID) {
+			return
+		}
+		e.stampFirstRun(t) // 首次真正规划 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
+		e.touch(t.ID)
+		emit := func(r db.Activity) { e.emitActivity(t, r) }
+		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
+		// round marker: each Plan() is one planner round; emit a boundary so the
+		// UI can separate rounds in the transcript (kind='round').
+		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
+			Summary: fmt.Sprintf("第 %d 轮规划", e.nextPlannerRound(t.ID))})
+		// which intents' completion triggered this round (may be several — debounce
+		// coalesces a burst; empty for non-completion wakes like a new hint / heartbeat).
+		doneIntents := t.drainDone()
+		e.incInflight(t.ID)
+		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, doneIntents, emit)
+		e.decInflight(t.ID)
+		switch {
+		case err != nil && ectx.Err() == nil:
+			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
+		case met:
+			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
+			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
+			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
+				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
+			}
+			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
+			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
+			// 归为 stopped(而非 blocked)。
+			e.cancelExec(t.ID)
+		default:
+			log.Printf("[planner] task %s 规划完成", t.ID)
+		}
+		e.touch(t.ID)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.notify:
-			// debounce: coalesce a burst of changes into one planning round
-			timer := time.NewTimer(e.debounce)
-		drain:
-			for {
-				select {
-				case <-t.notify:
-				case <-timer.C:
-					break drain
-				}
-			}
-			planner, _ := e.snapshotFor(t)
-			if planner == nil {
-				continue // idle until LLM configured
-			}
-			if e.IsPaused(t.ID) {
-				continue // user-paused: don't plan
-			}
-			// terminal task (goals all met → done, or failed): the run is over. A
-			// resume/nudge — e.g. auto-resume of the active task on restart — must NOT
-			// re-plan (it would burn an LLM round and re-confirm a settled result).
-			if isTerminalStatus(t.Status) {
-				continue
-			}
-			// 任务级超时收尾中:丢弃普通唤醒——worker 收尾写回、Resume 的 Notify 都不再
-			// 触发常规规划轮;终局那一轮由协调器(settleTask)直接驱动,不走这里。
-			if e.isSettling(t.ID) {
-				continue
-			}
-			e.stampFirstRun(t) // 首次真正规划 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
-			e.touch(t.ID)
-			emit := func(r db.Activity) { e.emitActivity(t, r) }
-			ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
-			log.Printf("[planner] task %s 规划中…", t.ID)
-			// round marker: each Plan() is one planner round; emit a boundary so the
-			// UI can separate rounds in the transcript (kind='round').
-			e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
-				Summary: fmt.Sprintf("第 %d 轮规划", e.nextPlannerRound(t.ID))})
-			// which intents' completion triggered this round (may be several — debounce
-			// coalesces a burst; empty for non-completion wakes like a new hint).
-			doneIntents := t.drainDone()
-			e.incInflight(t.ID)
-			taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
-			met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, doneIntents, emit)
-			e.decInflight(t.ID)
-			switch {
-			case err != nil && ectx.Err() == nil:
-				log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
-			case met:
-				log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
-				// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-				if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-					log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
-				}
-				// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
-				// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
-				// 归为 stopped(而非 blocked)。
-				e.cancelExec(t.ID)
-			default:
-				log.Printf("[planner] task %s 规划完成", t.ID)
-			}
-			e.touch(t.ID)
+			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
+		case <-heartbeat.C:
+			// 周期兜底:死锁兜底 + 唤醒去监督飞行中的 worker(steer/kill) + 周期复查。
+			runRound("heartbeat")
 		}
+		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
+		resetPlannerTimer(heartbeat, interval)
 	}
 }
 
@@ -571,7 +609,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 		wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.incInflight(t.ID) // 计入在跑,供收尾时序 drain 等待
-		reason, wrote, err := worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich)
+		reason, wrote, err := worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.Notify)
 		// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 		// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 		// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
@@ -583,7 +621,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			if sleepCtx(workCtx, modelErrorRetryBackoff) {
 				break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 			}
-			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich)
+			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.Notify)
 		}
 		e.decInflight(t.ID)
 		// CAPTURE kill state BEFORE unregisterWork cancels workCtx. kill = this work's

@@ -647,6 +647,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 					_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> finding
 				}
 				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
+				if t.notify != nil {
+					t.notify() // 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）
+				}
 			} else {
 				// conversation context: no exploration store available, cannot record finding
 				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
