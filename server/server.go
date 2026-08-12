@@ -1148,13 +1148,11 @@ func (s *Server) seed(t *Task, text string) {
 	scheme, host, port, ok := parseTarget(text)
 	if !ok {
 		log.Printf("[seed] task %s: 未能从 %q 解析出目标 host/IP，不创建站点（请手动配置 scope）", t.ID, text)
-		t.Notify()
 		return
 	}
 	// P0-1 guard: never treat the configured LLM gateway as a target.
 	if gw := s.llmHost(); gw != "" && host == gw {
 		log.Printf("[seed] task %s: 目标 %q 是 LLM 网关，拒绝作为渗透目标", t.ID, host)
-		t.Notify()
 		return
 	}
 
@@ -1180,7 +1178,9 @@ func (s *Server) seed(t *Task, text string) {
 		}
 	}
 	log.Printf("[seed] task %s: 目标站点 %s", t.ID, u)
-	t.Notify()
+	// 不在这里 Notify:首轮是否触发统一由 engine.Run 的 HasActiveIntent 决定(种子意图任务
+	// 跳过首轮)。seed 早于 Run 执行,若在此 Notify 会 buffered 到通道、被 plannerLoop 启动时
+	// 消费掉而绕过 Run 的门控 → 种子任务仍误触发首轮。
 }
 
 // seedFirstIntent writes ONE open intent (summary = 描述+目标) into the task's
