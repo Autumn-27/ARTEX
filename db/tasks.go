@@ -35,9 +35,9 @@ func IsTerminal(status string) bool {
 // CreateTask creates an exploration + task in one transaction and returns the task.
 // timeoutSeconds is the task-level wall-clock budget (0 = 不限时); deadline_at is
 // stamped later at first real run (see engine), not here.
-// MinPlanHeartbeatSeconds 是 planner 心跳间隔的下限 = 默认 = 5min。
-// 低于它(含缺省 0 / 负值 / 误配的小值)一律抬到 5min，防止把 planner 打爆。
-const MinPlanHeartbeatSeconds = 300
+// MinPlanHeartbeatSeconds 是 planner 心跳间隔的下限 = 默认 = 10min。
+// 低于它(含缺省 0 / 负值 / 误配的小值)一律抬到 10min，防止把 planner 打爆。
+const MinPlanHeartbeatSeconds = 600
 
 func normalizeHeartbeat(sec int) int {
 	if sec < MinPlanHeartbeatSeconds {

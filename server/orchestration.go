@@ -239,7 +239,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"parent_ref":        strParam("可选：父任务 id(做父子关联)"),
 			"llm_profile_id":    map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
 			"timeout_seconds":   map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
-			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 300(5min)；"},
+			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 600(10min)；"},
 			"seed_first_intent": map[string]any{"type": "boolean", "description": "可选：默认 true。true=创建即把「描述+目标」作为一条种子意图下发，worker 免等首轮 planner 直接开跑(CTF 等常一个 work 解决的场景推荐)；false=走标准的先规划再执行"},
 		}, "description", "goal"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -282,13 +282,9 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 					_ = s.m.PG().SetParentRef(id, a.ParentRef)
 				}
 			}
-			s.seed(t, a.Description+" "+a.Goal) // seed 初始资产，喂给事件驱动 loop
-			// 种子意图(默认开启,仅显式 false 关闭):worker 免等首轮 planner 直接开跑。
-			if a.SeedFirstIntent == nil || *a.SeedFirstIntent {
-				s.seedFirstIntent(t)
-			}
-			s.createGoals(s.ctx, t, nil) // 目标分解(LLM;规则兜底)
-			s.engine.Run(s.ctx, t)       // 启动该任务的探索引擎
+			// 共享的建后流程,与 HTTP 建任务(server.go createTask)复用同一段 launchTask:
+			// seed + 种子意图 + 后台可见地做目标分解(第0轮/LLM步骤/逐条goal) + engine.Run。
+			s.launchTask(t, a.Description+" "+a.Goal, a.SeedFirstIntent == nil || *a.SeedFirstIntent)
 			return actool.Text(fmt.Sprintf("task created: %s", t.ID)), nil
 		})
 }
