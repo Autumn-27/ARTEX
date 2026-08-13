@@ -32,6 +32,7 @@ proxychains4（把任意工具的流量走代理/socks：proxychains4 nmap ... �
 
 [运行时]
 python3 + pip  node + npm
-
+预装 python 库(可直接 import)：flask(起本地 PoC 服务/接收回连) pydash
+如果运行命令不存在你需要找一下命令在哪里，理论上是存在的。当前环境是无网状态
 说明：需要交互式调试用 gdb（gef 已启用）；写 exploit 用 pwntools；
 搜 ROP gadget 用 ROPgadget/ropper；跨架构运行用 qemu-*-static。

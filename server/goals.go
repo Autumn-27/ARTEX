@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -13,6 +14,36 @@ import (
 type goalSpec struct {
 	Text      string
 	VulnClass string
+}
+
+// launchTask runs the shared post-creation sequence for a task created via ANY
+// path (HTTP createTask 或 orchestration spawn_task),避免两处复制粘贴:
+//  1. seed 根资产,喂给事件驱动 loop;
+//  2. 可选种子意图,worker 免等首轮 planner 直接开跑;
+//  3. 后台异步做目标分解(发「第 0 轮目标拆解」round + LLM 分解步骤 + 逐条 goal,页面可见),
+//     分解完再 engine.Run —— 引擎在 goal 节点就绪后才启动,避免 planner 抢在 goal 之前跑的竞态。
+//
+// 异步(goroutine)所以调用方立即返回,两条路径行为一致:秒建任务、后台拆目标。
+func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
+	s.seed(t, seedText)
+	if seedFirstIntent {
+		s.seedFirstIntent(t)
+	}
+	go func() {
+		s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
+			Summary: "第 0 轮目标拆解"})
+		goals := s.createGoals(s.ctx, t, func(r db.Activity) {
+			s.engine.emitActivity(t, r)
+		})
+		for _, g := range goals {
+			summary := g.Text
+			if g.VulnClass != "" {
+				summary = fmt.Sprintf("[%s] %s", g.VulnClass, g.Text)
+			}
+			s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: summary})
+		}
+		s.engine.Run(s.ctx, t)
+	}()
 }
 
 // createGoals materializes the goal node(s) under the task root (rel objective).

@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1
+#
+# ARTEX 腾讯 TSec Benchmark 测评镜像 v2（自包含单容器）。
+#   与 Dockerfile.bench(v1) 的唯一差异在运行时入口：
+#     - 用 entrypoint_v2.sh + seed_v2.sh：不建 tec_benchmark 编排 agent、保留 challenge_review，
+#       编排改由 bench/scheduler.py（确定性算法）驱动，seed 完成后由 entrypoint 后台拉起。
+#   构建/工具链/离线知识库与 v1 完全一致。
+#
+# 构建:  docker build -f Dockerfile.bench.v2 -t artex-bench:v2 .
+# 导出:  docker save artex-bench:v2 | gzip > agent-v2.tar.gz    # ≤3GB
+# 本地跑: docker run --rm --network host \
+#           -e BENCHMARK_BASE_URL=... -e BENCHMARK_TOKEN=... \
+#           -e LLM_BASE_URL=... -e LLM_API_KEY=... artex-bench:v2
+
+# ---------- 1) 构建前端静态导出（Next.js） ----------
+FROM node:20-bookworm AS frontend
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build:static          # 产出 /web/out
+
+# ---------- 2) 编译 artex（内嵌前端，从当前工作树） ----------
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+# nuclei（最新版，静态编译；@latest 与本模块无关，先装以便缓存）
+RUN CGO_ENABLED=0 go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+# chisel（TCP/UDP over HTTP 隧道，用于内网转发/pivoting；最新版静态编译）
+RUN CGO_ENABLED=0 go install github.com/jpillora/chisel@latest
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# 前端静态产物放到 embed 目录，-tags embedui 才会内嵌 UI（本地可看界面）
+COPY --from=frontend /web/out ./server/webui/dist
+RUN CGO_ENABLED=0 go build -trimpath -tags embedui -o /artex ./cmd/artex
+
+# ---------- 3) Kali 运行时 ----------
+FROM kalilinux/kali-rolling
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Web / 渗透 / recon + 运行时 + DB
+#   去掉 metasploit-framework(~1.5-2GB) 与 seclists(~1GB+)；改用 dirb 的小字典
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget vim unzip jq ripgrep procps sudo \
+      postgresql postgresql-contrib \
+      python3 python3-pip python3-zombie-telnetlib nodejs npm \
+      nmap masscan ffuf sqlmap nikto hydra john \
+      ncat socat netcat-traditional inetutils-telnet dirb dnsutils proxychains4 \
+      python3-impacket impacket-scripts netexec evil-winrm \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 逆向 / pwn / 二进制 / 内存（radare2 已够，去掉冗余的 rizin）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gdb radare2 binutils file bsdmainutils binwalk \
+      ltrace strace patchelf upx-ucl checksec qemu-user-static ruby \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# gef（gdb 增强，单文件，不需要 git）
+RUN curl -fsSL https://gef.blah.cat/sh -o /tmp/gef.sh && bash /tmp/gef.sh && rm -f /tmp/gef.sh || true
+
+# pwn / 逆向 python 生态 + one_gadget
+RUN pip3 install --break-system-packages --no-cache-dir \
+      pwntools ROPgadget ropper capstone unicorn keystone-engine z3-solver \
+    && gem install --no-document one_gadget || true
+
+# Web / 应用类解题依赖：flask（起本地 PoC 服务/回连）+ pydash（PyDash 原型链污染类题目复现）
+RUN pip3 install --break-system-packages --no-cache-dir \
+      flask pydash
+
+# nuclei（最新版二进制）+ 官方 POC 库（离线预置到 /opt/nuclei-templates；运行时用 -duc 禁联网更新）
+COPY --from=build /go/bin/nuclei /usr/local/bin/nuclei
+COPY --from=build /go/bin/chisel /usr/local/bin/chisel
+RUN curl -sSL https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/main.tar.gz \
+      | tar xz -C /opt \
+    && mv /opt/nuclei-templates-main /opt/nuclei-templates \
+    && mkdir -p /root/.config/nuclei \
+    && printf 'disable-update-check: true\n' > /root/.config/nuclei/config.yaml \
+    && ln -sf /opt/nuclei-templates /root/nuclei-templates \
+    && nuclei -version 2>/dev/null || true
+
+# Awesome-POC 漏洞知识库（Threekiii，markdown POC/利用 writeup 集，离线参考，用 rg/grep 查阅）
+RUN (curl -fsSL https://github.com/Threekiii/Awesome-POC/archive/refs/heads/master.tar.gz) \
+      | tar xz -C /opt \
+    && mv /opt/Awesome-POC-* /opt/awesome-poc
+
+# 另一离线 POC 仓库（eeeeeeeeee-code/POC，大量 CVE/组件 POC 脚本，离线参考）
+RUN (curl -fsSL https://github.com/eeeeeeeeee-code/POC/archive/refs/heads/main.tar.gz \
+      || curl -fsSL https://github.com/eeeeeeeeee-code/POC/archive/refs/heads/master.tar.gz) \
+      | tar xz -C /opt \
+    && mv /opt/POC-* /opt/eee-poc
+
+WORKDIR /app
+COPY --from=build /artex /app/artex
+COPY skills/ /app/skills/
+COPY bench/ /app/bench/
+# v2：入口 = entrypoint_v2.sh，seed = seed_v2.sh，编排 = scheduler.py
+RUN chmod +x /app/artex /app/bench/entrypoint_v2.sh /app/bench/seed_v2.sh /app/bench/scheduler.py
+
+# data/（jwt.key 等）持久化点；8787=API，8788=流量代理
+VOLUME ["/app/data"]
+EXPOSE 8787 8788
+ENTRYPOINT ["/app/bench/entrypoint_v2.sh"]

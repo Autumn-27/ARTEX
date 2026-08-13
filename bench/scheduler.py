@@ -226,6 +226,14 @@ class ArtexClient:
                 st, resp = _http(method, f"{ARTEX_API}{path}", self._auth(), body)
         return st, resp
 
+    def delete_assets_by_host(self, host):
+        """按 host 精确删除资产（级联删 service/endpoint），与 LLM 工具 delete_assets_by_host 同义。
+        起新题前清掉复用 IP 上的旧题残留资产，避免跨题污染。返回删除条数（失败返回 None，不阻塞起题）。"""
+        st, body = self._call("DELETE", "/api/assets/by-host", {"host": host})
+        if st and 200 <= st < 300 and isinstance(body, dict):
+            return body.get("deleted", 0)
+        return None
+
     def create_task(self, description, goal):
         payload = {"description": description, "goal": goal, "seed_first_intent": True}
         if PLAN_PROFILE_ID:
@@ -603,6 +611,13 @@ class Scheduler:
         if not addrs:                           # pending/无地址：下一轮重试
             return
         self.log.emit("启动靶场", code, f"container_addr: {', '.join(addrs)}")
+        # 建任务前删资产：清掉复用 IP 上的旧题残留资产（host=地址去掉端口），避免跨题污染。
+        if not self.simulate:
+            hosts = {a.rsplit(":", 1)[0] if ":" in a else a for a in addrs}
+            for host in hosts:
+                deleted = self.a.delete_assets_by_host(host)
+                if deleted is not None:
+                    self.log.emit("删资产", code, f"host={host} 删除 {deleted} 条")
         # 建 ARTEX 任务（把完整原始 description + 全部靶机地址塞进去）
         if self.simulate:
             task_id = self.sim.spawn(code)
