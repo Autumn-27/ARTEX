@@ -140,7 +140,6 @@ const workerDefaultTmpl = `你是一个授权渗透测试系统的"执行者"(wo
 - record_fact：把探索【事实/结论】写入探索图并连到意图（传 intent_id）。正向/否定结论、观察、判断用它；**一次探索的多个观察汇总成一条事实**（summary 总结一句话 + detail 放细节），不要一个属性一条。真有多条不同结论才用 facts 数组。**只写你真实看到的**：给 evidence（一行关键证据：命令+关键输出，简洁，别粘大段——细节在 detail）、标 confidence（observed 直接看到 / inferred 推断）；**否定结论**（不可注入/端口关闭等）尤其要给证据、证据弱就标 inferred，别让错的否定误导规划者放弃方向。
 - report_finding：确认漏洞 → 记录(含 PoC，传 intent_id=你领到的意图id)。**只有你在本次运行里真实触发过该漏洞、拿到了可复现的证据（请求/响应或命令输出）才用它。** 严禁把下列当作已确认漏洞上报：仅凭版本号/指纹匹配到某 CVE、仅凭"参数看起来可注入"、仅凭外部漏洞库/更新日志/代码 diff 推断。**不要用查 CVE 库或"对比补丁版本"替代实际触发。** 触发不了但确有嫌疑，就用 record_fact 记一条 confidence=inferred 的事实（描述嫌疑点+为何未能触发），交给规划者派后续意图，别硬记成 finding。
 - list_assets（查询资产，非探索节点） / asset_neighbors / list_facts(探索事实) / list_findings(漏洞) / node_detail(探索节点 id，非资产 id)：按需查上下文。
-- 【必要时才会使用，大多数上下文都在本次会话中】search_all_worker_traces / list_worker_traces / get_worker_trace：**跨 work 复用信息**（别的 work 执行过程里出现过、却没写进 fact 的东西）。你看不到探索图，但可以：search_all_worker_traces(q) 按关键字搜全部 work 的过程（返回带 intent_id）；list_worker_traces 看有哪些 work 跑过；get_worker_trace(intent_id) 看某 work 的步骤摘要、get_worker_trace(intent_id, step_ids=[…]) 取那几步完整内容（一次≤5个）。**仅用于复用他人观察、避免重复劳动——不改变你的任务边界（仍只做你这条意图）。**
 
 只在授权范围内操作。完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
 
@@ -188,9 +187,10 @@ func workerSystem(proxyAddr, runDir string) string {
 	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
 }
 
-// renderIntentTask formats the claimed intent for the worker's SYSTEM prompt: the
-// intent is the worker's whole job, so — like the planner's situational block — it
-// belongs in system, where compaction can never drop it during a long run.
+// renderIntentTask formats the claimed intent for the worker's launch USER message:
+// the intent is the worker's whole job. It used to live in the system prompt; it now
+// rides in the first user turn (together with the situational overview) so the system
+// prompt stays static/role-only — same move as the planner's situational block.
 // intentAssetIDs pulls the intent's target asset ids out of its payload
 // (planner's add_intent stores them as a numeric asset_ids array). nil on absence
 // or malformed payload.
@@ -212,7 +212,7 @@ func renderIntentTask(intent *db.Node) string {
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
-// SYSTEM prompt for AWARENESS ONLY. The framing is deliberately strong: the overview
+// launch USER message for AWARENESS ONLY. The framing is deliberately strong: the overview
 // must NOT widen the worker's job — it still does only its assigned intent. Its sole
 // purpose is letting the worker read context (existing facts/assets/hints)
 // so it avoids redundant work and doesn't re-derive what others already found.
@@ -226,8 +226,7 @@ func renderWorkerGraphOverview(data map[string]any) string {
 		return "" // fall back silently: the worker just won't have the global context
 	}
 	return "\n\n【全局探索态势（仅供你了解大局，不是你的任务清单）】：\n" +
-		"下面是整个任务当前的探索概况。给你的**唯一目的**是让你了解全局动态、复用已有结论、避免重复别人已做过的事。\n" +
-		"**开场别做前置普查**：这份概况已够你起步，直接开打领到的意图；list_facts / list_findings / list_worker_traces 只在执行中真缺某条细节时才按需查。\n" +
+		"下面是整个任务当前的探索概况。给你的**唯一目的**是让你了解全局动态。\n" +
 		"**它绝不扩大你的职责边界**：你仍然只做上面领到的那一条意图。看到这里有别的 open 意图 / 未覆盖的点 / 其它可打方向，也**绝不要自己去动手**——那些是别的 worker 的事，由规划者调度。你若发现相关新线索，最多写进 fact 让规划者知道，不要自己追。\n" +
 		string(b)
 }
@@ -258,13 +257,13 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
-	// 意图是 worker 的全部任务，放进 system prompt（抗 compaction、整轮常驻），而不是
-	// user 输入——与 planner 把关键态势放 system 一致。落在指令之后、deferred 块之前。
-	// 全局态势(graphOverviewData)也带上，但仅供了解大局；意图放在最后、最醒目的位置。
-	// 本次意图的专属工作目录 <workDir>/<taskID>/i<intentID>，引擎侧先建好。
+	// 意图 + 全局态势改放【启动 user 消息】(见下方 input)，system 只留静态角色正文
+	// (段[A]/[B]/[C] + deferred 块)。与 planner 一致：把易变的运行期数据移出 system，
+	// system 每 session 稳定、更利于缓存；代价是长 run 里这条 user 消息可能被 compaction
+	// 压缩。本次意图的专属工作目录 <workDir>/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	system, boundary := deferredSystem(workerSystem(w.proxyAddr, runDir)+overview+renderIntentTask(intent), def)
+	system, boundary := deferredSystem(workerSystem(w.proxyAddr, runDir), def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
@@ -326,9 +325,11 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	// 意图已在 system 里。user 输入只放启动指令 + 意图锚定资产的原始数据（供 worker 直接
-	// 用，省去开场再查一次 list_assets）。原始 JSON 直接附上，不做提取/格式化。
-	input := "开始执行 system 提示里的这条意图：只做它、只产生事实、做完即停。"
+	// 意图 + 全局态势 + 启动指令 + 意图锚定资产的原始数据都放这条启动 user 消息里。
+	// 意图放最前、最醒目；overview 仅供了解大局。资产原始 JSON 直接附上，不做提取/格式化，
+	// 省去开场再查一次 list_assets。注意：这些运行期数据现在活在 user 消息里，长 run 中
+	// 有被 compaction 压缩的风险（意图是 worker 全部职责，若被压掉需另行 pin，待评估）。
+	input := renderIntentTask(intent) + overview + "\n\n开始执行上面这条意图：只做它、只产生事实、做完即停。"
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {

@@ -40,7 +40,10 @@ TOTAL_BUDGET   = 1080.0   # 槽·分钟总预算 = 3 槽 × 360min（硬天花�
 SLOTS          = 3        # 平台硬上限：同时最多 3 个活跃容器
 DEADLINE_MIN   = 360.0    # 6h 硬停
 SOFT_DEADLINE  = 350.0    # 软截止：此后不新起长窗，留 10min 优雅收尾
-POLL_SEC       = 20       # 轮询周期（真实模式）
+POLL_SEC       = 20       # 基础轮询周期（真实模式，空闲时用）
+FAST_POLL_SEC  = float(os.environ.get("FAST_POLL_SEC", "3"))  # 有活跃槽解题时的快轮询周期：
+                          # 提交 flag/通关后平台是同步生效的，快轮询让"关旧题→补新题"几乎立刻发生，
+                          # 把换题延迟从最多一个 POLL_SEC 压到 FAST_POLL_SEC。若平台限流可调大。
 
 # —— 易题阶段 ——
 EASY_WALL_CAP  = 95.0     # 墙钟到此强制收口、剩余易题 park、全槽转硬
@@ -408,7 +411,8 @@ class Scheduler:
 
             if self._all_done():
                 break
-            self.clock.sleep(POLL_SEC)
+            # 有槽在解题 → 快轮询，让提交/通关后立刻换题；全空闲(等靶场/无题)才回落基础周期省 QPS。
+            self.clock.sleep(FAST_POLL_SEC if any(s.busy for s in self.slots) else POLL_SEC)
 
         self._shutdown()
 
@@ -599,16 +603,19 @@ class Scheduler:
         else:
             st, ecode, addrs = self.b.start(code)
             if st == 409 and ecode == "invalid_state":
-                return                          # 达 3 活跃上限(或任务将结束)：下一轮重试，challenges() 会捕获真结束
+                self._requeue(code)             # 达 3 活跃上限(或任务将结束)：退回队列下一轮重试，challenges() 会捕获真结束
+                return                          # ★ code 已被 _pick_next pop 出，不 requeue 会永久蒸发
             if st == 503 or ecode == "resource_unavailable":
-                return                          # 靶场资源未就绪：稍后重试
+                self._requeue(code)             # 靶场资源未就绪：退回队列稍后重试
+                return
             if st == 404 and ecode == "challenge_not_found":
                 self.log.emit("放弃", code, "challenge_not_found，跳过")
                 self.given_up.add(code)
                 return
             if st == 404 and ecode == "task_not_found":
                 raise BenchEnded("task_not_found")
-        if not addrs:                           # pending/无地址：下一轮重试
+        if not addrs:                           # pending/无地址：退回队列下一轮重试
+            self._requeue(code)
             return
         self.log.emit("启动靶场", code, f"container_addr: {', '.join(addrs)}")
         # 建任务前删资产：清掉复用 IP 上的旧题残留资产（host=地址去掉端口），避免跨题污染。
@@ -714,7 +721,10 @@ class Scheduler:
             self.easyQ.insert(0, code)
 
     def _vpn_guard(self, now):
-        """VPN 断开检测。返回 True=当前冻结、本轮跳过解题。恢复时把停摆时长从各槽预算补偿掉。"""
+        """VPN 断开检测。返回 True=当前冻结、本轮跳过平台处置(拉题/起停/对账都需 VPN)。
+        任务【不暂停】——大概率只是网络抖动，pause 会 cancel 掉在飞的 LLM/worker 执行、白烧
+        已花 token 且丢当前轮进度，得不偿失；抖动几秒对解题无害，等自然重连即可。
+        恢复时把停摆时长从各槽预算/停滞看门狗计时里补偿掉，避免停摆期误判并触发干净重启。"""
         ok = self.sim.vpn_ok() if self.simulate else self.b.vpn_ok()
         if ok:
             if self.frozen:
@@ -725,19 +735,14 @@ class Scheduler:
                             s.started += outage           # 停摆不计入该题已跑时长
                         if s.last_progress is not None:
                             s.last_progress += outage     # 也不让停摆触发停滞看门狗
-                        if not self.simulate and s.task_id:
-                            self.a.control(s.task_id, "resume")
-                self.log.emit("VPN恢复", info=f"停摆 {outage:.0f}min：各槽预算已补偿、任务恢复（墙钟仍走）")
+                self.log.emit("VPN恢复", info=f"停摆 {outage:.0f}min：预算已补偿、任务全程未停（墙钟仍走）")
                 self.frozen = False
             return False
-        # VPN 断
+        # VPN 断：任务不动(照跑)，只跳过本轮需 VPN 的平台处置，等自然重连。
         if not self.frozen:
             self.frozen = True
             self.freeze_start = now
-            for s in self.slots:
-                if s.busy and not self.simulate and s.task_id:
-                    self.a.control(s.task_id, "pause")
-            self.log.emit("VPN断开", info="冻结各槽预算 + 暂停任务，等待恢复")
+            self.log.emit("VPN断开", info="跳过本轮平台处置、冻结各槽预算；任务不暂停，等待重连")
         return True
 
     def _clean_restart(self, s, now):
