@@ -15,10 +15,10 @@ var PromptOverride func(agentKey string) (string, bool)
 // Prompt-variable structs — fields mirror each agent's catalog (docs §5a) so a
 // user template referencing a catalog variable renders; referencing anything else
 // fails template execution and falls back to the built-in default.
-type PlannerVars struct{ Goal, Scope, AssetSummary, Now string }
-type WorkerVars struct{ ProxyAddr, WorkerName, Now string }
-type MainVars struct{ Goal, AssetSummary, FindingsSummary, Now string }
-type GoalsVars struct{ EngagementDescription, Now string }
+type PlannerVars struct{ Goal, Scope, AssetSummary, DataDir, Now string }
+type WorkerVars struct{ ProxyAddr, WorkerName, DataDir, Now string }
+type MainVars struct{ Goal, AssetSummary, FindingsSummary, DataDir, Now string }
+type GoalsVars struct{ EngagementDescription, DataDir, Now string }
 
 // nowStr is the server-local wall-clock string exposed as the universal {{.Now}}
 // prompt variable. renderSystem runs on every agent turn/round, so this is fresh

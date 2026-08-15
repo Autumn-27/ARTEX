@@ -72,7 +72,7 @@ type GoalSpec struct {
 //
 // as + taskID, when non-nil/positive, wire the add_task_scope tool so the
 // decomposer can register the explicit asset scope it extracts from the goal.
-func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, as *db.AssetStore, taskID int64, emit func(db.Activity)) []GoalSpec {
+func DecomposeGoals(ctx context.Context, c Config, dataDir, goalText, desc string, as *db.AssetStore, taskID int64, emit func(db.Activity)) []GoalSpec {
 	prov, err := c.NewProvider()
 	if err != nil {
 		return nil
@@ -102,7 +102,7 @@ func DecomposeGoals(ctx context.Context, c Config, goalText, desc string, as *db
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
-	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{Now: nowStr()})
+	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
 	tools := []actool.CoreTool{submitTool}
 	// Wire add_task_scope only when we have a real asset store + task to write to.
 	// The scope-extraction tail is appended in lockstep so the prompt never asks for

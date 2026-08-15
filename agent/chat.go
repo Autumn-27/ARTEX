@@ -57,14 +57,15 @@ func chatWorkDirSpec(workDir string) string {
 
 // chatSystem renders the DB-managed prompt body for agentKey. Custom agents have
 // no per-key in-code default, so DefaultAssistantPrompt is the render fallback.
-func chatSystem(agentKey, workDir string) string {
-	return renderSystem(agentKey, DefaultAssistantPrompt, chatVars{Now: nowStr()}) + chatWorkDirSpec(workDir)
+func chatSystem(agentKey, dataDir, workDir string) string {
+	return renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: dataDir, Now: nowStr()}) + chatWorkDirSpec(workDir)
 }
 
 // chatVars carries the runtime variables a custom agent's prompt may reference.
-// Now (server wall-clock, refreshed each turn) is the only one today; any other
-// {{.X}} fails to render and falls back to DefaultAssistantPrompt.
-type chatVars struct{ Now string }
+// DataDir (server data root) + Now (server wall-clock, refreshed each turn) are the
+// universal ones; any other {{.X}} fails to render and falls back to
+// DefaultAssistantPrompt.
+type chatVars struct{ DataDir, Now string }
 
 // Chat runs ONE turn of a conversation with the agent identified by agentKey,
 // resuming prior history keyed by sessionID. maxTurns is the per-turn agent step
@@ -94,7 +95,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
-	system, boundary := deferredSystem(chatSystem(agentKey, sessionWorkDir), def)
+	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,

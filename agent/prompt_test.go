@@ -34,7 +34,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// full plannerSystem path: DB body [A] is honored, then the code-owned tail
 	// [C] (中间产物输出规约) is ALWAYS appended — editing the body can't drop it.
 	PromptOverride = func(k string) (string, bool) { return "PLANNER {{.Goal}}", true }
-	got := plannerSystem("拿下X", "/data")
+	got := plannerSystem("拿下X", "/data", "/data")
 	if !strings.HasPrefix(got, "PLANNER 拿下X") {
 		t.Fatalf("plannerSystem body not honored: %q", got)
 	}
@@ -47,7 +47,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	PromptOverride = func(k string) (string, bool) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
-	withProxy := workerSystem("127.0.0.1:8080", "/data")
+	withProxy := workerSystem("127.0.0.1:8080", "/data", "/data")
 	if !strings.HasPrefix(withProxy, "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker proxy branch body: %q", withProxy)
 	}
@@ -57,7 +57,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	if !strings.Contains(withProxy, "中间产物输出规约") {
 		t.Fatalf("worker missing artifact tail: %q", withProxy)
 	}
-	noProxy := workerSystem("", "/data")
+	noProxy := workerSystem("", "/data", "/data")
 	if !strings.HasPrefix(noProxy, "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}

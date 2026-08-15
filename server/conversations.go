@@ -363,9 +363,9 @@ type triggerBehavior struct {
 }
 
 // readTriggerBehavior loads an agent's策略, falling back to safe defaults
-// (serial / by_task / 5) on any error or unknown enum value.
+// (serial / all / 5) on any error or unknown enum value.
 func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
-	b := triggerBehavior{runMode: "serial", mergeMode: "by_task", maxParallel: 5}
+	b := triggerBehavior{runMode: "serial", mergeMode: "all", maxParallel: 5}
 	if s.m.pg == nil {
 		return b
 	}

@@ -65,7 +65,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 			as = s.m.Assets()
 		}
 		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-		for _, g := range agent.DecomposeGoals(ctx, cfg, t.Goal, t.Description, as, taskID, emit) {
+		for _, g := range agent.DecomposeGoals(ctx, cfg, s.m.dir, t.Goal, t.Description, as, taskID, emit) {
 			if strings.TrimSpace(g.Text) != "" {
 				specs = append(specs, goalSpec{Text: g.Text, VulnClass: g.VulnClass})
 			}

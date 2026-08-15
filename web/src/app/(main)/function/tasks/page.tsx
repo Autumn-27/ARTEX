@@ -112,7 +112,7 @@ export default function TasksPage() {
   const [llmProfile, setLlmProfile] = React.useState<string>(ACTIVE_PROFILE); // sentinel = active
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
-  const [seedFirstIntent, setSeedFirstIntent] = React.useState(true); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑
+  const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
@@ -182,7 +182,7 @@ export default function TasksPage() {
       setLlmProfile(ACTIVE_PROFILE);
       setTimeoutMin("");
       setHeartbeatMin("10");
-      setSeedFirstIntent(true);
+      setSeedFirstIntent(false);
       setOpen(false);
       load();
     } catch (e) {

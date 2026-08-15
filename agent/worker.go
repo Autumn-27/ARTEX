@@ -182,8 +182,8 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 // cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
-func workerSystem(proxyAddr, runDir string) string {
-	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, Now: nowStr()})
+func workerSystem(proxyAddr, dataDir, runDir string) string {
+	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
 	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
 }
 
@@ -263,7 +263,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// 压缩。本次意图的专属工作目录 <workDir>/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	system, boundary := deferredSystem(workerSystem(w.proxyAddr, runDir), def)
+	system, boundary := deferredSystem(workerSystem(w.proxyAddr, w.workDir, runDir), def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)

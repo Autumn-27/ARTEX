@@ -734,11 +734,11 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   const [tools, setTools] = React.useState<Tool[]>([]);
   // 触发后处理策略(每 agent);初值来自 agent detail,改动即保存。
   const [runMode, setRunMode] = React.useState<"serial" | "parallel">(agent?.trigger_run_mode ?? "serial");
-  const [mergeMode, setMergeMode] = React.useState<"by_task" | "all" | "none">(agent?.trigger_merge_mode ?? "by_task");
+  const [mergeMode, setMergeMode] = React.useState<"by_task" | "all" | "none">(agent?.trigger_merge_mode ?? "all");
   const [maxParallel, setMaxParallel] = React.useState(String(agent?.trigger_max_parallel ?? 5));
   React.useEffect(() => {
     setRunMode(agent?.trigger_run_mode ?? "serial");
-    setMergeMode(agent?.trigger_merge_mode ?? "by_task");
+    setMergeMode(agent?.trigger_merge_mode ?? "all");
     setMaxParallel(String(agent?.trigger_max_parallel ?? 5));
   }, [agent?.trigger_run_mode, agent?.trigger_merge_mode, agent?.trigger_max_parallel]);
 

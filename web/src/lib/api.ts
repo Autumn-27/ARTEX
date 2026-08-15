@@ -115,7 +115,7 @@ export const api = {
       goal,
       llm_profile_id: llmProfileId ?? null,
       timeout_seconds: timeoutSeconds ?? 0,
-      seed_first_intent: seedFirstIntent ?? true,
+      seed_first_intent: seedFirstIntent ?? false,
       plan_heartbeat_seconds: planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
     }),
   deleteTask: (id: string) => del<{ deleted: number }>(`/tasks/${id}`),

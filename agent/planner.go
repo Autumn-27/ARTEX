@@ -228,8 +228,8 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 
 宁可不生成，也不要重复或硬凑。简洁、克制、高效。`
 
-func plannerSystem(goal, workDir string) string {
-	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, Now: nowStr()})
+func plannerSystem(goal, dataDir, workDir string) string {
+	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
@@ -269,7 +269,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 本任务的工作目录 <workDir>/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
-	system, boundary := deferredSystem(plannerSystem(goal, taskDir), def)
+	system, boundary := deferredSystem(plannerSystem(goal, p.workDir, taskDir), def)
 	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
