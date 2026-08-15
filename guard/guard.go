@@ -1,15 +1,16 @@
-// Package guard implements the safety boundary layer (docs §11): side-effect
-// gating of destructive/exfil shell commands, an audit log, and Observer/G5
-// failure attribution. Every tool call passes through the PreToolUse hook before
-// executing. (The RoE authorization-scope mechanism was removed; a replacement
-// may be added later.)
+// Package guard implements the safety boundary layer (docs §11): an audit log,
+// user-configured intercept-rule evaluation, and Observer/G5 failure attribution.
+// Every tool call passes through the PreToolUse hook before executing.
+// (The RoE authorization-scope mechanism was removed; a replacement may be added
+// later.) Destructive/exfil gating is no longer hard-coded here — it lives in the
+// DB intercept rules (seeded as ordinary [内置] rules, so users can disable or
+// delete them), evaluated via applyIntercept.
 package guard
 
 import (
 	"context"
 	"encoding/json"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -53,15 +54,11 @@ func newGuard(ic *intercept.Interceptor) *Guard {
 // Hooks returns the hook registry to attach to an agent session.
 func (g *Guard) Hooks() *hook.Registry { return g.reg }
 
-var (
-	reDestructive = regexp.MustCompile(`(?i)\b(rm\s+-rf\s+/|mkfs|dd\s+if=|:\(\)\s*\{|shutdown|reboot|>\s*/dev/sd)`)
-	reExfil       = regexp.MustCompile(`(?i)(curl|wget|nc|ncat)\b[^|]*\b(\|\s*(curl|wget|nc))`)
-)
-
 func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
-	// Gate the shell-command surface: Bash + the interactive-shell tools (shell_open's
-	// command, shell_send's text). Same destructive/exfil rules — an interactive
-	// session must not bypass the safety boundary. Other tools pass through.
+	// Extract the shell-command surface for the audit log: Bash + the interactive-shell
+	// tools (shell_open's command, shell_send's text). Destructive/exfil gating is no
+	// longer hard-coded here — it now lives in the DB intercept rules, evaluated by
+	// applyIntercept below. Other tools record an empty command.
 	var cmd string
 	switch ev.ToolName {
 	case "Bash", "shell_open":
@@ -76,23 +73,7 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		}
 		_ = json.Unmarshal(ev.Input, &in)
 		cmd = in.Text
-	default:
-		g.record(ev.ToolName, "allow", "", "")
-		return g.applyIntercept(ctx, ev)
 	}
-	if strings.TrimSpace(cmd) == "" { // e.g. shell_send with only keys/hex → nothing to check
-		g.record(ev.ToolName, "allow", "", "")
-		return g.applyIntercept(ctx, ev)
-	}
-
-	// destructive / exfil gating (§11 side-effect gating)
-	if reDestructive.MatchString(cmd) {
-		return g.block(ev.ToolName, "破坏性命令被安全边界拒绝（需人工批准）", cmd)
-	}
-	if reExfil.MatchString(cmd) {
-		return g.block(ev.ToolName, "疑似数据外泄管道被拒绝", cmd)
-	}
-
 	g.record(ev.ToolName, "allow", "", cmd)
 	return g.applyIntercept(ctx, ev)
 }

@@ -196,6 +196,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRules(); err != nil {
 		return fmt.Errorf("seed intercept rules: %w", err)
 	}
+	if err := d.seedDefaultInterceptRulesV2(); err != nil {
+		return fmt.Errorf("seed intercept rules v2: %w", err)
+	}
 	return nil
 }
 
@@ -416,4 +419,53 @@ ON CONFLICT DO NOTHING`,
 		}
 	}
 	return d.SetSetting("intercept_default_rules_v1", "done")
+}
+
+// seedDefaultInterceptRulesV2 migrates the two safety patterns that used to be
+// hard-coded in guard.go (destructive shell + data-exfil pipe) into ordinary
+// intercept rules. Gated by its own flag so it also lands on DBs that already ran
+// v1. Unlike the old guard.go floor, these are plain [内置] rules — the user can
+// disable or delete them. The exfil rule ships DISABLED by default (its
+// curl/wget/nc pipe pattern mis-fires on legitimate CTF/pentest reverse-shell and
+// data-transfer pipes); enable it manually when exfil gating is actually wanted.
+func (d *DB) seedDefaultInterceptRulesV2() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v2"); v == "done" {
+		return nil
+	}
+	rules := []struct {
+		name     string
+		pattern  string
+		action   string
+		message  string
+		enabled  bool
+		priority int
+	}{
+		{
+			name:     "[内置] 破坏性系统命令",
+			pattern:  `(?i)\b(rm\s+-rf\s+/|mkfs|dd\s+if=|:\(\)\s*\{|shutdown|reboot|>\s*/dev/sd)`,
+			action:   "deny",
+			message:  "破坏性命令被拒绝（rm -rf / / mkfs / dd / fork bomb / 关机重启 / 覆写磁盘设备）",
+			enabled:  true,
+			priority: 100,
+		},
+		{
+			name:     "[内置] 数据外泄管道",
+			pattern:  `(?i)(curl|wget|nc|ncat)\b[^|]*\b(\|\s*(curl|wget|nc))`,
+			action:   "deny",
+			message:  "疑似数据外泄管道被拒绝（命令输出经 curl/wget/nc 外传）",
+			enabled:  false,
+			priority: 80,
+		},
+	}
+	for _, r := range rules {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action)
+VALUES ($1, $2, $3, 'tool_input', 'regex', $4, $5, $6, false, 60, 'deny')
+ON CONFLICT DO NOTHING`,
+			r.name, r.enabled, r.priority, r.pattern, r.action, r.message,
+		); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v2", "done")
 }
