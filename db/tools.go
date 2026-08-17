@@ -61,6 +61,14 @@ func (d *DB) RemoveAgentFromToolBindings(agentKey string) error {
 	return err
 }
 
+// RemoveAgentFromTool strips one agent key from a SINGLE tool's `agents` array —
+// used by one-time migrations that change a tool's default binding on existing DBs
+// (SeedTool is first-insert-only, so a changed default never reaches a seeded row).
+func (d *DB) RemoveAgentFromTool(agentKey, toolKey string) error {
+	_, err := d.Exec(`UPDATE tools SET agents = agents - $1 WHERE key=$2 AND agents ? $1`, agentKey, toolKey)
+	return err
+}
+
 // UpsertToolForce overwrites a tool row with the given code-default values (used by
 // the per-tool "reset" action). It resets description/schema/agents and re-enables
 // the tool, but keeps system=true.

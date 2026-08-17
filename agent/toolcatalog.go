@@ -49,8 +49,17 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 	}
 }
 
-// BuiltinToolSeeds 把三个 agent 的内置工具集去重合并成 seed 列表：同名工具（如
-// list_assets 三者都有）合成一条，Agents 取并集。顺序稳定（mainagent→planner→worker）。
+// defaultUnbound：这些 system 工具会照常入目录（web 端可见、可手动按 agent 勾选），但
+// 默认【不绑任何 agent】——ToolResolve 对空绑定的工具对所有 agent 一律丢弃,须显式 opt-in。
+// 之所以仍留在某个 agent 的 base 工具集里(如 goal_met 在 PlannerTools):一是让 seed 能
+// 构造它拿到 desc/schema,二是用户手动绑回后运行时 base 里有它、ToolResolve 才留得住。
+//
+// goal_met：绕过逐个 prove_goal、直接从全局宣布【整个任务完成】,权重大且有误判风险,又与
+// 「prove_goal 标记最后一个目标 → 自动收官」重复,故默认不给任何 agent,需要时再手动绑。
+var defaultUnbound = map[string]bool{"goal_met": true}
+
+// BuiltinToolSeeds 把各 agent 的内置工具集去重合并成 seed 列表：同名工具（如 list_assets
+// 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则强制绑定为空。
 func BuiltinToolSeeds() []ToolSeed {
 	byAgent := builtinToolsByAgent()
 	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
@@ -76,11 +85,15 @@ func BuiltinToolSeeds() []ToolSeed {
 	out := make([]ToolSeed, 0, len(keys))
 	for _, k := range keys {
 		a := m[k]
+		agents := a.agents
+		if defaultUnbound[k] {
+			agents = []string{} // 入目录、可手动绑，但默认不给任何 agent（存 [] 而非 null，与其它工具一致）
+		}
 		out = append(out, ToolSeed{
 			Key:    k,
 			Desc:   a.tool.Description(),
 			Schema: a.tool.InputSchema(),
-			Agents: a.agents,
+			Agents: agents,
 		})
 	}
 	return out

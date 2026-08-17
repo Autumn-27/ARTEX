@@ -397,6 +397,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedAutoReportFindingBinding()
+	s.unbindGoalMetDefault()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -432,6 +433,23 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 	log.Printf("[tools] 已刷新 orchestration/platform 工具 schema 到代码默认(一次性)")
+}
+
+// unbindGoalMetDefault removes goal_met's default "planner" binding ONCE (guarded by
+// a settings flag), so existing DBs match the new default of NO agent. goal_met bypasses
+// per-goal prove_goal to declare the whole task done — powerful/risky and redundant with
+// the prove_goal→auto-complete path — so it ships unbound; users can re-bind it per agent
+// in the UI. A user's own binding to another agent is untouched (we only strip planner).
+func (s *Server) unbindGoalMetDefault() {
+	const flag = "goal_met_unbind_default_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.RemoveAgentFromTool("planner", "goal_met"); err != nil {
+		log.Printf("[tools] goal_met 解绑 planner 失败: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // seedAutoReportFindingBinding adds "auto" to report_finding's binding ONCE so

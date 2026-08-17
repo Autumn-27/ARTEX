@@ -210,7 +210,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
    - open_intents / running_intents / recent_done_intents——"哪些方向已经有意图在覆盖/已尝试"。每个意图还带 **parents（上游：它派生自哪些事实/意图）和 yields（下游：它产生了哪些事实/发现）**——这就是探索图的**血缘关系**，据此理解"哪些事实来自哪个方向、能否综合成新方向"。recent_facts 里每个事实带 **from_intent**（由哪个意图产生）。
    - sites_without_endpoints / findings——"哪些方向【可能】需要探索"。
    - 只有需要某一片的细节时，才**按需**调 list_assets（pull 模式：可用 q 关键字搜索，可叠加 type/company_id/task_id 过滤，分页 limit/offset；或用 id/ids 直接取）、asset_neighbors、list_findings。资产图全局共享，别默认拉全量。资产中可能包含非本次任务涉及到的资产，所以需要主要出现非本次任务相关的资产时忽略这些资产。
-2. 判目标（核心职责）：graph_overview 的 goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id,evidence_id,reason) 标记 met。**当你用 prove_goal 标记的这一个恰好是最后一个未完成目标时，系统会自动判定整个任务完成、无需你再调 goal_met**。goal_met 仅在你想【绕过逐个 prove_goal、直接从全局判定任务已达成】时才用。
+2. 判目标（核心职责）：graph_overview 的 goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id,evidence_id,reason) 标记 met。**当你用 prove_goal 标记的这一个恰好是最后一个未完成目标时，系统会自动判定整个任务完成**——收官完全由逐个 prove_goal 驱动，你无需、也没有别的“一键完成”手段。
 2.5. **（可选，仅限开局、极轻量）探测理解**：你具备 Bash 等执行能力，它的**唯一正当用途**是——当**图里几乎还没有事实**（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图描述具体时，对目标做**极少量、只读**的探测（如 1–2 次 curl 看首页/指纹），据此产出更精准的**初始意图**。
    ⚠️ **牢记你的身份边界：你是"规划者"，不是"执行者"。你在这里做的一切都只为【生成/说清意图】，绝不是【在 plan 里把活干了】。** 探测的**唯一合法产物是一句更精准的意图描述**——绝不能是漏洞的发现、验证、利用，也不能是端点/目录/参数的枚举结果。任何"我顺手把这个也测了/确认了"的念头都是越界：那是 worker 在 work 阶段该做的事，你只需把它**写成一个意图派下去**。
    **三条硬性边界，务必守住**：
@@ -328,7 +328,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if len(triggers) == 0 {
 		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
 	}
-	input := lead + situational + "\n\n据上面的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。绝不要为了“结束本轮”去调 goal_met——goal_met 会【立即结束整个任务】，只在你确认目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时才调；未达成就用 prove_goal 逐个标记、或什么都不调直接结束。**" +
+	input := lead + situational + "\n\n据上面的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记；未达成就什么都不调、直接结束本轮。**" +
 		renderPlannerTodos(opts.Todos.List())
 	// 有 deadline 夹逼时加硬 ctx 兜底(软预算 + grace),防单轮卡死绕过轮边界软超时。
 	runCtx := ctx
