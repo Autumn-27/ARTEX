@@ -16,7 +16,10 @@ import {
   ShieldAlertIcon,
   WifiOffIcon,
   RotateCwIcon,
+  PaperclipIcon,
+  XIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Transcript } from "@/components/transcript";
 import { TodoPopover } from "@/components/todo-popover";
@@ -33,12 +36,20 @@ import { api, sseUrl } from "@/lib/api";
 import { MOCK } from "@/lib/mock/enabled";
 import type {
   Activity,
+  ChatAttachment,
   InterceptApprovalRow,
   Session,
   SessionStatus,
   TaskNode,
   TokenTotal,
 } from "@/lib/types";
+
+// fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
+function fmtBytes(n: number): string {
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
+  return `${n} B`;
+}
 
 // ── Reliability model (see docs/task-session-history-sse-remediation.md) ──────────
 // The task's activity is NO LONGER one unbounded `allActivity` array replayed from
@@ -284,6 +295,24 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
+  // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
+  const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
+  const [uploading, setUploading] = React.useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  async function pickFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const r = await api.chatUpload("task", taskId, Array.from(files));
+      setAttachments((prev) => [...prev, ...r.attachments]);
+    } catch (e) {
+      toast.error("上传失败：" + (e as Error).message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
   const [sseLive, setSseLive] = React.useState(false);
@@ -795,7 +824,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   function send() {
     const text = input.trim();
-    if (!text || sending) return;
+    const atts = attachments;
+    if ((!text && atts.length === 0) || sending) return;
     const base = [...(store.main?.items ?? []), ...chatExtra];
     const nextSeq = Math.max(0, ...base.map((a) => a.seq)) + 1;
     const userMsg: Activity = {
@@ -804,14 +834,17 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       ts: new Date().toISOString(),
       kind: "user",
       summary: text,
+      // 有附件时把 {text, attachments} 塞进 detail,乐观气泡直接渲染卡片,无需再拉取。
+      detail: atts.length > 0 ? JSON.stringify({ text, attachments: atts }) : undefined,
     };
     // optimistic echo of the human turn only; the agent's steps + final answer
     // stream back live via SSE (worker="mainagent"), so we don't append the reply.
     setChatExtra((prev) => [...prev, userMsg]);
     setInput("");
+    setAttachments([]);
     setSending(true);
     api
-      .chat(text, taskId)
+      .chat(text, taskId, atts.length > 0 ? atts : undefined)
       .catch(() => {
         setChatExtra((prev) => [
           ...prev,
@@ -1013,25 +1046,66 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           </div>
         </ScrollArea>
         {isMain ? (
-          <div className="flex items-center gap-2 border-t p-3">
-            <Input
-              placeholder="给主 Agent 发消息，引导探索方向…"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !mainLive) send();
-              }}
-              disabled={mainLive}
-            />
-            {mainLive ? (
-              <Button size="icon" variant="destructive" onClick={stop} disabled={stopping} title="停止当前执行">
-                {stopping ? <Loader2Icon className="animate-spin" /> : <SquareIcon />}
-              </Button>
-            ) : (
-              <Button size="icon" onClick={send} disabled={!input.trim() || sending}>
-                {sending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}
-              </Button>
+          <div className="border-t p-3">
+            {attachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {attachments.map((a) => (
+                  <div
+                    key={a.path}
+                    className="flex items-center gap-1.5 rounded-md border bg-muted/50 px-2 py-1 text-xs"
+                    title={a.path}
+                  >
+                    <PaperclipIcon className="size-3 shrink-0 text-primary" />
+                    <span className="max-w-[160px] truncate">{a.name}</span>
+                    <span className="text-muted-foreground">{fmtBytes(a.size)}</span>
+                    <button
+                      type="button"
+                      className="ml-0.5 text-muted-foreground hover:text-foreground"
+                      onClick={() => setAttachments((p) => p.filter((x) => x.path !== a.path))}
+                      title="移除"
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
             )}
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => void pickFiles(e.target.files)}
+              />
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={mainLive || uploading}
+                title="上传文件"
+              >
+                {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
+              </Button>
+              <Input
+                placeholder="给主 Agent 发消息，引导探索方向…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !mainLive) send();
+                }}
+                disabled={mainLive}
+              />
+              {mainLive ? (
+                <Button size="icon" variant="destructive" onClick={stop} disabled={stopping} title="停止当前执行">
+                  {stopping ? <Loader2Icon className="animate-spin" /> : <SquareIcon />}
+                </Button>
+              ) : (
+                <Button size="icon" onClick={send} disabled={(!input.trim() && attachments.length === 0) || sending}>
+                  {sending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}
+                </Button>
+              )}
+            </div>
           </div>
         ) : (
           <div className="flex items-center border-t px-4 py-2">

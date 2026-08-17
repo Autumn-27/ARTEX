@@ -167,11 +167,12 @@ func workerArtifactSpec(runDir string) string {
 }
 
 // ensureRunDir builds and creates an agent's working directory under base:
-// <base>/<taskID> for planner/main; <base>/<taskID>/i<intentID> for a worker
-// (intentID<=0 → task dir only). Best-effort mkdir — on failure, writes fail the
-// same way an unwritable CWD would.
+// <base>/tasks/<taskID> for planner/main; <base>/tasks/<taskID>/i<intentID> for a
+// worker (intentID<=0 → task dir only). The "tasks/" segment groups per-task dirs
+// symmetrically with the chat agent's "sessions/<sessionID>". Best-effort mkdir — on
+// failure, writes fail the same way an unwritable CWD would.
 func ensureRunDir(base string, taskID, intentID int64) string {
-	dir := filepath.Join(base, strconv.FormatInt(taskID, 10))
+	dir := filepath.Join(base, "tasks", strconv.FormatInt(taskID, 10))
 	if intentID > 0 {
 		dir = filepath.Join(dir, "i"+strconv.FormatInt(intentID, 10))
 	}
@@ -260,7 +261,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// 意图 + 全局态势改放【启动 user 消息】(见下方 input)，system 只留静态角色正文
 	// (段[A]/[B]/[C] + deferred 块)。与 planner 一致：把易变的运行期数据移出 system，
 	// system 每 session 稳定、更利于缓存；代价是长 run 里这条 user 消息可能被 compaction
-	// 压缩。本次意图的专属工作目录 <workDir>/<taskID>/i<intentID>，引擎侧先建好。
+	// 压缩。本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	system, boundary := deferredSystem(workerSystem(w.proxyAddr, w.workDir, runDir), def)

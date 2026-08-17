@@ -628,6 +628,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("POST /api/chat", s.chat)
+	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
 
 	// --- 管理后台 API (PostgreSQL 数据源; 新版数据库与管理后台方案) ---
@@ -2057,7 +2058,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Message string `json:"message"`
+		Message     string           `json:"message"`
+		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -2065,8 +2067,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
 	// reloads and updates live: the conversation lives in the activity stream as
-	// worker="mainagent" (the per-task activity table, replayed via SSE).
-	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "user", Summary: req.Message})
+	// worker="mainagent" (the per-task activity table, replayed via SSE). With
+	// attachments, the activity's Detail carries {text, attachments} so the transcript
+	// renders attachment cards.
+	s.engine.emitActivity(t, userActivityWithAttachments("mainagent", req.Message, req.Attachments))
 	if ma := s.mainAgentRef(); ma != nil {
 		// Serialize per task: one main-agent run at a time so concurrent messages
 		// don't corrupt the shared exp<id>-main transcript. If a prior turn is still
@@ -2103,7 +2107,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			emit := func(rec db.Activity) { s.engine.emitActivity(t, rec) }
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.reviveTask(t) } // set_goals 新增目标 → 把任务拉回 running
-			if _, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, req.Message, emit, t.Notify, resume, t.NotifyGoal); err != nil && ctx.Err() == nil {
+			// 把上传附件的【绝对路径】清单拼进发给 agent 的消息,它据此用 Read/Bash 打开文件。
+			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
+			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
+			agentMsg := composeAgentMessage(req.Message, req.Attachments, taskDir)
+			if _, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal); err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）"})
 			}
 		}()

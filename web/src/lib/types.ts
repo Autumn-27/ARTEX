@@ -265,6 +265,13 @@ export type ActivityKind =
   | "usage"             // live cumulative token usage (per model turn); not rendered
   | "intercept_request"; // user-approval request from the intercept layer
 
+// ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
+export interface ChatAttachment {
+  name: string;
+  path: string;
+  size: number;
+}
+
 export interface Activity {
   seq: number;
   intent_id?: string;

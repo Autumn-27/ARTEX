@@ -8,6 +8,7 @@ import {
   CrosshairIcon,
   Flag,
   MessageSquare,
+  PaperclipIcon,
   ShieldAlertIcon,
   Terminal,
   UserIcon,
@@ -445,11 +446,40 @@ function MessageBlock({
 // it (intent=true) — same bubble, but a target icon instead of the human avatar.
 // summary is a truncated first line, so the full message is pulled from the detail
 // and shown in full (bubble is whitespace-pre-wrap, so long/multi-line text wraps).
+// fmtBytes renders a human file size for attachment chips.
+function fmtBytes(n: number): string {
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+type MsgAttachment = { name: string; path: string; size: number };
+
+// parseUserBody splits a user turn's body into text + attachments. The backend stores
+// Detail as JSON {text, attachments} when files were uploaded, else plain text — so we
+// parse defensively and fall back to treating the whole body as text.
+function parseUserBody(body: string): { text: string; attachments: MsgAttachment[] } {
+  if (body.startsWith("{")) {
+    try {
+      const p = JSON.parse(body);
+      if (p && Array.isArray(p.attachments)) {
+        return { text: typeof p.text === "string" ? p.text : "", attachments: p.attachments };
+      }
+    } catch {
+      /* plain text that merely starts with "{" */
+    }
+  }
+  return { text: body, attachments: [] };
+}
+
 function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean; getDetail: (seq: number) => Promise<string> }) {
   const Icon = intent ? CrosshairIcon : UserIcon;
   const [ref, inView] = useInView();
-  const [full, setFull] = React.useState<string | null>(null);
+  // Optimistic echoes carry their detail inline; persisted rows lazy-load it on scroll.
+  const inline = step.detail && step.detail.length > 0 ? step.detail : null;
+  const [full, setFull] = React.useState<string | null>(inline);
   React.useEffect(() => {
+    if (inline) return; // already have the body (optimistic echo)
     if (!inView) return; // fetch the full message only when the bubble nears view
     let live = true;
     getDetail(step.seq)
@@ -462,11 +492,31 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
     return () => {
       live = false;
     };
-  }, [inView, step.seq, getDetail, step.summary]);
+  }, [inView, step.seq, getDetail, step.summary, inline]);
+  const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
     <div ref={ref} className="mt-3 mb-2 flex justify-end gap-2">
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground">
-        {full ?? step.summary}
+      <div className="flex max-w-[85%] flex-col items-end gap-1.5">
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-1.5">
+            {attachments.map((a) => (
+              <div
+                key={a.path}
+                className="flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
+                title={a.path}
+              >
+                <PaperclipIcon className="size-3 shrink-0 text-primary" />
+                <span className="max-w-[180px] truncate font-medium">{a.name}</span>
+                <span className="shrink-0 text-muted-foreground">{fmtBytes(a.size)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {text && (
+          <div className="whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground">
+            {text}
+          </div>
+        )}
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
         <Icon className="size-3.5 text-primary" />
