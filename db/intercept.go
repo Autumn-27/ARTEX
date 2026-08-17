@@ -132,6 +132,31 @@ func (d *DB) DecideInterceptPending(id int64, status string) error {
 	return err
 }
 
+// CreateDecidedIntercept inserts an intercept_pending row ALREADY in a final state
+// (status = 'allowed' | 'denied'), decided_at stamped now. Used to log allow/deny
+// rule matches for observability — they don't block and need no user action, so unlike
+// CreateInterceptPending (which starts 'pending') this records the outcome directly.
+func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status string) (int64, error) {
+	raw := json.RawMessage(input)
+	if len(raw) == 0 {
+		raw = json.RawMessage("{}")
+	}
+	var convIDPtr *int64
+	if convID != 0 {
+		convIDPtr = &convID
+	}
+	var taskIDPtr *string
+	if taskID != "" {
+		taskIDPtr = &taskID
+	}
+	var id int64
+	err := d.QueryRow(`
+INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, decided_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id`,
+		ruleID, convIDPtr, taskIDPtr, agentName, toolName, raw, status).Scan(&id)
+	return id, err
+}
+
 const interceptPendingCols = `id, rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, decided_at, created_at`
 
 func scanInterceptPending(s interface{ Scan(...any) error }, p *InterceptPending) error {

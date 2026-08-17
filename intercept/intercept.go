@@ -329,6 +329,17 @@ func defaultMessage(action, name string) string {
 	}
 }
 
+// Log records an allow/deny rule match into intercept_pending as an ALREADY-decided
+// row (status = "allowed" | "denied"), for observability. Unlike HandleAsk it does NOT
+// block and needs no user action — it just makes every rule hit visible on the history
+// page (GET /api/intercept/history) and the task's intercept list. Best-effort: a DB
+// error is swallowed so logging never changes the tool call's outcome. The pending list
+// (status='pending') is unaffected, so it still shows only asks awaiting a decision.
+func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolName string, input []byte, status string) {
+	taskID, agentName := taskInfoFromCtx(ctx)
+	_, _ = i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status)
+}
+
 // HandleAsk creates a pending approval record and blocks until the user decides
 // (via /api/intercept/pending/{id}/decide) or the per-rule timeout elapses.
 // Returns true if the user approved.

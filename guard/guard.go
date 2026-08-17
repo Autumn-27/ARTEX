@@ -93,8 +93,12 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	}
 	switch dec.Action {
 	case "deny":
+		// 观测:deny 命中不阻塞审批,直接记一条 denied（历史/任务拦截页可见）。
+		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
 		return g.block(ev.ToolName, dec.Message, "")
 	case "allow":
+		// 观测:显式 allow 规则命中记一条 allowed（无规则命中的放行不记，避免全量刷屏）。
+		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
 		return hook.Result{}
 	case "ask":
 		// If the worker context is already cancelled (task stopped / killed), block
