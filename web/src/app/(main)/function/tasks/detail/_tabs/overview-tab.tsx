@@ -6,6 +6,7 @@ import {
   AlertTriangleIcon,
   BugIcon,
   ClockIcon,
+  RefreshCwIcon,
   ShieldCheckIcon,
   TargetIcon,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
@@ -59,6 +61,46 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     pct: number | null;
     by_type: { type: string; total: number; tested: number }[];
   } | null>(null);
+  // 正在重跑的意图 id（含 "__all__" 表示批量），用于禁用按钮 + 转圈。
+  const [rerunning, setRerunning] = React.useState<Set<string>>(new Set());
+
+  const markRerun = (key: string, on: boolean) =>
+    setRerunning((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+
+  // 重跑单条：置回 open（乐观更新本地 state，3s 轮询兜底），worker 会重新认领、从头再跑。
+  const rerunOne = async (id: string) => {
+    markRerun(id, true);
+    try {
+      await api.rerunIntent(taskId, id);
+      setIntents((prev) =>
+        prev.map((i) => (i.id === id ? { ...i, state: "open" } : i)),
+      );
+    } catch {
+      // 失败忽略：下次轮询仍显示 blocked，用户可再点
+    } finally {
+      markRerun(id, false);
+    }
+  };
+
+  // 批量重跑本任务全部 blocked。
+  const rerunAll = async () => {
+    markRerun("__all__", true);
+    try {
+      await api.rerunBlocked(taskId);
+      setIntents((prev) =>
+        prev.map((i) => (i.state === "blocked" ? { ...i, state: "open" } : i)),
+      );
+    } catch {
+      // ignore
+    } finally {
+      markRerun("__all__", false);
+    }
+  };
 
   React.useEffect(() => {
     let cancelled = false;
@@ -265,6 +307,57 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </CardContent>
         </Card>
       </div>
+
+      {/* Blocked intents — 出错/被拦(如 LLM 网络问题)的意图，可一键重跑：置回 open，
+          worker 会重新认领、从头再跑（已写回图谱的数据保留）；任务若已终态/暂停会自动复活。 */}
+      {blocked.length > 0 && (
+        <Card className="border-red-500/30">
+          <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <AlertTriangleIcon className="size-4 text-red-500" /> 被拦/出错意图
+              <span className="text-xs font-normal text-muted-foreground">
+                （共 {blocked.length} 条，可重跑）
+              </span>
+            </CardTitle>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={rerunning.has("__all__")}
+              onClick={() => void rerunAll()}
+            >
+              <RefreshCwIcon
+                className={`size-3.5 ${rerunning.has("__all__") ? "animate-spin" : ""}`}
+              />
+              全部重跑
+            </Button>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {blocked.slice(0, 20).map((i) => (
+              <div key={i.id} className="flex items-center gap-2 text-sm">
+                <StatusBadge domain="intent" value={i.state} />
+                <span className="min-w-0 flex-1 truncate">{i.payload}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 shrink-0 px-2 text-xs"
+                  disabled={rerunning.has(i.id)}
+                  onClick={() => void rerunOne(i.id)}
+                >
+                  <RefreshCwIcon
+                    className={`size-3 ${rerunning.has(i.id) ? "animate-spin" : ""}`}
+                  />
+                  重跑
+                </Button>
+              </div>
+            ))}
+            {blocked.length > 20 && (
+              <p className="text-xs text-muted-foreground">
+                仅显示前 20 条，点「全部重跑」处理剩余 {blocked.length - 20} 条。
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">

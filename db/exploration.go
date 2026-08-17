@@ -220,6 +220,35 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 	return n, nil
 }
 
+// ReopenIntent flips ONE not-successfully-finished intent (blocked/exhausted/stopped)
+// back to 'open' so a worker re-claims and re-runs it from scratch (graph writes it
+// already produced stay). done/open/running are left untouched. Returns whether a row
+// changed (false = intent absent or not in a rerunnable state). Used by the "重跑" button.
+func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state='open', completed_at=NULL
+WHERE id=$1 AND exploration_id=$2 AND kind='intent'
+  AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ReopenBlockedIntents flips EVERY 'blocked' intent in this exploration back to 'open'
+// (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
+// number reopened. Workers re-run each from scratch; kept graph writes remain.
+func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	// terminal states stamp completed_at; reopening (back to open/running) clears it.
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"

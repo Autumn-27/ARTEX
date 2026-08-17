@@ -46,21 +46,21 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	}()
 }
 
-// resumeTaskForGoal 让「主 agent 通过 set_goals 新增目标」的任务能继续跑:把终态
-// (done/failed/timeout)拉回 running、解除暂停,并(重)启动引擎循环 + 唤醒 planner。
-// 已在 running 且未暂停的任务:只剩 Run 里的一次 Notify,近乎无副作用。
+// reviveTask 让一个已停下的任务重新跑起来:把终态(done/failed/timeout)拉回 running、
+// 解除暂停,并(重)启动引擎循环 + 唤醒。已在 running 且未暂停的任务:只剩 Run 里的一次
+// Notify,近乎无副作用。用于「主 agent set_goals 新增目标」和「重跑 blocked 意图」两处。
 //
-// 为什么必须显式复活:planner 循环的终态门(engine.go)会吞掉普通 notify——光新增 goal
-// 节点 + Notify 唤不醒已判完成的任务;重启后终态任务的 goroutine 也可能已不在,故还要 Run。
-func (s *Server) resumeTaskForGoal(t *Task) {
+// 为什么必须显式复活:planner/worker 循环的终态门(engine.go)会吞掉普通 notify——光改
+// 图 + Notify 唤不醒已判完成的任务;重启后终态任务的 goroutine 也可能已不在,故还要 Run。
+func (s *Server) reviveTask(t *Task) {
 	if t == nil {
 		return
 	}
 	// 终态 → 拉回 running(SetTaskStatus 会清 completed_at 并同步内存 handle 的 Status,
-	// 使 planner 循环的终态门放行)。
+	// 使 planner/worker 循环的终态门放行)。
 	if isTerminalStatus(t.Status) {
 		if err := s.m.SetTaskStatus(t.ID, "running"); err != nil {
-			log.Printf("[chat] task %s set_goals 复活置 running 失败: %v", t.ID, err)
+			log.Printf("[revive] task %s 置 running 失败: %v", t.ID, err)
 		}
 	}
 	// 确保引擎循环存活:已 started 只会 Notify;未 started(重启后未恢复的终态任务)则重起循环。
@@ -70,7 +70,7 @@ func (s *Server) resumeTaskForGoal(t *Task) {
 		s.engine.Resume(t)
 		t.Paused = false
 		if err := s.m.SetTaskPaused(t.ID, false); err != nil {
-			log.Printf("[chat] task %s set_goals 复活解除暂停失败: %v", t.ID, err)
+			log.Printf("[revive] task %s 解除暂停失败: %v", t.ID, err)
 		}
 	}
 }
