@@ -32,14 +32,14 @@ var wrapupDefaults = map[string]string{
 }
 
 // wrapupTurnDefaults: 各 agent 收尾阶段【自身】的轮数预算内置默认(可被后台 >0 覆盖)。
-// worker 写回可能占几轮(record_fact/insert_assets)故给 4;其余给 5。未命中走 genericWrapupTurns。
+// 均给 10 轮,保证收尾阶段有足够步数落库。未命中走 genericWrapupTurns。
 var wrapupTurnDefaults = map[string]int{
-	"worker":    4,
-	"planner":   5,
-	"mainagent": 5,
+	"worker":    10,
+	"planner":   10,
+	"mainagent": 10,
 }
 
-const genericWrapupTurns = 5
+const genericWrapupTurns = 10
 
 const plannerWrapUpDefault = "你本轮规划的步数即将用尽——注意只是【这一轮】结束,系统之后仍会随态势变化再次唤醒你继续规划,并非任务终止,你无需在此收束整个规划。请把本轮已经想清楚的结论落地、别让这一轮白跑,但也【不要为了收尾硬凑意图】(本轮 0 个意图仍是完全正常的结果)：(1) 若已判断出【当前就该派发】的探索方向,用一次 add_intent 批量提交(想好的别憋着不发);(2) 对已被某发现/事实证明达成的目标,调 prove_goal 标记 met(别漏判);(3) 若识别出需要分步的串行利用链,用 TodoWrite 记下,便于下次唤醒接着派。做完直接结束本轮,无需输出总结文本。"
 

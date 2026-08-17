@@ -104,7 +104,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		MaxTurns:           m.maxTurns,                 // 0 = unlimited (configurable in agent management)
 		Compaction:         compactionConfig(m.window), // long chats stay within the window
 		Todos:              actool.NewTodoStore(),      // 会话级临时待办（TodoWrite），纯规划用，退出即丢
-		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 5 轮)。
+		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement: wrapupSettlement("mainagent", nil),
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
