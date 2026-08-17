@@ -72,43 +72,30 @@ type GoalSpec struct {
 //
 // as + taskID, when non-nil/positive, wire the add_task_scope tool so the
 // decomposer can register the explicit asset scope it extracts from the goal.
-func DecomposeGoals(ctx context.Context, c Config, dataDir, goalText, desc string, as *db.AssetStore, taskID int64, emit func(db.Activity)) []GoalSpec {
+//
+// ts is the task's exploration store: set_goals writes the decomposed goal nodes
+// straight into it (the same managed tool the main agent uses to add goals at
+// runtime). The returned specs are read back from the store so callers can emit
+// per-goal activity and detect the "LLM produced nothing" case for their fallback.
+func DecomposeGoals(ctx context.Context, c Config, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, emit func(db.Activity)) []GoalSpec {
 	prov, err := c.NewProvider()
 	if err != nil {
 		return nil
 	}
-	var out struct {
-		Goals []GoalSpec `json:"goals"`
-	}
-	captured := false
-	submitTool := actool.Build(actool.Spec{
-		Name:        "set_goals",
-		Description: "提交拆分后的目标列表。",
-		Schema: map[string]any{"type": "object", "properties": map[string]any{
-			"goals": map[string]any{"type": "array", "items": map[string]any{
-				"type": "object", "properties": map[string]any{
-					"text":      map[string]any{"type": "string", "description": "一个独立可验证的目标"},
-					"vulnclass": map[string]any{"type": "string", "description": "对应漏洞类(若明确)，如 SQLi/IDOR；业务逻辑目标可留空"},
-				}, "required": []string{"text"},
-			}},
-		}, "required": []string{"goals"}},
-		Permissions: func(context.Context, json.RawMessage, acperm.Context) acperm.Decision { return acperm.Allowed() },
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
-			_ = json.Unmarshal(in, &out)
-			captured = true
-			return actool.Text("ok"), nil
-		},
-	})
+	// worker="goals" tags the goal nodes' provenance; ts/taskID let set_goals link
+	// each goal under the task root. This is the catalog's real set_goals tool, so a
+	// web-edited description/schema on it applies here too.
+	tsx := &ToolSet{as: as, ts: ts, taskID: taskID, worker: "goals"}
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
 	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
-	tools := []actool.CoreTool{submitTool}
+	tools := []actool.CoreTool{tsx.setGoals()}
 	// Wire add_task_scope only when we have a real asset store + task to write to.
 	// The scope-extraction tail is appended in lockstep so the prompt never asks for
 	// a tool that isn't present.
 	if as != nil && taskID > 0 {
-		tools = append(tools, (&ToolSet{as: as, taskID: taskID}).addTaskScope())
+		tools = append(tools, tsx.addTaskScope())
 		sys += goalsScopeTail
 	}
 	userMsg := "任务目标：\n" + goalText
@@ -131,8 +118,22 @@ func DecomposeGoals(ctx context.Context, c Config, dataDir, goalText, desc strin
 		DisableBackgroundTasks: true,
 		MaxTurns:               6,
 	}, userMsg, captureEmit)
-	if !captured {
+	// set_goals persisted the goals directly; read them back so the caller sees what
+	// was written (empty slice ⇒ the LLM produced nothing ⇒ caller falls back).
+	if ts == nil {
 		return nil
 	}
-	return out.Goals
+	nodes, _ := ts.ListByKind(db.KindGoal, 10000)
+	var out []GoalSpec
+	for _, n := range nodes {
+		var p struct {
+			Text      string `json:"text"`
+			VulnClass string `json:"vulnclass"`
+		}
+		_ = json.Unmarshal(n.Payload, &p)
+		if strings.TrimSpace(p.Text) != "" {
+			out = append(out, GoalSpec{Text: p.Text, VulnClass: p.VulnClass})
+		}
+	}
+	return out
 }

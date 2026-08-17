@@ -46,6 +46,35 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	}()
 }
 
+// resumeTaskForGoal 让「主 agent 通过 set_goals 新增目标」的任务能继续跑:把终态
+// (done/failed/timeout)拉回 running、解除暂停,并(重)启动引擎循环 + 唤醒 planner。
+// 已在 running 且未暂停的任务:只剩 Run 里的一次 Notify,近乎无副作用。
+//
+// 为什么必须显式复活:planner 循环的终态门(engine.go)会吞掉普通 notify——光新增 goal
+// 节点 + Notify 唤不醒已判完成的任务;重启后终态任务的 goroutine 也可能已不在,故还要 Run。
+func (s *Server) resumeTaskForGoal(t *Task) {
+	if t == nil {
+		return
+	}
+	// 终态 → 拉回 running(SetTaskStatus 会清 completed_at 并同步内存 handle 的 Status,
+	// 使 planner 循环的终态门放行)。
+	if isTerminalStatus(t.Status) {
+		if err := s.m.SetTaskStatus(t.ID, "running"); err != nil {
+			log.Printf("[chat] task %s set_goals 复活置 running 失败: %v", t.ID, err)
+		}
+	}
+	// 确保引擎循环存活:已 started 只会 Notify;未 started(重启后未恢复的终态任务)则重起循环。
+	s.engine.Run(s.ctx, t)
+	// 暂停中 → 解除暂停(清引擎内存态 + Notify),并持久化 paused=false(存活过重启)。
+	if t.Paused || s.engine.IsPaused(t.ID) {
+		s.engine.Resume(t)
+		t.Paused = false
+		if err := s.m.SetTaskPaused(t.ID, false); err != nil {
+			log.Printf("[chat] task %s set_goals 复活解除暂停失败: %v", t.ID, err)
+		}
+	}
+}
+
 // createGoals materializes the goal node(s) under the task root (rel objective).
 // Decomposition is done ENTIRELY by the LLM (the project requires an LLM). There is
 // no rule-based fallback splitter — it only ever produced garbage (shredded URLs,
@@ -65,29 +94,27 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 			as = s.m.Assets()
 		}
 		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-		for _, g := range agent.DecomposeGoals(ctx, cfg, s.m.dir, t.Goal, t.Description, as, taskID, emit) {
+		// DecomposeGoals persists each decomposed goal via the set_goals tool straight
+		// into t.Store; it returns the specs it wrote so we can emit activity + spot the
+		// empty (LLM error / no provider) case below. No write-back needed here anymore.
+		for _, g := range agent.DecomposeGoals(ctx, cfg, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, emit) {
 			if strings.TrimSpace(g.Text) != "" {
 				specs = append(specs, goalSpec{Text: g.Text, VulnClass: g.VulnClass})
 			}
 		}
 	}
 	if len(specs) == 0 {
-		// No rule-based splitting: use the raw task goal verbatim as a single goal
-		// (only reached on an LLM error — normal runs get real decomposed goals).
+		// No decomposed goals (LLM error / no provider): use the raw task goal verbatim
+		// as a single goal so the task still has something to judge against. This is the
+		// only path that writes here — decomposed goals are already persisted by the tool.
 		if g := strings.TrimSpace(t.Goal); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
+			origin, _ := t.Store.OriginFactID()
+			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g}, 0, "open", "system", nil)
+			if origin > 0 && id > 0 {
+				_ = t.Store.Link(origin, db.RelSpawns, id) // goal descends from the task root (origin fact)
+			}
 			specs = []goalSpec{{Text: g}}
-		}
-	}
-	origin, _ := t.Store.OriginFactID()
-	for _, g := range specs {
-		payload := map[string]any{"text": g.Text}
-		if g.VulnClass != "" {
-			payload["vulnclass"] = g.VulnClass
-		}
-		id, _ := t.Store.AddNode(db.KindGoal, payload, 0, "open", "system", nil)
-		if origin > 0 && id > 0 {
-			_ = t.Store.Link(origin, db.RelSpawns, id) // goals descend from the task root (origin fact)
 		}
 	}
 	return specs

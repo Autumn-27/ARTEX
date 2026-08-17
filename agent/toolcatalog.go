@@ -37,6 +37,9 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 		"mainagent": ts.MainAgentTools(),
 		"planner":   ts.PlannerTools(),
 		"worker":    ts.WorkerTools(),
+		// goals（目标拆解器）默认绑 set_goals：它靠这个工具把拆出的目标写进图。
+		// 与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。
+		"goals": {ts.setGoals()},
 		// auto 默认绑漏洞上报 + 资产管理工具，其他域工具可在 UI 按需勾选。
 		// 新库由此 seed 写入；老库由 seedAutoDefaultBindings 迁移。
 		"auto": {ts.addFinding(), ts.insertAssets(), ts.addCompanyScope(), ts.listAssets(), ts.listCompanies()},
@@ -50,7 +53,7 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 // list_assets 三者都有）合成一条，Agents 取并集。顺序稳定（mainagent→planner→worker）。
 func BuiltinToolSeeds() []ToolSeed {
 	byAgent := builtinToolsByAgent()
-	order := []string{"mainagent", "planner", "worker", "auto", "pentest"}
+	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
 
 	type acc struct {
 		tool   actool.CoreTool

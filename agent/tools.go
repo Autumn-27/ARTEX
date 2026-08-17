@@ -77,7 +77,17 @@ type ToolSet struct {
 	// carrying (intentID, summary) so the round can spell out which intent found what.
 	// Wired for workers; nil elsewhere → falls back to notify (bare wake).
 	notifyFinding func(intentID int64, summary string)
+	// resumeTask, if set, revives the task after a graph change that should make a
+	// stopped task run again (currently: set_goals adds a goal). It flips a terminal/
+	// paused task back to running and (re)starts the engine loops — a plain notify()
+	// can't, because the planner's terminal gate swallows wakes. Wired ONLY for the
+	// main agent (human steering); nil for the goals decomposer and workers.
+	resumeTask func()
 }
+
+// SetResumeTask wires the task-revive callback (see ToolSet.resumeTask). Set only by
+// the main-agent chat, so runtime-added goals can pull a finished task back to running.
+func (t *ToolSet) SetResumeTask(fn func()) { t.resumeTask = fn }
 
 // SetNotify wires the planner-wake callback (see ToolSet.notify). Set by callers
 // that hold the task handle (main-agent chat, cross-task orchestration).
@@ -797,6 +807,99 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 		t.notify() // wake the planner so the new hint is read promptly (debounced)
 	}
 	return id, err
+}
+
+type goalItem struct {
+	Text      string `json:"text"`
+	VulnClass string `json:"vulnclass"`
+}
+
+// addOneGoal 挂一条 goal 节点(open)到探索图:连到任务根(origin fact,rel spawns),
+// 并唤醒 planner(运行时新增的目标要尽快被判定)。origin 取 t.worker(缺省 system):
+// goals 拆解器写入的记 "goals"、主 agent 运行时新增的记 "human"。
+func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
+	text := strings.TrimSpace(it.Text)
+	if text == "" {
+		return 0, fmt.Errorf("text 不能为空")
+	}
+	payload := map[string]any{"text": text}
+	if vc := strings.TrimSpace(it.VulnClass); vc != "" {
+		payload["vulnclass"] = vc
+	}
+	origin := t.worker
+	if origin == "" {
+		origin = "system"
+	}
+	id, err := t.ts.AddNode(db.KindGoal, payload, 0, "open", origin, nil)
+	if err != nil {
+		return 0, err
+	}
+	if of, _ := t.ts.OriginFactID(); of > 0 && id > 0 {
+		_ = t.ts.Link(of, db.RelSpawns, id) // goals descend from the task root (origin fact)
+	}
+	if t.notify != nil {
+		t.notify() // wake the planner so a runtime-added goal is judged promptly (debounced)
+	}
+	return id, nil
+}
+
+// setGoals 给【本任务】新增探索目标(goal 节点)。既是目标拆解器的提交工具,也是主
+// agent 运行时补目标的工具——同一个受管工具,可在 web 端改描述/schema、按 agent 绑定。
+func (t *ToolSet) setGoals() actool.CoreTool {
+	return writeTool("set_goals",
+		"给【本任务】新增探索目标(goal)。目标=最终可交付/可核验的结果,不是攻击步骤或侦察动作。\n"+
+			"★优先批量:多个目标放进 goals 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 goals 直接给顶层 text。\n"+
+			"vulnclass 可选:对应漏洞类(如 SQLi/IDOR),业务逻辑类目标留空。目标是否达成由系统判定标记 met,本工具只负责新增。",
+		obj(map[string]any{
+			"goals":     map[string]any{"type": "array", "description": "【优先用这个】要新增的目标数组,按顺序处理。每个元素:text(必填,一个独立可验证的最终目标)+ vulnclass(可选)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"text":      str("[单条] 一个独立可验证的最终目标"),
+			"vulnclass": str("[单条] 对应漏洞类(若明确),如 SQLi/IDOR;业务逻辑目标可留空"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("set_goals 未启用: ExplorationStore 未初始化"), nil
+			}
+			var a struct {
+				Goals    []goalItem `json:"goals"`
+				goalItem            // 单条模式:顶层 text/vulnclass
+			}
+			_ = json.Unmarshal(in, &a)
+			batch := len(a.Goals) > 0
+			items := a.Goals
+			if !batch {
+				items = []goalItem{a.goalItem}
+			}
+
+			ids := make([]int64, len(items))
+			errs := map[string]string{}
+			added := 0
+			for i, it := range items {
+				id, err := t.addOneGoal(it)
+				if err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
+				ids[i] = id
+				added++
+			}
+			// 主 agent 运行时新增目标 → 把已完成/暂停的任务拉回 running 继续跑(终态门会吞
+			// 掉普通 notify,必须显式复活)。仅 mainagent 接了此回调;拆解器/worker 为 nil。
+			if added > 0 && t.resumeTask != nil {
+				t.resumeTask()
+			}
+
+			if !batch { // 单条:保持原返回
+				if e, bad := errs["0"]; bad {
+					return actool.Errorf(e), nil
+				}
+				return actool.Text(fmt.Sprintf("goal added: %d", ids[0])), nil
+			}
+			out := map[string]any{"ids": ids}
+			if len(errs) > 0 {
+				out["errors"] = errs
+			}
+			return jsonResult(out)
+		})
 }
 
 func (t *ToolSet) addHint() actool.CoreTool {
