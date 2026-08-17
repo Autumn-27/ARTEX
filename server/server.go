@@ -2053,7 +2053,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			emit := func(rec db.Activity) { s.engine.emitActivity(t, rec) }
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.resumeTaskForGoal(t) } // set_goals 新增目标 → 把任务拉回 running
-			if _, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, req.Message, emit, t.Notify, resume); err != nil && ctx.Err() == nil {
+			if _, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, req.Message, emit, t.Notify, resume, t.NotifyGoal); err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）"})
 			}
 		}()

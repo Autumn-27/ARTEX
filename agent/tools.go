@@ -83,7 +83,18 @@ type ToolSet struct {
 	// can't, because the planner's terminal gate swallows wakes. Wired ONLY for the
 	// main agent (human steering); nil for the goals decomposer and workers.
 	resumeTask func()
+	// notifyGoal, if set, wakes the planner AND records ONE "人新增了 N 个目标：…" trigger
+	// for a whole set_goals call (batch-aware — one call, one trigger, not one per goal)
+	// so the next round spells out the added goals (instead of the planner having to
+	// spot new open goals in the overview). Wired ONLY for the main agent; nil for the
+	// goals decomposer (round-0 has no running planner to inform) and workers → those
+	// fall back to the bare notify.
+	notifyGoal func(texts []string)
 }
+
+// SetNotifyGoal wires the goal-add trigger callback (see ToolSet.notifyGoal). Set only
+// by the main-agent chat, so runtime-added goals are announced to the planner by name.
+func (t *ToolSet) SetNotifyGoal(fn func([]string)) { t.notifyGoal = fn }
 
 // SetResumeTask wires the task-revive callback (see ToolSet.resumeTask). Set only by
 // the main-agent chat, so runtime-added goals can pull a finished task back to running.
@@ -814,9 +825,9 @@ type goalItem struct {
 	VulnClass string `json:"vulnclass"`
 }
 
-// addOneGoal 挂一条 goal 节点(open)到探索图:连到任务根(origin fact,rel spawns),
-// 并唤醒 planner(运行时新增的目标要尽快被判定)。origin 取 t.worker(缺省 system):
-// goals 拆解器写入的记 "goals"、主 agent 运行时新增的记 "human"。
+// addOneGoal 挂一条 goal 节点(open)到探索图:连到任务根(origin fact,rel spawns)。
+// origin 取 t.worker(缺省 system):goals 拆解器写入的记 "goals"、主 agent 运行时记
+// "human"。唤醒 planner 由 setGoals 在整批写完后统一做(见下),这里只负责落库。
 func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 	text := strings.TrimSpace(it.Text)
 	if text == "" {
@@ -836,9 +847,6 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 	}
 	if of, _ := t.ts.OriginFactID(); of > 0 && id > 0 {
 		_ = t.ts.Link(of, db.RelSpawns, id) // goals descend from the task root (origin fact)
-	}
-	if t.notify != nil {
-		t.notify() // wake the planner so a runtime-added goal is judged promptly (debounced)
 	}
 	return id, nil
 }
@@ -872,7 +880,7 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
-			added := 0
+			var addedTexts []string
 			for i, it := range items {
 				id, err := t.addOneGoal(it)
 				if err != nil {
@@ -880,12 +888,23 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
-				added++
+				addedTexts = append(addedTexts, strings.TrimSpace(it.Text))
 			}
-			// 主 agent 运行时新增目标 → 把已完成/暂停的任务拉回 running 继续跑(终态门会吞
-			// 掉普通 notify,必须显式复活)。仅 mainagent 接了此回调;拆解器/worker 为 nil。
-			if added > 0 && t.resumeTask != nil {
-				t.resumeTask()
+			if len(addedTexts) > 0 {
+				// 唤醒 planner(整批一次)。优先 notifyGoal:一次 set_goals 记一条「人新增了
+				// N 个目标:…」触发,不逐条刷屏;拆解器/worker 无此回调 → 退回纯 notify(拆解器
+				// round-0 连 notify 也没接,即无操作,因为此时 planner 尚未启动)。
+				switch {
+				case t.notifyGoal != nil:
+					t.notifyGoal(addedTexts)
+				case t.notify != nil:
+					t.notify()
+				}
+				// 主 agent 运行时新增目标 → 把已完成/暂停的任务拉回 running 继续跑(终态门会
+				// 吞掉普通 notify,必须显式复活)。仅 mainagent 接了此回调;拆解器/worker 为 nil。
+				if t.resumeTask != nil {
+					t.resumeTask()
+				}
 			}
 
 			if !batch { // 单条:保持原返回

@@ -96,10 +96,13 @@ func renderPlannerTodos(items []actool.Todo) string {
 // overview. Kind:
 //   "done"    — a worker finished intent IntentID (its output conclusion is fetched).
 //   "finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
+//   "goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
+//               single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
 type TriggerEvent struct {
 	Kind     string
 	IntentID int64
 	Detail   string
+	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
 }
 
 // renderTriggers spells out the change(s) that fired this round: for a finished
@@ -113,12 +116,17 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 	var b strings.Builder
 	b.WriteString("\n\n【本次触发本轮的实际变动（先看这里，再决定是否补方向）】：")
 	for _, ev := range evs {
-		sum := intentSummary(ts, ev.IntentID)
 		switch ev.Kind {
+		case "goal":
+			if len(ev.Goals) == 1 {
+				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了一个目标：%s —— 新的待达成目标，请据此补充探索方向（若尚无对应意图）。", ev.Goals[0]))
+			} else {
+				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了 %d 个目标：%s —— 均为新的待达成目标，请逐一为尚无对应意图的目标补充探索方向。", len(ev.Goals), strings.Join(ev.Goals, "；")))
+			}
 		case "finding":
-			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, sum, ev.Detail))
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		default: // "done"
-			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, sum, workerOutput(ts, ev.IntentID)))
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), workerOutput(ts, ev.IntentID)))
 		}
 	}
 	b.WriteString("\n（完整细节可 node_detail / get_worker_output / list_findings 再查。）")

@@ -718,6 +718,22 @@ func (t *Task) NotifyFinding(intentID int64, summary string) {
 	t.Notify()
 }
 
+// NotifyGoal records that one OR MORE goals were added in a single set_goals call —
+// by the human via the main agent — then wakes the planner, so the next round spells
+// out "人新增了 N 个目标：…" instead of the planner having to spot new open goals in
+// the overview. One call → one trigger event (set_goals 的一次批量算一条，不逐条刷屏).
+// The event survives an early-returning terminal round (drain happens after the gate),
+// so a set_goals that revives a done task still surfaces it once the task is running.
+func (t *Task) NotifyGoal(texts []string) {
+	if len(texts) == 0 {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal", Goals: texts})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
 // drainTriggers returns and clears the trigger events accumulated since the last round.
 func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.trigMu.Lock()
