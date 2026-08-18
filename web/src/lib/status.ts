@@ -63,6 +63,13 @@ const severity: Record<string, StatusMeta> = {
   low: { label: "低危", tone: "slate" },
 };
 
+const finding: Record<string, StatusMeta> = {
+  pending: { label: "待处理", tone: "amber" },
+  false_positive: { label: "误报", tone: "slate" },
+  ignored: { label: "忽略", tone: "neutral" },
+  resolved: { label: "已处理", tone: "green" },
+};
+
 const engine: Record<string, StatusMeta> = {
   exploring: { label: "探索中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
@@ -91,6 +98,7 @@ const maps = {
   intent,
   task,
   severity,
+  finding,
   engine,
   goal,
   audit,

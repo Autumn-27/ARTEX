@@ -577,8 +577,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
-	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)      // 重跑单条 blocked/exhausted/stopped 意图
-	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked)   // 批量重跑本任务全部 blocked 意图
+	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)    // 重跑单条 blocked/exhausted/stopped 意图
+	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked) // 批量重跑本任务全部 blocked 意图
 	mux.HandleFunc("POST /api/active", s.setActive)
 
 	mux.HandleFunc("GET /api/llm", s.getLLM)
@@ -601,6 +601,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
+	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.setFindingStatus)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
@@ -1064,12 +1065,12 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskReq struct {
-	Description     string `json:"description"`
-	Goal            string `json:"goal"`
-	LLMProfileID    *int64 `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	TimeoutSeconds  int    `json:"timeout_seconds"`               // 任务级超时(秒);0/省略=不限时
-	PlanHeartbeatSeconds int `json:"plan_heartbeat_seconds"`     // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
-	SeedFirstIntent *bool  `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	Description          string `json:"description"`
+	Goal                 string `json:"goal"`
+	LLMProfileID         *int64 `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	TimeoutSeconds       int    `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int    `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
+	SeedFirstIntent      *bool  `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1351,9 +1352,31 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 	taskParam := r.URL.Query().Get("task")
 	if taskParam == "" {
 		fs, _ := s.m.pg.ListFindings(500)
+		// Resolve every anchored asset in one query so each finding can carry a
+		// display label for its assets.
+		seen := map[int64]bool{}
+		var ids []int64
+		for _, f := range fs {
+			for _, aid := range f.AssetIDs {
+				if aid > 0 && !seen[aid] {
+					seen[aid] = true
+					ids = append(ids, aid)
+				}
+			}
+		}
+		assets := map[int64]*db.Asset{}
+		if len(ids) > 0 {
+			list, err := s.m.pg.Assets().GetByIDs(ids)
+			if err != nil {
+				log.Printf("[findings] resolve assets: %v", err)
+			}
+			for _, a := range list {
+				assets[a.ID] = a
+			}
+		}
 		out := make([]FindingDTO, 0, len(fs))
 		for _, f := range fs {
-			out = append(out, findingFromDB(f))
+			out = append(out, findingFromDB(f, assets))
 		}
 		writeJSON(w, 200, out)
 		return
@@ -1364,7 +1387,43 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, _ := t.Store.ListByKind(db.KindFinding, 200)
-	writeJSON(w, 200, findingDTOsForTask(t, f))
+	tid, _ := strconv.ParseInt(t.ID, 10, 64)
+	triage, err := s.m.pg.FindingStatusByNodeID(tid)
+	if err != nil {
+		log.Printf("[findings] task=%s triage: %v", t.ID, err)
+	}
+	writeJSON(w, 200, findingDTOsForTask(t, f, triage))
+}
+
+// setFindingStatus updates one finding's triage state (pending / false_positive /
+// ignored / resolved). The id is the standalone findings-table id (DTO finding_id).
+func (s *Server) setFindingStatus(w http.ResponseWriter, r *http.Request) {
+	id := int64(atoiDefault(r.PathValue("id"), 0))
+	if id <= 0 {
+		writeErr(w, 400, "bad finding id")
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	if !db.ValidFindingStatus(body.Status) {
+		writeErr(w, 400, "bad status: "+body.Status)
+		return
+	}
+	n, err := s.m.pg.SetFindingStatus(id, body.Status)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if n == 0 {
+		writeErr(w, 404, "finding not found")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": i64s(id), "status": body.Status})
 }
 
 func (s *Server) intents(w http.ResponseWriter, r *http.Request) {

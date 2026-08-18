@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -171,16 +172,57 @@ func edgeDTOs(in []db.Edge) []EdgeDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
-	ID              string `json:"id"`
-	VulnClass       string `json:"vulnclass"`
-	Severity        string `json:"severity"`
-	Summary         string `json:"summary"`
-	Evidence        string `json:"evidence"`
-	IntentID        string `json:"intent_id,omitempty"`
-	ParamID         string `json:"param_id,omitempty"`
-	TaskID          string `json:"task_id,omitempty"`
-	TaskDescription string `json:"task_description,omitempty"`
-	TS              string `json:"ts"`
+	ID              string            `json:"id"`
+	FindingID       string            `json:"finding_id,omitempty"` // standalone findings-table id — the handle for status updates
+	VulnClass       string            `json:"vulnclass"`
+	Severity        string            `json:"severity"`
+	Status          string            `json:"status"` // pending | false_positive | ignored | resolved
+	Summary         string            `json:"summary"`
+	Evidence        string            `json:"evidence"`
+	IntentID        string            `json:"intent_id,omitempty"`
+	ParamID         string            `json:"param_id,omitempty"`
+	TaskID          string            `json:"task_id,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	Assets          []FindingAssetDTO `json:"assets,omitempty"`
+	TS              string            `json:"ts"`
+}
+
+// FindingAssetDTO is one asset a finding is anchored to, pre-labelled for display.
+type FindingAssetDTO struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Label string `json:"label"`
+}
+
+// assetLabel renders an asset's most identifying field for compact display.
+func assetLabel(a *db.Asset) string {
+	switch {
+	case a.URL != "":
+		if a.Method != "" {
+			return a.Method + " " + a.URL
+		}
+		return a.URL
+	case a.Domain != "":
+		if a.Port != nil && *a.Port > 0 {
+			return fmt.Sprintf("%s:%d", a.Domain, *a.Port)
+		}
+		return a.Domain
+	case a.IP != "":
+		if a.Port != nil && *a.Port > 0 {
+			return fmt.Sprintf("%s:%d", a.IP, *a.Port)
+		}
+		return a.IP
+	case a.AppName != "":
+		return a.AppName
+	case a.BundleID != "":
+		return a.BundleID
+	case a.ServiceName != "":
+		return a.ServiceName
+	case a.RootDomain != "":
+		return a.RootDomain
+	default:
+		return "#" + i64s(a.ID)
+	}
 }
 
 // findingPayload mirrors the JSON written by the worker's report_finding tool
@@ -199,6 +241,7 @@ func findingDTO(n *db.Node) FindingDTO {
 		ID:        i64s(n.ID),
 		VulnClass: p.VulnClass,
 		Severity:  p.Severity,
+		Status:    db.FindingPending,
 		Summary:   p.Summary,
 		Evidence:  rawString(p.Evidence),
 		TS:        rfc3339(n.CreatedAt),
@@ -207,12 +250,22 @@ func findingDTO(n *db.Node) FindingDTO {
 
 // findingDTOsForTask converts a task's finding nodes to DTOs, stamping each with
 // the owning task's id/description so the global 发现 page can group across tasks.
-func findingDTOsForTask(t *Task, in []*db.Node) []FindingDTO {
+// triage maps node id → the standalone findings row (id + status), so the per-task
+// view shows the same triage state as the global page; nodes with no row keep the
+// 'pending' default and no finding_id (status is then not editable).
+func findingDTOsForTask(t *Task, in []*db.Node, triage map[int64]struct {
+	ID     int64
+	Status string
+}) []FindingDTO {
 	out := make([]FindingDTO, 0, len(in))
 	for _, n := range in {
 		d := findingDTO(n)
 		d.TaskID = t.ID
 		d.TaskDescription = t.Description
+		if r, ok := triage[n.ID]; ok {
+			d.FindingID = i64s(r.ID)
+			d.Status = r.Status
+		}
 		out = append(out, d)
 	}
 	return out
@@ -220,14 +273,27 @@ func findingDTOsForTask(t *Task, in []*db.Node) []FindingDTO {
 
 // findingFromDB converts a standalone DBFinding row to a FindingDTO. task_id and
 // task_description are empty when the originating task has been deleted (NULL).
-func findingFromDB(f *db.DBFinding) FindingDTO {
+func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
+	status := f.Status
+	if status == "" {
+		status = db.FindingPending
+	}
 	d := FindingDTO{
 		ID:        i64s(f.ID),
+		FindingID: i64s(f.ID),
 		VulnClass: f.VulnClass,
 		Severity:  f.Severity,
+		Status:    status,
 		Summary:   f.Summary,
 		Evidence:  f.Evidence,
 		TS:        rfc3339(f.CreatedAt),
+	}
+	for _, aid := range f.AssetIDs {
+		a := assets[aid]
+		if a == nil {
+			continue
+		}
+		d.Assets = append(d.Assets, FindingAssetDTO{ID: i64s(a.ID), Type: a.Type, Label: assetLabel(a)})
 	}
 	if f.TaskID != nil {
 		d.TaskID = i64s(*f.TaskID)
