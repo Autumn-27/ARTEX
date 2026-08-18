@@ -26,7 +26,7 @@ export function GraphTab({ taskId }: { taskId: string }) {
         });
     };
     load();
-    const timer = setInterval(load, 3000);
+    const timer = setInterval(load, 20000);
     return () => {
       cancelled = true;
       clearInterval(timer);
