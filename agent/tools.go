@@ -642,21 +642,22 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "[重要]发现漏洞时必须调用该工具进行记录!记录一个确认的漏洞发现。在任务上下文中 intent_id 必填（当前正在执行的意图 id）；在会话上下文中 intent_id 可不填。",
 		obj(map[string]any{
-			"vulnclass": str("漏洞类"),
-			"severity":  str("high|medium|low"),
+			"vulnclass": str("漏洞类（分类，如 SQL Injection / IDOR / XSS）"),
+			"name":      str("漏洞名称（具体可读的标题，如『用户中心订单接口存在越权访问』；建议填写，留空时前端回退展示 vulnclass）"),
+			"severity":  str("critical|high|medium|low（严重/高/中/低）"),
 			"summary":   str("发现摘要"),
 			"intent_id": idp("产生本发现的意图 id（任务上下文必填；会话上下文可不填）"),
-			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id（可选，0/1/多个）：参数/端点/站点等。一个漏洞影响多处可全填，纯观察可不填。"},
+			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "【存在时尽量填写，否则在摘要中必须要写清楚漏洞位置】受影响资产 id（可选，0/1/多个）：参数/端点/站点等。一个漏洞影响多处可全填，纯观察可不填。"},
 			"evidence":  str("证据/PoC 文本"),
 		}, "vulnclass", "severity", "summary"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				VulnClass, Severity, Summary, Evidence string
-				IntentID                               json.RawMessage   `json:"intent_id"`
-				AssetIDs                               []json.RawMessage `json:"asset_ids"`
+				VulnClass, Name, Severity, Summary, Evidence string
+				IntentID                                     json.RawMessage   `json:"intent_id"`
+				AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			}
 			_ = json.Unmarshal(in, &a)
-			payload := map[string]any{"vulnclass": a.VulnClass, "severity": a.Severity, "summary": a.Summary,
+			payload := map[string]any{"vulnclass": a.VulnClass, "name": a.Name, "severity": a.Severity, "summary": a.Summary,
 				"evidence": map[string]any{"by": t.worker, "poc": a.Evidence}}
 			var anchors []int64
 			for _, raw := range a.AssetIDs {
@@ -674,7 +675,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				if intent := pid(a.IntentID); intent > 0 {
 					_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> finding
 				}
-				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
+				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Name, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
 				// 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）。
 				// 优先带上下文(哪个意图+finding摘要);intent 用工具参数,缺省回退到 owner 意图。
 				if t.notifyFinding != nil {

@@ -175,8 +175,9 @@ type FindingDTO struct {
 	ID              string            `json:"id"`
 	FindingID       string            `json:"finding_id,omitempty"` // standalone findings-table id — the handle for status updates
 	VulnClass       string            `json:"vulnclass"`
-	Severity        string            `json:"severity"`
-	Status          string            `json:"status"` // pending | false_positive | ignored | resolved
+	Name            string            `json:"name,omitempty"` // 漏洞名称;为空时前端回退展示 vulnclass
+	Severity        string            `json:"severity"`       // critical | high | medium | low
+	Status          string            `json:"status"`         // pending | in_progress | confirmed | resolved | false_positive | ignored | duplicate | risk_accepted
 	Summary         string            `json:"summary"`
 	Evidence        string            `json:"evidence"`
 	IntentID        string            `json:"intent_id,omitempty"`
@@ -229,6 +230,7 @@ func assetLabel(a *db.Asset) string {
 // (agent/tools.go addFinding): {vulnclass, severity, summary, evidence:{by,poc}}.
 type findingPayload struct {
 	VulnClass string          `json:"vulnclass"`
+	Name      string          `json:"name"`
 	Severity  string          `json:"severity"`
 	Summary   string          `json:"summary"`
 	Evidence  json.RawMessage `json:"evidence"`
@@ -240,6 +242,7 @@ func findingDTO(n *db.Node) FindingDTO {
 	return FindingDTO{
 		ID:        i64s(n.ID),
 		VulnClass: p.VulnClass,
+		Name:      p.Name,
 		Severity:  p.Severity,
 		Status:    db.FindingPending,
 		Summary:   p.Summary,
@@ -293,6 +296,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		ID:        i64s(f.ID),
 		FindingID: i64s(f.ID),
 		VulnClass: f.VulnClass,
+		Name:      f.Name,
 		Severity:  f.Severity,
 		Status:    status,
 		Summary:   f.Summary,

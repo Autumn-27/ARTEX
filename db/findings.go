@@ -13,6 +13,7 @@ type DBFinding struct {
 	TaskID          *int64
 	NodeID          *int64
 	VulnClass       string
+	Name            string // 漏洞名称(可读标题);为空时前端回退展示 VulnClass
 	Severity        string
 	Summary         string
 	Evidence        string
@@ -46,8 +47,9 @@ func ValidFindingStatus(s string) bool {
 }
 
 // AddFinding inserts a finding into the standalone findings table. taskID and
-// nodeID may be 0 (stored as NULL). Returns the new finding id.
-func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
+// nodeID may be 0 (stored as NULL). name may be "" (frontend falls back to
+// vulnclass). Returns the new finding id.
+func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
 	aidsJSON, _ := json.Marshal(assetIDs)
 	if assetIDs == nil {
 		aidsJSON = []byte("[]")
@@ -61,16 +63,16 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, severity, summary, evid
 	}
 	var id int64
 	err := d.QueryRow(
-		`INSERT INTO findings (task_id, node_id, vulnclass, severity, summary, evidence, worker, asset_ids)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		tid, nid, vulnclass, severity, summary, evidence, worker, string(aidsJSON),
+		`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, asset_ids)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+		tid, nid, vulnclass, name, severity, summary, evidence, worker, string(aidsJSON),
 	).Scan(&id)
 	return id, err
 }
 
 // findingSelectCols is the column list (with task_description join) every finding
 // list query selects, so scanFinding stays in sync across callers.
-const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, f.severity, f.summary,
+const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description`
 
@@ -84,7 +86,7 @@ func scanFindings(rows interface {
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
-		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Severity,
+		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription); err != nil {
 			return nil, err
 		}
@@ -162,8 +164,8 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 
 	order := "f.created_at DESC"
 	if f.Sort == "severity" {
-		// high > medium > low > 其它, then newest first.
-		order = `CASE f.severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
+		// critical > high > medium > low > 其它, then newest first.
+		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	q := fmt.Sprintf(`
@@ -187,6 +189,7 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 type FindingStats struct {
 	Total       int      `json:"total"`
 	Pending     int      `json:"pending"`
+	Critical    int      `json:"critical"`
 	High        int      `json:"high"`
 	Medium      int      `json:"medium"`
 	Low         int      `json:"low"`
@@ -200,10 +203,11 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	err := d.QueryRow(`SELECT
 		COUNT(*),
 		COUNT(*) FILTER (WHERE status = 'pending'),
+		COUNT(*) FILTER (WHERE severity = 'critical'),
 		COUNT(*) FILTER (WHERE severity = 'high'),
 		COUNT(*) FILTER (WHERE severity = 'medium'),
 		COUNT(*) FILTER (WHERE severity = 'low')
-		FROM findings`).Scan(&st.Total, &st.Pending, &st.High, &st.Medium, &st.Low)
+		FROM findings`).Scan(&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low)
 	if err != nil {
 		return nil, err
 	}

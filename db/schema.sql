@@ -540,6 +540,9 @@ CREATE TABLE IF NOT EXISTS findings (
     task_id     BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
     node_id     BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
     vulnclass   TEXT NOT NULL DEFAULT '',
+    -- 漏洞名称(可读标题)；为空时前端回退展示 vulnclass。severity 取值：
+    -- critical 严重 / high 高 / medium 中 / low 低（不加 CHECK，与 status 一致由 server 白名单校验）。
+    name        TEXT NOT NULL DEFAULT '',
     severity    TEXT NOT NULL DEFAULT '',
     summary     TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '',
@@ -552,6 +555,7 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);

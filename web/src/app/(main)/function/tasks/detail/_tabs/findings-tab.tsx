@@ -52,7 +52,7 @@ function Row({
           <StatusBadge domain="severity" value={f.severity} dot />
           <div className="flex min-w-0 flex-col">
             <span className="truncate font-medium">
-              {f.vulnclass || "未分类"}
+              {f.name || f.vulnclass || "未分类"}
             </span>
             <span className="truncate text-xs text-muted-foreground">
               {f.summary}
@@ -161,7 +161,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
   const items = findings
     .filter((f) => f.task_id === taskId)
     .sort((a, b) => {
-      const order = { high: 0, medium: 1, low: 2 };
+      const order = { critical: 0, high: 1, medium: 2, low: 3 };
       return order[a.severity] - order[b.severity];
     });
 

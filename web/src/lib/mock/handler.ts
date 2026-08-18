@@ -78,6 +78,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return {
       total: D.findings.length,
       pending: D.findings.filter((f) => f.status === "pending").length,
+      critical: D.findings.filter((f) => f.severity === "critical").length,
       high: D.findings.filter((f) => f.severity === "high").length,
       medium: D.findings.filter((f) => f.severity === "medium").length,
       low: D.findings.filter((f) => f.severity === "low").length,
@@ -88,7 +89,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (task) return D.findings.filter((f) => f.task_id === task);
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
     if (!q.has("page") && !q.has("limit")) return D.findings;
-    const sev = { high: 3, medium: 2, low: 1 } as const;
+    const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
     let list = D.findings.slice();
     const fSev = q.get("severity");
     const fStatus = q.get("status");

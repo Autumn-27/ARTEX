@@ -239,7 +239,7 @@ export default function DashboardPage() {
   }, [tasks]);
 
   const findingsBySev = React.useMemo(() => {
-    const m = { high: 0, medium: 0, low: 0 };
+    const m = { critical: 0, high: 0, medium: 0, low: 0 };
     for (const f of findings) {
       if (f.severity in m) m[f.severity as keyof typeof m]++;
     }
@@ -491,7 +491,8 @@ export default function DashboardPage() {
               {findings.length}
             </div>
           </CardHeader>
-          <CardContent className="flex gap-2.5 text-[10px]">
+          <CardContent className="flex flex-wrap gap-2.5 text-[10px]">
+            <span className="text-rose-500">严重 {findingsBySev.critical}</span>
             <span className="text-red-400">高危 {findingsBySev.high}</span>
             <span className="text-amber-400">中危 {findingsBySev.medium}</span>
             <span className="text-slate-400">低危 {findingsBySev.low}</span>

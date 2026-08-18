@@ -632,6 +632,7 @@ FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, 
 //   - Worker != ""  → filter by worker name (Main = "mainagent", Plan = "planner").
 //     Goal Agent 的第 0 轮拆解也以 worker="planner" 落库，故 Plan 会话完整覆盖 Goal+Planner。
 //   - NodeID != nil → a Worker session, filtered by node_id (= intent id).
+//
 // A zero value (both empty) matches the whole task (no session filter).
 type ActivitySessionFilter struct {
 	Worker string
@@ -885,6 +886,6 @@ FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.
 // AddStandaloneFinding writes a finding to the standalone findings table, which
 // persists across task deletion (task_id / node_id become NULL when the task or
 // exploration node is deleted). taskID and nodeID may be 0 (stored as NULL).
-func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
-	return s.db.AddFinding(taskID, nodeID, vulnclass, severity, summary, evidence, worker, assetIDs)
+func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
+	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
 }

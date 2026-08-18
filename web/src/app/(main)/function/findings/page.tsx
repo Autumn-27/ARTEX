@@ -52,6 +52,7 @@ const FINDING_STATUSES: FindingStatus[] = [
 const EMPTY_STATS: FindingStats = {
   total: 0,
   pending: 0,
+  critical: 0,
   high: 0,
   medium: 0,
   low: 0,
@@ -156,6 +157,7 @@ export default function FindingsPage() {
   const statCards: { label: string; value: number; tone?: string }[] = [
     { label: "发现总数", value: stats.total },
     { label: "待处理", value: stats.pending, tone: "text-amber-500" },
+    { label: "严重", value: stats.critical, tone: "text-rose-600" },
     { label: "高危", value: stats.high, tone: "text-red-500" },
     { label: "中危", value: stats.medium, tone: "text-amber-500" },
     { label: "低危", value: stats.low, tone: "text-slate-500" },
@@ -168,7 +170,7 @@ export default function FindingsPage() {
         <p className="text-muted-foreground text-sm">跨任务漏洞汇总</p>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           {statCards.map((s) => (
             <Card key={s.label} className="gap-1 py-4">
               <CardHeader className="px-4">
@@ -186,6 +188,7 @@ export default function FindingsPage() {
             {(
               [
                 ["all", "全部"],
+                ["critical", "严重"],
                 ["high", "高危"],
                 ["medium", "中危"],
                 ["low", "低危"],
@@ -293,7 +296,7 @@ export default function FindingsPage() {
                         <TableCell className="max-w-md">
                           <div className="flex min-w-0 flex-col gap-0.5">
                             <span className="truncate font-medium">
-                              {f.vulnclass || "未分类"}
+                              {f.name || f.vulnclass || "未分类"}
                             </span>
                             <span className="truncate text-xs text-muted-foreground">
                               {f.summary}
@@ -380,6 +383,14 @@ export default function FindingsPage() {
                               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                 <ShieldAlertIcon className="size-3.5" />
                                 证据 · {f.id}
+                                {f.vulnclass && (
+                                  <span>
+                                    · 类型：
+                                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                                      {f.vulnclass}
+                                    </code>
+                                  </span>
+                                )}
                                 {f.param_id && (
                                   <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
                                     {f.param_id}

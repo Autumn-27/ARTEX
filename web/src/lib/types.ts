@@ -237,7 +237,7 @@ export interface TaskNode {
 }
 
 // ---- Findings ----
-export type Severity = "high" | "medium" | "low";
+export type Severity = "critical" | "high" | "medium" | "low";
 
 // 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 误报 / 忽略 / 重复 / 风险接受。
 export type FindingStatus =
@@ -261,6 +261,7 @@ export interface Finding {
   id: string;
   finding_id?: string; // 独立 findings 表的行 id,状态更新的句柄(任务内旧节点可能缺失)
   vulnclass: string;
+  name?: string; // 漏洞名称;为空时展示回退到 vulnclass
   severity: Severity;
   status: FindingStatus;
   summary: string;
@@ -285,6 +286,7 @@ export interface FindingsPage {
 export interface FindingStats {
   total: number;
   pending: number;
+  critical: number;
   high: number;
   medium: number;
   low: number;
