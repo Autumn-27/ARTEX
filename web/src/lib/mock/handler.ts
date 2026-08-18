@@ -73,7 +73,43 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── exploration ──
   if (path === "/exploration/frontier") return D.frontier;
-  if (path === "/exploration/findings") return task ? D.findings.filter((f) => f.task_id === task) : D.findings;
+  if (path === "/exploration/findings/stats") {
+    const vulnclasses = Array.from(new Set(D.findings.map((f) => f.vulnclass))).sort();
+    return {
+      total: D.findings.length,
+      pending: D.findings.filter((f) => f.status === "pending").length,
+      high: D.findings.filter((f) => f.severity === "high").length,
+      medium: D.findings.filter((f) => f.severity === "medium").length,
+      low: D.findings.filter((f) => f.severity === "low").length,
+      vulnclasses,
+    };
+  }
+  if (path === "/exploration/findings") {
+    if (task) return D.findings.filter((f) => f.task_id === task);
+    // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
+    if (!q.has("page") && !q.has("limit")) return D.findings;
+    const sev = { high: 3, medium: 2, low: 1 } as const;
+    let list = D.findings.slice();
+    const fSev = q.get("severity");
+    const fStatus = q.get("status");
+    const fVuln = q.get("vulnclass");
+    if (fSev) list = list.filter((f) => f.severity === fSev);
+    if (fStatus) list = list.filter((f) => f.status === fStatus);
+    if (fVuln) list = list.filter((f) => f.vulnclass === fVuln);
+    list.sort((a, b) =>
+      q.get("sort") === "severity"
+        ? sev[b.severity] - sev[a.severity] || +new Date(b.ts) - +new Date(a.ts)
+        : +new Date(b.ts) - +new Date(a.ts),
+    );
+    const page = Number(q.get("page") ?? 1);
+    const pageSize = Number(q.get("limit") ?? 20);
+    return {
+      items: list.slice((page - 1) * pageSize, page * pageSize),
+      total: list.length,
+      page,
+      page_size: pageSize,
+    };
+  }
   if (path === "/exploration/intents") return D.intents;
   if (path === "/exploration/tokens") return { workers: D.tokenWorkers, total: D.tokenTotal };
   if (path === "/exploration/graph") return D.explorationGraph;

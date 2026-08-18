@@ -6,7 +6,8 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
-  Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, FindingStatus, Activity,
+  Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, FindingStatus,
+  FindingsPage, FindingStats, FindingQuery, Activity,
   Audit, TrafficResp, TrafficDetail, TrafficHost, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
   Tool, Conversation, AgentTrigger, ChatAttachment,
@@ -232,6 +233,15 @@ export const api = {
   // ---- exploration (per task) ----
   frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),
   findings: (task?: string) => get<Finding[]>(`/exploration/findings${tq(task)}`).then(arr),
+  findingsPage: (q: FindingQuery) => {
+    const p = new URLSearchParams({ page: String(q.page), limit: String(q.pageSize) });
+    if (q.severity && q.severity !== "all") p.set("severity", q.severity);
+    if (q.status && q.status !== "all") p.set("status", q.status);
+    if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
+    if (q.sort) p.set("sort", q.sort);
+    return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
+  },
+  findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   setFindingStatus: (id: string, status: FindingStatus) =>
     patch<{ id: string; status: FindingStatus }>(`/exploration/findings/${id}`, { status }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),

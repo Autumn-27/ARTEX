@@ -265,6 +265,34 @@ export interface Finding {
   ts: string;
 }
 
+// FindingsPage 是发现列表的服务端分页响应。
+export interface FindingsPage {
+  items: Finding[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
+export interface FindingStats {
+  total: number;
+  pending: number;
+  high: number;
+  medium: number;
+  low: number;
+  vulnclasses: string[];
+}
+
+// FindingQuery 是发现列表分页/筛选/排序参数。
+export interface FindingQuery {
+  page: number;
+  pageSize: number;
+  severity?: "all" | Severity;
+  status?: "all" | FindingStatus;
+  vulnclass?: string;
+  sort?: "severity" | "time";
+}
+
 // ---- Activity / sessions ----
 export type ActivityKind =
   | "tool_use"

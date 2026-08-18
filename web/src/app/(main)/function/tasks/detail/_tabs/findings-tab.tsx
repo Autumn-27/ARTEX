@@ -35,6 +35,7 @@ function Row({
     <div className="border-b last:border-b-0">
       <div className="flex w-full items-center gap-3 px-4 py-3 text-sm hover:bg-accent/40">
         <button
+          type="button"
           onClick={() => setOpen((o) => !o)}
           className="flex min-w-0 flex-1 items-center gap-3 text-left"
         >

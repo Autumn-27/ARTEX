@@ -601,6 +601,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
+	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.setFindingStatus)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
@@ -1349,36 +1350,40 @@ func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {
 func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 	// 无 task 参数 → 全局「发现」页：从独立 findings 表读取（任务删除后 finding 依然保留）。
 	// 带 task 参数 → 仅该任务（任务概览/发现 Tab 用），从 exploration_nodes 读（任务在则节点在）。
-	taskParam := r.URL.Query().Get("task")
+	q := r.URL.Query()
+	taskParam := q.Get("task")
 	if taskParam == "" {
-		fs, _ := s.m.pg.ListFindings(500)
-		// Resolve every anchored asset in one query so each finding can carry a
-		// display label for its assets.
-		seen := map[int64]bool{}
-		var ids []int64
-		for _, f := range fs {
-			for _, aid := range f.AssetIDs {
-				if aid > 0 && !seen[aid] {
-					seen[aid] = true
-					ids = append(ids, aid)
-				}
+		// 带 page/limit → 服务端分页 {items,total,...}；不带 → 裸数组（dashboard 汇总用，
+		// 与 intents 端点的兼容策略一致）。筛选/排序统一下推到 SQL。
+		if q.Get("page") == "" && q.Get("limit") == "" {
+			fs, _ := s.m.pg.ListFindings(500)
+			assets := s.resolveFindingAssets(fs)
+			out := make([]FindingDTO, 0, len(fs))
+			for _, f := range fs {
+				out = append(out, findingFromDB(f, assets))
 			}
+			writeJSON(w, 200, out)
+			return
 		}
-		assets := map[int64]*db.Asset{}
-		if len(ids) > 0 {
-			list, err := s.m.pg.Assets().GetByIDs(ids)
-			if err != nil {
-				log.Printf("[findings] resolve assets: %v", err)
-			}
-			for _, a := range list {
-				assets[a.ID] = a
-			}
+		page := atoiDefault(q.Get("page"), 1)
+		limit := min(atoiDefault(q.Get("limit"), 20), 200)
+		filter := db.FindingFilter{
+			Severity:  normFilter(q.Get("severity")),
+			Status:    normFilter(q.Get("status")),
+			VulnClass: normFilter(q.Get("vulnclass")),
+			Sort:      q.Get("sort"),
 		}
+		fs, total, err := s.m.pg.ListFindingsPage(filter, page, limit)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		assets := s.resolveFindingAssets(fs)
 		out := make([]FindingDTO, 0, len(fs))
 		for _, f := range fs {
 			out = append(out, findingFromDB(f, assets))
 		}
-		writeJSON(w, 200, out)
+		writeJSON(w, 200, map[string]any{"items": out, "total": total, "page": page, "page_size": limit})
 		return
 	}
 	t := s.m.ResolveTask(taskParam)
@@ -1388,11 +1393,70 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 	}
 	f, _ := t.Store.ListByKind(db.KindFinding, 200)
 	tid, _ := strconv.ParseInt(t.ID, 10, 64)
-	triage, err := s.m.pg.FindingStatusByNodeID(tid)
+	meta, err := s.m.pg.FindingMetaByNodeID(tid)
 	if err != nil {
-		log.Printf("[findings] task=%s triage: %v", t.ID, err)
+		log.Printf("[findings] task=%s meta: %v", t.ID, err)
 	}
-	writeJSON(w, 200, findingDTOsForTask(t, f, triage))
+	var aidSet []int64
+	for _, m := range meta {
+		aidSet = append(aidSet, m.AssetIDs...)
+	}
+	assets := s.resolveAssetIDs(aidSet)
+	writeJSON(w, 200, findingDTOsForTask(t, f, meta, assets))
+}
+
+// normFilter maps the frontend's "all" sentinel (and empty) to "" so the DB layer
+// treats it as no filter.
+func normFilter(v string) string {
+	if v == "all" {
+		return ""
+	}
+	return v
+}
+
+// resolveFindingAssets loads every asset anchored by the given findings, keyed by
+// id, so each finding DTO can render its assets' labels.
+func (s *Server) resolveFindingAssets(fs []*db.DBFinding) map[int64]*db.Asset {
+	var ids []int64
+	for _, f := range fs {
+		ids = append(ids, f.AssetIDs...)
+	}
+	return s.resolveAssetIDs(ids)
+}
+
+// resolveAssetIDs de-dupes ids and loads their asset rows into an id→asset map.
+func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
+	assets := map[int64]*db.Asset{}
+	seen := map[int64]bool{}
+	var uniq []int64
+	for _, id := range ids {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			uniq = append(uniq, id)
+		}
+	}
+	if len(uniq) == 0 {
+		return assets
+	}
+	list, err := s.m.pg.Assets().GetByIDs(uniq)
+	if err != nil {
+		log.Printf("[findings] resolve assets: %v", err)
+	}
+	for _, a := range list {
+		assets[a.ID] = a
+	}
+	return assets
+}
+
+// findingStats serves the whole-table aggregates (stat cards + vuln-class filter)
+// for the paginated 发现 page.
+func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
+	st, err := s.m.pg.FindingStats()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, st)
 }
 
 // setFindingStatus updates one finding's triage state (pending / false_positive /

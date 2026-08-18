@@ -36,9 +36,7 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus, Severity } from "@/lib/types";
-
-const SEVERITY_ORDER: Record<Severity, number> = { high: 3, medium: 2, low: 1 };
+import type { Finding, FindingStats, FindingStatus, Severity } from "@/lib/types";
 
 const FINDING_STATUSES: FindingStatus[] = [
   "pending",
@@ -46,6 +44,15 @@ const FINDING_STATUSES: FindingStatus[] = [
   "ignored",
   "resolved",
 ];
+
+const EMPTY_STATS: FindingStats = {
+  total: 0,
+  pending: 0,
+  high: 0,
+  medium: 0,
+  low: 0,
+  vulnclasses: [],
+};
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -63,16 +70,47 @@ export default function FindingsPage() {
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [findings, setFindings] = React.useState<Finding[]>([]);
+  const [total, setTotal] = React.useState(0);
+  const [stats, setStats] = React.useState<FindingStats>(EMPTY_STATS);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
 
+  // reset to page 1 whenever filters change
+  React.useEffect(() => {
+    setPage(1);
+  }, [severity, status, vulnclass, sort]);
+
+  // Server-driven list: paging + filtering + sorting all happen in SQL. Polls the
+  // current page every 5s, and refetches immediately when any query input changes.
   React.useEffect(() => {
     let alive = true;
     const load = () => {
       api
-        .findings()
-        .then((fs) => {
-          if (alive) setFindings(fs);
+        .findingsPage({ page, pageSize, severity, status, vulnclass, sort })
+        .then((res) => {
+          if (!alive) return;
+          setFindings(res.items);
+          setTotal(res.total);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [page, pageSize, severity, status, vulnclass, sort]);
+
+  // Whole-table aggregates (stat cards + vuln-class options) — independent of the
+  // current page, so they stay exact.
+  React.useEffect(() => {
+    let alive = true;
+    const load = () => {
+      api
+        .findingStats()
+        .then((s) => {
+          if (alive) setStats(s);
         })
         .catch(() => {});
     };
@@ -95,6 +133,12 @@ export default function FindingsPage() {
       try {
         await api.setFindingStatus(f.finding_id, next);
         toast.success(`已标记为「${statusMeta("finding", next).label}」`);
+        // refresh stat cards (pending count) and drop the row if it no longer matches the status filter
+        api.findingStats().then(setStats).catch(() => {});
+        if (status !== "all" && next !== status) {
+          setFindings((cur) => cur.filter((x) => x.id !== f.id));
+          setTotal((t) => Math.max(0, t - 1));
+        }
       } catch (e) {
         setFindings((cur) =>
           cur.map((x) => (x.id === f.id ? { ...x, status: prev } : x)),
@@ -102,53 +146,15 @@ export default function FindingsPage() {
         toast.error("更新失败：" + (e as Error).message);
       }
     },
-    [],
-  );
-
-  const vulnclasses = React.useMemo(
-    () => Array.from(new Set(findings.map((f) => f.vulnclass))).sort(),
-    [findings],
-  );
-
-  const counts = React.useMemo(() => {
-    const c = { high: 0, medium: 0, low: 0 };
-    for (const f of findings) c[f.severity]++;
-    const pending = findings.filter((f) => f.status === "pending").length;
-    return { ...c, total: findings.length, pending };
-  }, [findings]);
-
-  const rows = React.useMemo(() => {
-    let list = findings.slice();
-    if (severity !== "all") list = list.filter((f) => f.severity === severity);
-    if (status !== "all") list = list.filter((f) => f.status === status);
-    if (vulnclass !== "all")
-      list = list.filter((f) => f.vulnclass === vulnclass);
-    list.sort((a, b) => {
-      if (sort === "severity") {
-        const d = SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity];
-        if (d !== 0) return d;
-      }
-      return new Date(b.ts).getTime() - new Date(a.ts).getTime();
-    });
-    return list;
-  }, [findings, severity, status, vulnclass, sort]);
-
-  // reset to page 1 whenever filters change
-  React.useEffect(() => {
-    setPage(1);
-  }, [severity, status, vulnclass, sort]);
-
-  const paginated = React.useMemo(
-    () => rows.slice((page - 1) * pageSize, page * pageSize),
-    [rows, page, pageSize],
+    [status],
   );
 
   const statCards: { label: string; value: number; tone?: string }[] = [
-    { label: "发现总数", value: counts.total },
-    { label: "待处理", value: counts.pending, tone: "text-amber-500" },
-    { label: "高危", value: counts.high, tone: "text-red-500" },
-    { label: "中危", value: counts.medium, tone: "text-amber-500" },
-    { label: "低危", value: counts.low, tone: "text-slate-500" },
+    { label: "发现总数", value: stats.total },
+    { label: "待处理", value: stats.pending, tone: "text-amber-500" },
+    { label: "高危", value: stats.high, tone: "text-red-500" },
+    { label: "中危", value: stats.medium, tone: "text-amber-500" },
+    { label: "低危", value: stats.low, tone: "text-slate-500" },
   ];
 
   return (
@@ -183,6 +189,7 @@ export default function FindingsPage() {
             ).map(([val, label]) => (
               <button
                 key={val}
+                type="button"
                 onClick={() => setSeverity(val)}
                 className={cn(
                   "rounded px-2.5 py-1 text-xs font-medium transition-colors",
@@ -219,7 +226,7 @@ export default function FindingsPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部类型</SelectItem>
-              {vulnclasses.map((vc) => (
+              {stats.vulnclasses.map((vc) => (
                 <SelectItem key={vc} value={vc}>
                   {vc}
                 </SelectItem>
@@ -241,7 +248,7 @@ export default function FindingsPage() {
           </Select>
 
           <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-            共 {rows.length} 条
+            共 {total} 条
           </span>
         </div>
 
@@ -260,7 +267,7 @@ export default function FindingsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {paginated.map((f) => {
+                {findings.map((f) => {
                   const open = expanded === f.id;
                   return (
                     <React.Fragment key={f.id}>
@@ -338,11 +345,7 @@ export default function FindingsPage() {
                               </SelectContent>
                             </Select>
                           ) : (
-                            <StatusBadge
-                              domain="finding"
-                              value={f.status}
-                              dot
-                            />
+                            <StatusBadge domain="finding" value={f.status} dot />
                           )}
                         </TableCell>
                         <TableCell className="w-36 max-w-[9rem]">
@@ -403,7 +406,7 @@ export default function FindingsPage() {
                     </React.Fragment>
                   );
                 })}
-                {rows.length === 0 && (
+                {findings.length === 0 && (
                   <TableRow>
                     <TableCell
                       colSpan={7}
@@ -418,7 +421,7 @@ export default function FindingsPage() {
             <TablePagination
               page={page}
               pageSize={pageSize}
-              total={rows.length}
+              total={total}
               onPageChange={setPage}
               onPageSizeChange={setPageSize}
             />

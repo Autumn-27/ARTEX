@@ -250,23 +250,34 @@ func findingDTO(n *db.Node) FindingDTO {
 
 // findingDTOsForTask converts a task's finding nodes to DTOs, stamping each with
 // the owning task's id/description so the global 发现 page can group across tasks.
-// triage maps node id → the standalone findings row (id + status), so the per-task
-// view shows the same triage state as the global page; nodes with no row keep the
-// 'pending' default and no finding_id (status is then not editable).
-func findingDTOsForTask(t *Task, in []*db.Node, triage map[int64]struct {
-	ID     int64
-	Status string
-}) []FindingDTO {
+// meta maps node id → the standalone findings row (id + status + asset ids), so the
+// per-task view shows the same triage state and anchored assets as the global page;
+// nodes with no row keep the 'pending' default and no finding_id (not editable).
+// assets pre-resolves the anchored asset rows for label rendering.
+func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
 	out := make([]FindingDTO, 0, len(in))
 	for _, n := range in {
 		d := findingDTO(n)
 		d.TaskID = t.ID
 		d.TaskDescription = t.Description
-		if r, ok := triage[n.ID]; ok {
-			d.FindingID = i64s(r.ID)
-			d.Status = r.Status
+		if m, ok := meta[n.ID]; ok {
+			d.FindingID = i64s(m.ID)
+			d.Status = m.Status
+			d.Assets = findingAssetDTOs(m.AssetIDs, assets)
 		}
 		out = append(out, d)
+	}
+	return out
+}
+
+// findingAssetDTOs maps anchored asset ids to display DTOs, skipping ids whose
+// asset row is missing (e.g. deleted).
+func findingAssetDTOs(ids []int64, assets map[int64]*db.Asset) []FindingAssetDTO {
+	var out []FindingAssetDTO
+	for _, aid := range ids {
+		if a := assets[aid]; a != nil {
+			out = append(out, FindingAssetDTO{ID: i64s(a.ID), Type: a.Type, Label: assetLabel(a)})
+		}
 	}
 	return out
 }
@@ -288,13 +299,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Evidence:  f.Evidence,
 		TS:        rfc3339(f.CreatedAt),
 	}
-	for _, aid := range f.AssetIDs {
-		a := assets[aid]
-		if a == nil {
-			continue
-		}
-		d.Assets = append(d.Assets, FindingAssetDTO{ID: i64s(a.ID), Type: a.Type, Label: assetLabel(a)})
-	}
+	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {
 		d.TaskID = i64s(*f.TaskID)
 		d.TaskDescription = f.TaskDescription
