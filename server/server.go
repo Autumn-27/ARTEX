@@ -607,7 +607,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
-	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.setFindingStatus)
+	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
+	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
@@ -1464,35 +1465,89 @@ func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, st)
 }
 
-// setFindingStatus updates one finding's triage state (pending / false_positive /
-// ignored / resolved). The id is the standalone findings-table id (DTO finding_id).
-func (s *Server) setFindingStatus(w http.ResponseWriter, r *http.Request) {
+// getFinding returns one finding by its standalone-table id (DTO finding_id),
+// with anchored assets resolved for display.
+func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
+	id := int64(atoiDefault(r.PathValue("id"), 0))
+	if id <= 0 {
+		writeErr(w, 400, "bad finding id")
+		return
+	}
+	f, err := s.m.pg.GetFinding(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if f == nil {
+		writeErr(w, 404, "finding not found")
+		return
+	}
+	assets := s.resolveAssetIDs(f.AssetIDs)
+	writeJSON(w, 200, findingFromDB(f, assets))
+}
+
+// patchFinding partially updates a finding: any subset of {status, severity}.
+// The id is the standalone findings-table id (DTO finding_id). Severity edits are
+// mirrored onto the originating exploration node so the per-task view stays in
+// sync. Returns the updated finding DTO.
+func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 	id := int64(atoiDefault(r.PathValue("id"), 0))
 	if id <= 0 {
 		writeErr(w, 400, "bad finding id")
 		return
 	}
 	var body struct {
-		Status string `json:"status"`
+		Status   *string `json:"status"`
+		Severity *string `json:"severity"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
-	if !db.ValidFindingStatus(body.Status) {
-		writeErr(w, 400, "bad status: "+body.Status)
+	if body.Status == nil && body.Severity == nil {
+		writeErr(w, 400, "nothing to update: provide status and/or severity")
 		return
 	}
-	n, err := s.m.pg.SetFindingStatus(id, body.Status)
+	if body.Status != nil {
+		if !db.ValidFindingStatus(*body.Status) {
+			writeErr(w, 400, "bad status: "+*body.Status)
+			return
+		}
+		n, err := s.m.pg.SetFindingStatus(id, *body.Status)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if n == 0 {
+			writeErr(w, 404, "finding not found")
+			return
+		}
+	}
+	if body.Severity != nil {
+		if !db.ValidSeverity(*body.Severity) {
+			writeErr(w, 400, "bad severity: "+*body.Severity)
+			return
+		}
+		n, err := s.m.pg.SetFindingSeverity(id, *body.Severity)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if n == 0 {
+			writeErr(w, 404, "finding not found")
+			return
+		}
+	}
+	f, err := s.m.pg.GetFinding(id)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if n == 0 {
+	if f == nil {
 		writeErr(w, 404, "finding not found")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": i64s(id), "status": body.Status})
+	writeJSON(w, 200, findingFromDB(f, s.resolveAssetIDs(f.AssetIDs)))
 }
 
 func (s *Server) intents(w http.ResponseWriter, r *http.Request) {

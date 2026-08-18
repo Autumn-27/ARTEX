@@ -6,7 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
-  Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, FindingStatus,
+  Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, Severity, FindingStatus,
   FindingsPage, FindingStats, FindingQuery, Activity,
   Audit, TrafficResp, TrafficDetail, TrafficHost, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
@@ -245,8 +245,11 @@ export const api = {
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  getFinding: (id: string) => get<Finding>(`/exploration/findings/${id}`),
   setFindingStatus: (id: string, status: FindingStatus) =>
-    patch<{ id: string; status: FindingStatus }>(`/exploration/findings/${id}`, { status }),
+    patch<Finding>(`/exploration/findings/${id}`, { status }),
+  setFindingSeverity: (id: string, severity: Severity) =>
+    patch<Finding>(`/exploration/findings/${id}`, { severity }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
   tokenStats: (task?: string) =>
     get<{ workers: TokenUsage[]; total: TokenTotal }>(`/exploration/tokens${tq(task)}`).then((r) => ({

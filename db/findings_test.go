@@ -100,4 +100,28 @@ func TestFindingsPageAndStats(t *testing.T) {
 	if !slices.Contains(st.VulnClasses, vc) {
 		t.Fatalf("stats vulnclasses missing %q", vc)
 	}
+
+	// GetFinding: single-row fetch round-trips id/name/severity.
+	one, err := d.GetFinding(ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one == nil || one.ID != ids[0] || one.Severity != "critical" || one.Name != "严重漏洞标题" {
+		t.Fatalf("GetFinding mismatch: %+v", one)
+	}
+	if miss, err := d.GetFinding(-1); err != nil || miss != nil {
+		t.Fatalf("GetFinding(-1): want nil,nil got %+v,%v", miss, err)
+	}
+
+	// SetFindingSeverity: standalone row updates; 0 rows for unknown id.
+	if n, err := d.SetFindingSeverity(ids[0], "high"); err != nil || n != 1 {
+		t.Fatalf("SetFindingSeverity: want 1,nil got %d,%v", n, err)
+	}
+	one, _ = d.GetFinding(ids[0])
+	if one.Severity != "high" {
+		t.Fatalf("severity not updated: %q", one.Severity)
+	}
+	if n, err := d.SetFindingSeverity(-1, "low"); err != nil || n != 0 {
+		t.Fatalf("SetFindingSeverity(-1): want 0,nil got %d,%v", n, err)
+	}
 }

@@ -85,10 +85,28 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       vulnclasses,
     };
   }
+  // 单条 finding:GET 详情 / PATCH 改状态或严重度(demo 直接改内存对象)。
+  if (
+    seg[0] === "exploration" &&
+    seg[1] === "findings" &&
+    seg.length === 3 &&
+    seg[2] !== "stats"
+  ) {
+    const f = D.findings.find((x) => x.id === seg[2]);
+    if (!f) return {};
+    if (m === "PATCH") {
+      if (typeof b.status === "string") f.status = b.status as typeof f.status;
+      if (typeof b.severity === "string")
+        f.severity = b.severity as typeof f.severity;
+    }
+    return { ...f, finding_id: f.id };
+  }
   if (path === "/exploration/findings") {
-    if (task) return D.findings.filter((f) => f.task_id === task);
+    // finding_id=id：真后端用独立表行 id 作为状态/详情句柄,mock 里用自身 id 顶上。
+    const withFid = (f: (typeof D.findings)[number]) => ({ ...f, finding_id: f.id });
+    if (task) return D.findings.filter((f) => f.task_id === task).map(withFid);
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
-    if (!q.has("page") && !q.has("limit")) return D.findings;
+    if (!q.has("page") && !q.has("limit")) return D.findings.map(withFid);
     const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
     let list = D.findings.slice();
     const fSev = q.get("severity");
@@ -105,7 +123,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const page = Number(q.get("page") ?? 1);
     const pageSize = Number(q.get("limit") ?? 20);
     return {
-      items: list.slice((page - 1) * pageSize, page * pageSize),
+      items: list.slice((page - 1) * pageSize, page * pageSize).map(withFid),
       total: list.length,
       page,
       page_size: pageSize,

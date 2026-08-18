@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -41,6 +42,23 @@ func ValidFindingStatus(s string) bool {
 	switch s {
 	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved,
 		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted:
+		return true
+	}
+	return false
+}
+
+// Finding severity levels (findings.severity).
+const (
+	SeverityCritical = "critical" // 严重
+	SeverityHigh     = "high"     // 高
+	SeverityMedium   = "medium"   // 中
+	SeverityLow      = "low"      // 低
+)
+
+// ValidSeverity reports whether s is a known severity level.
+func ValidSeverity(s string) bool {
+	switch s {
+	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow:
 		return true
 	}
 	return false
@@ -226,6 +244,27 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	return st, rows.Err()
 }
 
+// GetFinding returns a single finding row (with task_description joined), or nil
+// when no row has that id.
+func (d *DB) GetFinding(id int64) (*DBFinding, error) {
+	rows, err := d.Query(`SELECT `+findingSelectCols+`
+		FROM findings f
+		LEFT JOIN tasks t ON f.task_id = t.id
+		WHERE f.id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanFindings(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out[0], nil
+}
+
 // SetFindingStatus updates one finding's triage state. Returns rows affected.
 func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 	res, err := d.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, status, id)
@@ -233,6 +272,30 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// SetFindingSeverity updates one finding's severity in the standalone table AND
+// keeps the originating exploration node's payload in sync (the per-task view
+// reads severity from the node payload, not this table). Returns rows affected
+// (0 when no finding has that id). The node sync is best-effort.
+func (d *DB) SetFindingSeverity(id int64, severity string) (int64, error) {
+	var nodeID *int64
+	err := d.QueryRow(`UPDATE findings SET severity=$1 WHERE id=$2 RETURNING node_id`, severity, id).Scan(&nodeID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if nodeID != nil {
+		// jsonb_set the {severity} key so the finding node (read by the per-task
+		// 发现 Tab) shows the same level. Ignore errors — the standalone row is the
+		// source of truth for the global 发现 page.
+		_, _ = d.Exec(`UPDATE exploration_nodes
+			SET payload = jsonb_set(payload, '{severity}', to_jsonb($1::text))
+			WHERE id = $2`, severity, *nodeID)
+	}
+	return 1, nil
 }
 
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the

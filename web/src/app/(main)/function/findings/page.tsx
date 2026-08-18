@@ -295,9 +295,20 @@ export default function FindingsPage() {
                         </TableCell>
                         <TableCell className="max-w-md">
                           <div className="flex min-w-0 flex-col gap-0.5">
-                            <span className="truncate font-medium">
-                              {f.name || f.vulnclass || "未分类"}
-                            </span>
+                            {f.finding_id ? (
+                              <Link
+                                href={`/function/findings/detail?id=${f.finding_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="truncate font-medium hover:text-primary hover:underline"
+                                title="查看发现详情"
+                              >
+                                {f.name || f.vulnclass || "未分类"}
+                              </Link>
+                            ) : (
+                              <span className="truncate font-medium">
+                                {f.name || f.vulnclass || "未分类"}
+                              </span>
+                            )}
                             <span className="truncate text-xs text-muted-foreground">
                               {f.summary}
                             </span>
