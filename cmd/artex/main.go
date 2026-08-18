@@ -48,6 +48,10 @@ func main() {
 	)
 	flag.Parse()
 
+	// hand the build version to the server package so GET /api/health can report it
+	// to the frontend top bar.
+	server.BuildVersion = version
+
 	printBanner(*addr)
 
 	// capture backend logs into the in-memory sink (still to stderr) so the /logs

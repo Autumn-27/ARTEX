@@ -27,6 +27,11 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 )
 
+// BuildVersion is the backend application version, injected from cmd/artex at
+// startup (which in turn gets it from -ldflags "-X main.version=<tag>").
+// Defaults to "dev" for local builds. Exposed to the frontend via GET /api/health.
+var BuildVersion = "dev"
+
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
@@ -741,7 +746,7 @@ func (s *Server) Handler() http.Handler {
 // --- handlers ---
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex"})
+	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {

@@ -1,11 +1,12 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { usePathname } from "next/navigation";
 
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
@@ -29,6 +30,14 @@ function isFullBleed(pathname: string) {
 export function MainContent({ children }: { children: ReactNode }) {
   const currentUser = useCurrentUser();
   const pathname = usePathname();
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    api
+      .health()
+      .then((h) => setVersion(h.version ?? ""))
+      .catch(() => setVersion(""));
+  }, []);
 
   if (isFullBleed(pathname)) {
     return <>{children}</>;
@@ -52,6 +61,9 @@ export function MainContent({ children }: { children: ReactNode }) {
             <SearchDialog />
           </div>
           <div className="flex items-center gap-2">
+            {version && (
+              <span className="text-muted-foreground text-xs font-medium tabular-nums">版本·v{version}</span>
+            )}
             <LayoutControls />
             <ThemeSwitcher />
             <AccountSwitcher users={[currentUser]} />

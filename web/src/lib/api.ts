@@ -99,6 +99,9 @@ const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
 
 export const api = {
+  // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
+  health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
+
   // ---- auth ----
   authStatus: () => get<{ initialized: boolean }>("/auth/status"),
   login: (username: string, password: string) =>
