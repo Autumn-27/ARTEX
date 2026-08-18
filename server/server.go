@@ -608,6 +608,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
+	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
@@ -1377,7 +1378,9 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 			Severity:  normFilter(q.Get("severity")),
 			Status:    normFilter(q.Get("status")),
 			VulnClass: normFilter(q.Get("vulnclass")),
-			Sort:      q.Get("sort"),
+			// task_id(独立于会切到「按任务节点」分支的 task 参数):全局表按任务筛选。
+			TaskID: normFilter(q.Get("task_id")),
+			Sort:   q.Get("sort"),
 		}
 		fs, total, err := s.m.pg.ListFindingsPage(filter, page, limit)
 		if err != nil {
@@ -1484,6 +1487,43 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 	}
 	assets := s.resolveAssetIDs(f.AssetIDs)
 	writeJSON(w, 200, findingFromDB(f, assets))
+}
+
+// findingLineage returns the exploration sub-DAG from the task root to this
+// finding's node — the finding node + all its ancestors + edges among them — so
+// the detail page can show "how this finding was reached". Empty {nodes,edges}
+// when the finding has no node/task (e.g. the originating task was deleted).
+func (s *Server) findingLineage(w http.ResponseWriter, r *http.Request) {
+	id := int64(atoiDefault(r.PathValue("id"), 0))
+	if id <= 0 {
+		writeErr(w, 400, "bad finding id")
+		return
+	}
+	f, err := s.m.pg.GetFinding(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if f == nil {
+		writeErr(w, 404, "finding not found")
+		return
+	}
+	empty := map[string]any{"nodes": []any{}, "edges": []any{}}
+	if f.NodeID == nil || f.TaskID == nil {
+		writeJSON(w, 200, empty)
+		return
+	}
+	t := s.m.ResolveTask(i64s(*f.TaskID))
+	if t == nil {
+		writeJSON(w, 200, empty)
+		return
+	}
+	nodes, edges, err := t.Store.FindingLineage(*f.NodeID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"nodes": taskNodeDTOs(nodes), "edges": edgeDTOs(edges)})
 }
 
 // patchFinding partially updates a finding: any subset of {status, severity}.

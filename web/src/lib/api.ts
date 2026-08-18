@@ -241,11 +241,15 @@ export const api = {
     if (q.severity && q.severity !== "all") p.set("severity", q.severity);
     if (q.status && q.status !== "all") p.set("status", q.status);
     if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
+    if (q.task && q.task !== "all") p.set("task_id", q.task);
     if (q.sort) p.set("sort", q.sort);
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   getFinding: (id: string) => get<Finding>(`/exploration/findings/${id}`),
+  // 漏洞链路:该漏洞节点回溯到任务初始节点的子图(节点 + 关系)。
+  findingLineage: (id: string) =>
+    get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/findings/${id}/lineage`),
   setFindingStatus: (id: string, status: FindingStatus) =>
     patch<Finding>(`/exploration/findings/${id}`, { status }),
   setFindingSeverity: (id: string, severity: Severity) =>

@@ -63,6 +63,27 @@ func TestExplorationFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// lineage: ancestors of the finding traced backward — here {i2, find} joined by
+	// the yields edge. The proves→goal edge is DOWNSTREAM (goal must be excluded),
+	// and the unrelated intent i1 is not on any path to the finding (excluded too).
+	lnNodes, lnEdges, err := es.FindingLineage(find)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]bool{}
+	for _, n := range lnNodes {
+		got[n.ID] = true
+	}
+	if len(lnNodes) != 2 || !got[find] || !got[i2] {
+		t.Fatalf("lineage nodes: want {i2,find}, got %+v", lnNodes)
+	}
+	if got[goal] {
+		t.Fatalf("lineage must exclude the proved goal (it is downstream of the finding)")
+	}
+	if len(lnEdges) != 1 || lnEdges[0].From != i2 || lnEdges[0].To != find || lnEdges[0].Rel != "yields" {
+		t.Fatalf("lineage edges: want i2-yields->find, got %+v", lnEdges)
+	}
+
 	// activity poll by id cursor
 	id1, err := es.AppendActivity(Activity{Worker: "worker-1", Kind: "tool_use", Tool: "Bash", Summary: "ran curl", Detail: "full output"})
 	if err != nil {

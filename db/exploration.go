@@ -372,6 +372,66 @@ func (s *ExplorationStore) Edges(limit int) ([]Edge, error) {
 	return out, rows.Err()
 }
 
+// FindingLineage returns the sub-DAG that leads FROM the exploration root TO the
+// given node: the node itself plus all its ancestors (nodes reverse-reachable by
+// following edges backward), and every edge whose both endpoints are in that set.
+// Used to render "how this finding was reached" — origin → … → finding. Returns
+// empty (not error) for a nonexistent node.
+func (s *ExplorationStore) FindingLineage(nodeID int64) ([]*Node, []Edge, error) {
+	// anc = the node + everything that can reach it via edges (walk src<-dst).
+	nodeRows, err := s.db.Query(`
+WITH RECURSIVE anc(id) AS (
+    SELECT $2::bigint
+  UNION
+    SELECT e.src_id
+    FROM exploration_edges e
+    JOIN anc ON e.dst_id = anc.id
+    WHERE e.exploration_id = $1
+)
+SELECT `+nodeCols+`
+FROM exploration_nodes
+WHERE exploration_id = $1 AND id IN (SELECT id FROM anc)
+ORDER BY id`, s.expID, nodeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes, err := scanNodes(nodeRows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, nil, nil
+	}
+	// edges among the ancestor set only (the lineage's internal relations).
+	edgeRows, err := s.db.Query(`
+WITH RECURSIVE anc(id) AS (
+    SELECT $2::bigint
+  UNION
+    SELECT e.src_id
+    FROM exploration_edges e
+    JOIN anc ON e.dst_id = anc.id
+    WHERE e.exploration_id = $1
+)
+SELECT src_id, rel, dst_id
+FROM exploration_edges
+WHERE exploration_id = $1
+  AND src_id IN (SELECT id FROM anc)
+  AND dst_id IN (SELECT id FROM anc)`, s.expID, nodeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer edgeRows.Close()
+	var edges []Edge
+	for edgeRows.Next() {
+		var e Edge
+		if err := edgeRows.Scan(&e.From, &e.Rel, &e.To); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, e)
+	}
+	return nodes, edges, edgeRows.Err()
+}
+
 // FindingIntents maps each finding id to the intent that produced it (the
 // intent --yields--> finding edge; report_finding links it). Findings with no
 // producing intent are absent. Precise (JOIN, no edge-scan limit).

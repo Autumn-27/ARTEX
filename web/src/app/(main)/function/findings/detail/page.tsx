@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
 import { Markdown } from "@/components/markdown";
+import { FindingLineageView } from "./lineage";
 import { statusMeta } from "@/lib/status";
 import { api } from "@/lib/api";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
@@ -162,8 +163,7 @@ function FindingDetailInner() {
         </div>
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
-          <TabsTrigger value="evidence">证据 / PoC</TabsTrigger>
-          <TabsTrigger value="meta">元数据</TabsTrigger>
+          <TabsTrigger value="lineage">链路图</TabsTrigger>
         </TabsList>
       </header>
 
@@ -221,6 +221,13 @@ function FindingDetailInner() {
                 <CardTitle className="text-sm">状态</CardTitle>
               </CardHeader>
               <CardContent className="divide-y">
+                {/* 漏洞 ID */}
+                <FieldRow label="漏洞 ID">
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                    #{finding.id}
+                  </code>
+                </FieldRow>
+
                 {/* 严重等级（可改） */}
                 <FieldRow label="严重等级">
                   <Select
@@ -322,42 +329,11 @@ function FindingDetailInner() {
           </div>
         </TabsContent>
 
-        {/* 证据全文 */}
-        <TabsContent value="evidence" className="mt-0">
+        {/* 链路图：从任务初始节点回溯到本漏洞节点的探索链路 */}
+        <TabsContent value="lineage" className="mt-0">
           <Card>
             <CardContent className="pt-6">
-              {finding.evidence ? (
-                <pre className="overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-                  {finding.evidence}
-                </pre>
-              ) : (
-                <p className="text-sm text-muted-foreground">本发现暂无证据文本。</p>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* 元数据 */}
-        <TabsContent value="meta" className="mt-0">
-          <Card>
-            <CardContent className="pt-6">
-              <dl className="grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
-                {[
-                  ["发现 ID", finding.id],
-                  ["漏洞名称", finding.name || "（空，回退漏洞类型）"],
-                  ["漏洞类型", finding.vulnclass || "—"],
-                  ["严重等级", statusMeta("severity", finding.severity).label],
-                  ["处理状态", statusMeta("finding", finding.status).label],
-                  ["所属任务", finding.task_description || finding.task_id || "—"],
-                  ["涉及资产数", String(finding.assets?.length ?? 0)],
-                  ["发现时间", fmtTime(finding.ts)],
-                ].map(([k, v]) => (
-                  <div key={k} className="flex flex-col gap-0.5">
-                    <dt className="text-xs text-muted-foreground">{k}</dt>
-                    <dd className="break-all">{v}</dd>
-                  </div>
-                ))}
-              </dl>
+              <FindingLineageView findingId={finding.id} />
             </CardContent>
           </Card>
         </TabsContent>
