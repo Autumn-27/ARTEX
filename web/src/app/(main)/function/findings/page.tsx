@@ -40,9 +40,13 @@ import type { Finding, FindingStats, FindingStatus, Severity } from "@/lib/types
 
 const FINDING_STATUSES: FindingStatus[] = [
   "pending",
+  "in_progress",
+  "confirmed",
+  "resolved",
   "false_positive",
   "ignored",
-  "resolved",
+  "duplicate",
+  "risk_accepted",
 ];
 
 const EMPTY_STATS: FindingStats = {

@@ -239,8 +239,16 @@ export interface TaskNode {
 // ---- Findings ----
 export type Severity = "high" | "medium" | "low";
 
-// 漏洞处置状态:待处理 / 误报 / 忽略 / 已处理。
-export type FindingStatus = "pending" | "false_positive" | "ignored" | "resolved";
+// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 误报 / 忽略 / 重复 / 风险接受。
+export type FindingStatus =
+  | "pending"
+  | "in_progress"
+  | "confirmed"
+  | "resolved"
+  | "false_positive"
+  | "ignored"
+  | "duplicate"
+  | "risk_accepted";
 
 // FindingAsset 是一个漏洞绑定的资产(已在后端预渲染 label)。
 export interface FindingAsset {

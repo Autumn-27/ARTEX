@@ -26,15 +26,20 @@ type DBFinding struct {
 // Finding triage states (findings.status).
 const (
 	FindingPending       = "pending"        // 待处理
+	FindingInProgress    = "in_progress"    // 处理中
+	FindingConfirmed     = "confirmed"      // 已确认(真实漏洞,未修复)
+	FindingResolved      = "resolved"       // 已处理(已修复)
 	FindingFalsePositive = "false_positive" // 误报
 	FindingIgnored       = "ignored"        // 忽略
-	FindingResolved      = "resolved"       // 已处理
+	FindingDuplicate     = "duplicate"      // 重复
+	FindingRiskAccepted  = "risk_accepted"  // 风险接受
 )
 
 // ValidFindingStatus reports whether s is a known triage state.
 func ValidFindingStatus(s string) bool {
 	switch s {
-	case FindingPending, FindingFalsePositive, FindingIgnored, FindingResolved:
+	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved,
+		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted:
 		return true
 	}
 	return false

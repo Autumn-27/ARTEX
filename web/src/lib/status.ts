@@ -65,9 +65,13 @@ const severity: Record<string, StatusMeta> = {
 
 const finding: Record<string, StatusMeta> = {
   pending: { label: "待处理", tone: "amber" },
+  in_progress: { label: "处理中", tone: "blue" },
+  confirmed: { label: "已确认", tone: "red" },
+  resolved: { label: "已处理", tone: "green" },
   false_positive: { label: "误报", tone: "slate" },
   ignored: { label: "忽略", tone: "neutral" },
-  resolved: { label: "已处理", tone: "green" },
+  duplicate: { label: "重复", tone: "neutral" },
+  risk_accepted: { label: "风险接受", tone: "violet" },
 };
 
 const engine: Record<string, StatusMeta> = {
