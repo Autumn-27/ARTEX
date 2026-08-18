@@ -329,13 +329,9 @@ function FindingDetailInner() {
           </div>
         </TabsContent>
 
-        {/* 链路图：从任务初始节点回溯到本漏洞节点的探索链路 */}
+        {/* 链路图：从任务初始节点回溯到本漏洞节点的攻击链路 */}
         <TabsContent value="lineage" className="mt-0">
-          <Card>
-            <CardContent className="pt-6">
-              <FindingLineageView findingId={finding.id} />
-            </CardContent>
-          </Card>
+          <FindingLineageView findingId={finding.id} />
         </TabsContent>
       </div>
     </Tabs>
