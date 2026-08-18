@@ -582,7 +582,7 @@ func splitLines(s string) []string {
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.listFindings(), t.listFacts(), t.nodeDetail(),
-		t.addFinding(), t.updateFindingReport(), t.recordFact(),
+		t.addFinding(), t.recordFact(),
 		// cross-work retrieval
 		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
 		// asset management (handlers guard nil store internally)
@@ -599,7 +599,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setGoals(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
-		t.addFinding(), t.updateFindingReport(), t.recordFact(),
+		t.addFinding(), t.recordFact(),
 		t.addTaskScope(),
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),

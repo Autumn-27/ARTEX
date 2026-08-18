@@ -156,6 +156,7 @@ func (t *ToolSet) ListFindingsTool() actool.CoreTool       { return t.listFindin
 func (t *ToolSet) GetWorkerTraceTool() actool.CoreTool     { return t.getWorkerTrace() }
 func (t *ToolSet) ListWorkerTracesTool() actool.CoreTool   { return t.listWorkerTraces() }
 func (t *ToolSet) SearchWorkerTracesTool() actool.CoreTool { return t.searchAllWorkerTraces() }
+func (t *ToolSet) NodeDetailTool() actool.CoreTool         { return t.nodeDetail() }
 func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() }
 
 // SetEnrich wires the async enrichment engine (DNS/HTTP auto-completion).
@@ -693,39 +694,6 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			}
 			t.writes.Findings++
 			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
-		})
-}
-
-// updateFindingReport sets/overwrites a finding's detailed Markdown report
-// (findings.report), addressed by the id report_finding returned.
-func (t *ToolSet) updateFindingReport() actool.CoreTool {
-	return writeTool("update_finding_report",
-		"为已登记的漏洞补充/更新【详细报告】。report 传 Markdown 全文(建议含:漏洞概述、影响、复现步骤、证据/PoC、修复建议)。finding_id 传 report_finding 返回的那个 id。整段覆盖该漏洞已有的报告。",
-		obj(map[string]any{
-			"finding_id": idp("目标漏洞 id(report_finding 返回的 id)"),
-			"report":     str("详细报告全文,Markdown 格式"),
-		}, "finding_id", "report"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				FindingID json.RawMessage `json:"finding_id"`
-				Report    string          `json:"report"`
-			}
-			_ = json.Unmarshal(in, &a)
-			nodeID := pid(a.FindingID)
-			if nodeID <= 0 {
-				return actool.Errorf("finding_id 无效"), nil
-			}
-			if t.ts == nil {
-				return actool.Errorf("update_finding_report 需要任务上下文（exploration store 未初始化）"), nil
-			}
-			n, err := t.ts.SetFindingReport(nodeID, a.Report)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			if n == 0 {
-				return actool.Errorf(fmt.Sprintf("未找到 finding_id=%d 对应的漏洞记录（先用 report_finding 登记）", nodeID)), nil
-			}
-			return actool.Text(fmt.Sprintf("finding %d report updated (%d chars)", nodeID, len(a.Report))), nil
 		})
 }
 
@@ -1283,7 +1251,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
-		t.addFinding(), t.updateFindingReport(),
+		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -72,6 +73,8 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolGetWorkerTrace(),
 		s.toolListWorkerTraces(),
 		s.toolSearchWorkerTraces(),
+		s.toolGetTaskNodeDetail(),
+		s.toolUpdateFindingReport(),
 	}
 }
 
@@ -234,11 +237,11 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 	return wrTool("spawn_task",
 		"新建一个子任务并启动探索引擎，返回 task_id。用于把一件事(如一道题/一个目标)派成独立任务。parent_ref 可选：填当前编排关联的父任务 id 做父子关联。",
 		objSchema(map[string]any{
-			"description":       strParam("任务描述(简短标题)"),
-			"goal":              strParam("任务目标(要达成什么)"),
-			"parent_ref":        strParam("可选：父任务 id(做父子关联)"),
-			"llm_profile_id":    map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
-			"timeout_seconds":   map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
+			"description":            strParam("任务描述(简短标题)"),
+			"goal":                   strParam("任务目标(要达成什么)"),
+			"parent_ref":             strParam("可选：父任务 id(做父子关联)"),
+			"llm_profile_id":         map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
+			"timeout_seconds":        map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
 			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 600(10min)；"},
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：对于简单任务可开启，创建时直接下发一条种子意图(内容=描述+目标)让 worker 免等首轮 planner 直接开跑测试；默认 false(走标准先规划再执行)。"},
 		}, "description", "goal"),
@@ -365,6 +368,50 @@ func (s *Server) toolSearchWorkerTraces() actool.CoreTool {
 		})
 }
 
+func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
+	return roTool("get_task_node_detail",
+		"读指定任务里某个探索图节点的完整内容(发现/事实/意图/目标：摘要 + 详情/证据/PoC)。id 为探索节点 id(如 report_finding 返回、或 list_task_findings 里的 id)。写漏洞报告前用它取该漏洞的完整证据。",
+		objSchema(map[string]any{
+			"task_id": strParam("任务 id"),
+			"id":      map[string]any{"type": "integer", "description": "探索图节点 id(非资产 id)"},
+		}, "task_id", "id"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			return s.delegateToTask(ctx, in, (*agent.ToolSet).NodeDetailTool)
+		})
+}
+
+// toolUpdateFindingReport writes/overwrites a finding's detailed Markdown report.
+// finding_id is the id report_finding returned ("finding recorded: <id>", the
+// finding node id). The write (SetFindingReportByNodeID) is keyed by node_id and
+// task-agnostic, so this host tool needs no task_id / exploration store.
+func (s *Server) toolUpdateFindingReport() actool.CoreTool {
+	return wrTool("update_finding_report",
+		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
+		objSchema(map[string]any{
+			"finding_id": map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
+			"report":     strParam("详细报告全文,Markdown 格式"),
+		}, "finding_id", "report"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				FindingID json.RawMessage `json:"finding_id"`
+				Report    string          `json:"report"`
+			}
+			_ = json.Unmarshal(in, &a)
+			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
+			if nodeID <= 0 {
+				return actool.Errorf("finding_id 无效"), nil
+			}
+			n, err := s.m.pg.SetFindingReportByNodeID(nodeID, a.Report)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if n == 0 {
+				return actool.Errorf(fmt.Sprintf("未找到 finding_id=%d 对应的漏洞记录(先用 report_finding 登记)", nodeID)), nil
+			}
+			return actool.Text(fmt.Sprintf("finding %d report updated (%d chars)", nodeID, len(a.Report))), nil
+		})
+}
+
 // deriveTaskStatus mirrors listTasks' status derivation for the list_tasks tool.
 func (s *Server) deriveTaskStatus(t *Task) string {
 	switch {
@@ -398,6 +445,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
+	s.seedReporterAgent() // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -450,6 +498,53 @@ func (s *Server) unbindGoalMetDefault() {
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：
+// 绑定 update_finding_report + 任务查询工具，并挂一个「report_finding 被调用即触发」的
+// 触发器 —— 每登记一个漏洞就唤起它写详细报告。一次性(settings flag 守卫)：用户删掉后不再重建。
+// 依赖：orchestration 工具已在本函数上方 SeedTool 入库，故绑定得上。
+func (s *Server) seedReporterAgent() {
+	const flag = "reporter_agent_seed_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+
+	if exist, _ := s.m.pg.GetAgentByKey("reporter"); exist != nil {
+		return // key 已被占用(用户手建过)——不覆盖
+	}
+	a, err := s.m.pg.CreateAgent("reporter", "报告撰写",
+		"漏洞详细报告撰写：发现漏洞时自动触发，查取证据与执行过程后写 Markdown 报告并回写。")
+	if err != nil {
+		log.Printf("[reporter] 创建 agent 失败: %v", err)
+		return
+	}
+	if err := s.m.pg.SeedPromptIfEmpty(a.ID, agent.ReporterDefaultPrompt); err != nil {
+		log.Printf("[reporter] seed prompt 失败: %v", err)
+	}
+	// 绑定它需要的工具：写报告 + 读证据/执行过程/态势。
+	if err := s.m.pg.AddAgentToToolBinding("reporter", []string{
+		"update_finding_report", "get_task_node_detail", "list_task_findings",
+		"get_task_worker_trace", "list_task_worker_traces", "search_task_worker_traces",
+		"get_task_graph",
+	}); err != nil {
+		log.Printf("[reporter] 绑定工具失败: %v", err)
+	}
+	// 触发器：report_finding 被调用即触发（工具返回 "finding recorded: <id>" 带上 finding_id，
+	// 任务 id 也在触发消息里）。
+	if _, err := s.m.pg.CreateTrigger(&db.AgentTrigger{
+		AgentKey:   "reporter",
+		Enabled:    true,
+		OnToolCall: true,
+		ToolNames:  []string{"report_finding"},
+		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请从触发上下文里取出 finding_id" +
+			"（工具返回 \"finding recorded: <id>\" 里的数字）与任务 id，按你的职责撰写该漏洞的详细报告，" +
+			"最后调用 update_finding_report(finding_id, report) 保存。",
+	}); err != nil {
+		log.Printf("[reporter] 创建触发器失败: %v", err)
+	}
+	log.Printf("[reporter] 已预置「报告撰写」agent + finding 触发器")
 }
 
 // seedAutoReportFindingBinding adds "auto" to report_finding's binding ONCE so

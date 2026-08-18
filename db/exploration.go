@@ -889,9 +889,3 @@ FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.
 func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
 	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
 }
-
-// SetFindingReport sets a finding's Markdown detail report, addressed by its
-// finding node id (the id report_finding returns). Returns rows affected.
-func (s *ExplorationStore) SetFindingReport(nodeID int64, report string) (int64, error) {
-	return s.db.SetFindingReportByNodeID(nodeID, report)
-}
