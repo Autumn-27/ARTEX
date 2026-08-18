@@ -150,6 +150,28 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* 原始任务描述与目标(创建时填写的),置顶便于随时回看。 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <TargetIcon className="size-4 text-primary" /> 任务描述与目标
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">描述</div>
+            <p className="text-sm whitespace-pre-wrap break-words">
+              {task?.description?.trim() || "—"}
+            </p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">目标</div>
+            <p className="text-sm whitespace-pre-wrap break-words">
+              {task?.goal?.trim() || "—"}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
       {coverage && coverage.scope_rows > 0 && (
         <Card>
           <CardHeader>
