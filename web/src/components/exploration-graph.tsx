@@ -444,6 +444,7 @@ function ExplorationGraphInner({
         fitView
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
+        onlyRenderVisibleElements
         minZoom={0.1}
         className="!bg-[#f0f2f7] dark:!bg-neutral-950"
       >
