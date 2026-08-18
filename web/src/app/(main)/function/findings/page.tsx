@@ -336,7 +336,7 @@ export default function FindingsPage() {
                                   dot
                                 />
                               </SelectTrigger>
-                              <SelectContent>
+                              <SelectContent position="popper" align="end">
                                 {FINDING_STATUSES.map((st) => (
                                   <SelectItem key={st} value={st}>
                                     {statusMeta("finding", st).label}
