@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRightIcon } from "lucide-react";
+import Link from "next/link";
+import { ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
@@ -102,6 +103,16 @@ function Row({
         <span className="hidden shrink-0 text-xs text-muted-foreground md:block">
           {new Date(f.ts).toLocaleString("zh-CN")}
         </span>
+        {f.finding_id && (
+          <Link
+            href={`/function/findings/detail?id=${f.finding_id}`}
+            className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
+            title="查看漏洞详情"
+          >
+            详情
+            <ArrowUpRightIcon className="size-3" />
+          </Link>
+        )}
       </div>
       {open && (
         <div className="bg-muted/30 px-4 pb-4 pl-11">
