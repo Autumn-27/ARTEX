@@ -292,6 +292,15 @@ export interface FindingStats {
   medium: number;
   low: number;
   vulnclasses: string[];
+  tasks: FindingTaskOption[];
+}
+
+// FindingTaskOption 是发现页「按任务」筛选下拉的一项:有漏洞的任务(描述为空表示任务已删除,
+// 前端回退展示 id)及其漏洞条数。
+export interface FindingTaskOption {
+  id: number;
+  description: string;
+  count: number;
 }
 
 // FindingQuery 是发现列表分页/筛选/排序参数。
@@ -301,6 +310,7 @@ export interface FindingQuery {
   severity?: "all" | Severity;
   status?: "all" | FindingStatus;
   vulnclass?: string;
+  task?: string; // 任务 id;"all"/空 = 不按任务筛选
   sort?: "severity" | "time";
 }
 

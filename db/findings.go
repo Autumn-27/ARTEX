@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -141,6 +142,7 @@ type FindingFilter struct {
 	Severity  string // high | medium | low
 	Status    string // pending | false_positive | ignored | resolved
 	VulnClass string
+	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
 	Sort      string // "severity" | "time"
 }
 
@@ -159,6 +161,11 @@ func (f FindingFilter) where() (string, []any) {
 	add("severity", f.Severity)
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
+	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
+	if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
+		args = append(args, tid)
+		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
+	}
 	if len(conds) == 0 {
 		return "", args
 	}
@@ -206,19 +213,30 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 // and vuln-class filter — computed server-side so it stays exact regardless of
 // pagination.
 type FindingStats struct {
-	Total       int      `json:"total"`
-	Pending     int      `json:"pending"`
-	Critical    int      `json:"critical"`
-	High        int      `json:"high"`
-	Medium      int      `json:"medium"`
-	Low         int      `json:"low"`
-	VulnClasses []string `json:"vulnclasses"`
+	Total       int                 `json:"total"`
+	Pending     int                 `json:"pending"`
+	Critical    int                 `json:"critical"`
+	High        int                 `json:"high"`
+	Medium      int                 `json:"medium"`
+	Low         int                 `json:"low"`
+	VulnClasses []string            `json:"vulnclasses"`
+	Tasks       []FindingTaskOption `json:"tasks"` // 有漏洞的任务(供「按任务」下拉)
+}
+
+// FindingTaskOption is one entry in the 发现 page's 任务 filter: a task that has at
+// least one finding, with its description and finding count. Description is empty when
+// the task has since been deleted (finding rows persist), so the frontend falls back to
+// the id.
+type FindingTaskOption struct {
+	ID          int64  `json:"id"`
+	Description string `json:"description"`
+	Count       int    `json:"count"`
 }
 
 // FindingStats returns whole-table counts (by severity + pending) and the sorted
 // set of distinct vuln classes.
 func (d *DB) FindingStats() (*FindingStats, error) {
-	st := &FindingStats{VulnClasses: []string{}}
+	st := &FindingStats{VulnClasses: []string{}, Tasks: []FindingTaskOption{}}
 	err := d.QueryRow(`SELECT
 		COUNT(*),
 		COUNT(*) FILTER (WHERE status = 'pending'),
@@ -242,7 +260,29 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		}
 		st.VulnClasses = append(st.VulnClasses, vc)
 	}
-	return st, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 任务下拉:有漏洞的任务,带描述(任务删除后为空,前端回退 id)和条数,最新有漏洞的排前。
+	trows, err := d.Query(`SELECT f.task_id, COALESCE(t.description, ''), COUNT(*)
+		FROM findings f
+		LEFT JOIN tasks t ON f.task_id = t.id
+		WHERE f.task_id IS NOT NULL
+		GROUP BY f.task_id, t.description
+		ORDER BY MAX(f.created_at) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var opt FindingTaskOption
+		if err := trows.Scan(&opt.ID, &opt.Description, &opt.Count); err != nil {
+			return nil, err
+		}
+		st.Tasks = append(st.Tasks, opt)
+	}
+	return st, trows.Err()
 }
 
 // GetFinding returns a single finding row (with task_description joined and the
@@ -288,13 +328,15 @@ func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error
 	return res.RowsAffected()
 }
 
-// SetFindingSeverity updates one finding's severity in the standalone table AND
-// keeps the originating exploration node's payload in sync (the per-task view
-// reads severity from the node payload, not this table). Returns rows affected
-// (0 when no finding has that id). The node sync is best-effort.
-func (d *DB) SetFindingSeverity(id int64, severity string) (int64, error) {
+// setFindingCol updates one text column on the standalone finding row AND mirrors
+// the new value into the originating exploration node's payload under jsonKey, so the
+// per-task 发现 Tab (which reads the node payload, not this table) stays in sync.
+// Returns rows affected (0 when no finding has that id); the node sync is best-effort.
+// col and jsonKey MUST be trusted constants (they are interpolated into SQL) — never
+// pass user input.
+func (d *DB) setFindingCol(id int64, col, jsonKey, val string) (int64, error) {
 	var nodeID *int64
-	err := d.QueryRow(`UPDATE findings SET severity=$1 WHERE id=$2 RETURNING node_id`, severity, id).Scan(&nodeID)
+	err := d.QueryRow(`UPDATE findings SET `+col+`=$1 WHERE id=$2 RETURNING node_id`, val, id).Scan(&nodeID)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -302,14 +344,28 @@ func (d *DB) SetFindingSeverity(id int64, severity string) (int64, error) {
 		return 0, err
 	}
 	if nodeID != nil {
-		// jsonb_set the {severity} key so the finding node (read by the per-task
-		// 发现 Tab) shows the same level. Ignore errors — the standalone row is the
-		// source of truth for the global 发现 page.
 		_, _ = d.Exec(`UPDATE exploration_nodes
-			SET payload = jsonb_set(payload, '{severity}', to_jsonb($1::text))
-			WHERE id = $2`, severity, *nodeID)
+			SET payload = jsonb_set(payload, '{`+jsonKey+`}', to_jsonb($1::text))
+			WHERE id = $2`, val, *nodeID)
 	}
 	return 1, nil
+}
+
+// SetFindingSeverity updates one finding's severity (+ node payload sync). Returns
+// rows affected (0 when no finding has that id).
+func (d *DB) SetFindingSeverity(id int64, severity string) (int64, error) {
+	return d.setFindingCol(id, "severity", "severity", severity)
+}
+
+// SetFindingName updates one finding's 漏洞名称 (+ node payload sync). Empty name is
+// allowed — the frontend falls back to the vuln class for display.
+func (d *DB) SetFindingName(id int64, name string) (int64, error) {
+	return d.setFindingCol(id, "name", "name", name)
+}
+
+// SetFindingVulnClass updates one finding's 漏洞类别 (+ node payload sync).
+func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
+	return d.setFindingCol(id, "vulnclass", "vulnclass", vulnclass)
 }
 
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the

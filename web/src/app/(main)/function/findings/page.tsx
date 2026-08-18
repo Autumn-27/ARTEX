@@ -6,9 +6,14 @@ import {
   ChevronRightIcon,
   ShieldAlertIcon,
   ArrowUpRightIcon,
+  FileTextIcon,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import { Markdown } from "@/components/markdown";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -38,6 +43,8 @@ import { toast } from "sonner";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingStats, FindingStatus, Severity } from "@/lib/types";
 
+const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
+
 const FINDING_STATUSES: FindingStatus[] = [
   "pending",
   "in_progress",
@@ -57,6 +64,7 @@ const EMPTY_STATS: FindingStats = {
   medium: 0,
   low: 0,
   vulnclasses: [],
+  tasks: [],
 };
 
 function fmtTime(ts: string) {
@@ -72,6 +80,7 @@ export default function FindingsPage() {
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
   const [vulnclass, setVulnclass] = React.useState<string>("all");
+  const [task, setTask] = React.useState<string>("all");
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [findings, setFindings] = React.useState<Finding[]>([]);
@@ -83,7 +92,7 @@ export default function FindingsPage() {
   // reset to page 1 whenever filters change
   React.useEffect(() => {
     setPage(1);
-  }, [severity, status, vulnclass, sort]);
+  }, [severity, status, vulnclass, task, sort]);
 
   // Server-driven list: paging + filtering + sorting all happen in SQL. Polls the
   // current page every 5s, and refetches immediately when any query input changes.
@@ -91,7 +100,7 @@ export default function FindingsPage() {
     let alive = true;
     const load = () => {
       api
-        .findingsPage({ page, pageSize, severity, status, vulnclass, sort })
+        .findingsPage({ page, pageSize, severity, status, vulnclass, task, sort })
         .then((res) => {
           if (!alive) return;
           setFindings(res.items);
@@ -105,7 +114,7 @@ export default function FindingsPage() {
       alive = false;
       clearInterval(t);
     };
-  }, [page, pageSize, severity, status, vulnclass, sort]);
+  }, [page, pageSize, severity, status, vulnclass, task, sort]);
 
   // Whole-table aggregates (stat cards + vuln-class options) — independent of the
   // current page, so they stay exact.
@@ -152,6 +161,74 @@ export default function FindingsPage() {
       }
     },
     [status],
+  );
+
+  // 行内展开的详细报告缓存,按行 key(f.id)存。report 是大段 Markdown,列表查询不带它,
+  // 故展开时才按 finding_id 单独拉取一次;done 且文本为空 = 该漏洞暂无报告。
+  const [reports, setReports] = React.useState<
+    Record<string, { status: "loading" | "done" | "error"; text: string }>
+  >({});
+
+  // 行内可编辑缓冲:当前展开行的名称/类别/严重等级,展开时用该行数据初始化,收起清空。
+  // 单行展开,故一份缓冲即可。
+  const [edit, setEdit] = React.useState<
+    { name: string; vulnclass: string; severity: Severity } | null
+  >(null);
+  const [saving, setSaving] = React.useState(false);
+
+  // toggle 展开/收起一行;新展开时初始化编辑缓冲,并(尚未取过时)按 finding_id 拉一次报告缓存。
+  const toggleRow = React.useCallback(
+    (f: Finding) => {
+      const willOpen = expanded !== f.id;
+      setExpanded(willOpen ? f.id : null);
+      if (!willOpen) {
+        setEdit(null);
+        return;
+      }
+      setEdit({ name: f.name ?? "", vulnclass: f.vulnclass ?? "", severity: f.severity });
+      if (!f.finding_id || reports[f.id]) return;
+      const fid = f.finding_id;
+      const key = f.id;
+      setReports((r) => ({ ...r, [key]: { status: "loading", text: "" } }));
+      api
+        .getFinding(fid)
+        .then((full) =>
+          setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "" } })),
+        )
+        .catch(() =>
+          setReports((r) => ({ ...r, [key]: { status: "error", text: "" } })),
+        );
+    },
+    [expanded, reports],
+  );
+
+  // saveEdit 保存当前展开行的名称/类别/严重等级,回写本地列表并刷新统计(类别下拉/严重计数可能变)。
+  const saveEdit = React.useCallback(
+    async (f: Finding) => {
+      if (!f.finding_id || !edit) return;
+      setSaving(true);
+      try {
+        const updated = await api.updateFinding(f.finding_id, {
+          name: edit.name.trim(),
+          vulnclass: edit.vulnclass.trim(),
+          severity: edit.severity,
+        });
+        setFindings((cur) =>
+          cur.map((x) =>
+            x.id === f.id
+              ? { ...x, name: updated.name, vulnclass: updated.vulnclass, severity: updated.severity }
+              : x,
+          ),
+        );
+        toast.success("已保存");
+        api.findingStats().then(setStats).catch(() => {});
+      } catch (e) {
+        toast.error("保存失败：" + (e as Error).message);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [edit],
   );
 
   const statCards: { label: string; value: number; tone?: string }[] = [
@@ -241,6 +318,31 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
+          <Select value={task} onValueChange={setTask}>
+            <SelectTrigger size="sm" className="w-48">
+              <SelectValue placeholder="任务" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部任务</SelectItem>
+              {(stats.tasks ?? []).map((t) => {
+                const id = String(t.id);
+                const label = t.description || `任务 #${id}（已删除）`;
+                return (
+                  <SelectItem key={id} value={id}>
+                    <span className="flex w-full items-center gap-2">
+                      <span className="max-w-[14rem] truncate" title={label}>
+                        {label}
+                      </span>
+                      <span className="text-muted-foreground tabular-nums">
+                        {t.count}
+                      </span>
+                    </span>
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+
           <Select
             value={sort}
             onValueChange={(v) => setSort(v as "severity" | "time")}
@@ -261,7 +363,9 @@ export default function FindingsPage() {
 
         <Card className="py-0">
           <CardContent className="px-0">
-            <Table>
+            {/* table-fixed:列宽由表头锁定,展开行那个 colSpan 单元格再宽也只能在固定宽度内
+                换行/内部滚动,不会把整张表撑出横向滚动条。 */}
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8" />
@@ -280,7 +384,7 @@ export default function FindingsPage() {
                     <React.Fragment key={f.id}>
                       <TableRow
                         className="cursor-pointer"
-                        onClick={() => setExpanded(open ? null : f.id)}
+                        onClick={() => toggleRow(f)}
                       >
                         <TableCell>
                           <ChevronRightIcon
@@ -389,11 +493,61 @@ export default function FindingsPage() {
                       </TableRow>
                       {open && (
                         <TableRow className="hover:bg-transparent">
-                          <TableCell colSpan={7} className="bg-muted/30">
+                          {/* whitespace-normal 覆盖 TableCell 默认的 nowrap,否则展开区文字
+                              被强制单行、直接溢出单元格。 */}
+                          <TableCell colSpan={7} className="bg-muted/30 whitespace-normal">
                             <div className="flex flex-col gap-2 px-2 py-1">
+                              {/* 行内编辑:名称/类别/严重等级,可改并保存(仅独立 finding 行)。 */}
+                              {f.finding_id && edit && (
+                                <div className="flex flex-wrap items-end gap-3 rounded-md border bg-background px-3 py-2.5">
+                                  <div className="flex min-w-[12rem] flex-1 flex-col gap-1">
+                                    <Label className="text-xs text-muted-foreground">漏洞名称</Label>
+                                    <Input
+                                      value={edit.name}
+                                      onChange={(e) =>
+                                        setEdit((s) => (s ? { ...s, name: e.target.value } : s))
+                                      }
+                                      placeholder="可读标题，留空回退类别"
+                                    />
+                                  </div>
+                                  <div className="flex min-w-[10rem] flex-col gap-1">
+                                    <Label className="text-xs text-muted-foreground">类别</Label>
+                                    <Input
+                                      value={edit.vulnclass}
+                                      onChange={(e) =>
+                                        setEdit((s) => (s ? { ...s, vulnclass: e.target.value } : s))
+                                      }
+                                      placeholder="如 SQL Injection"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <Label className="text-xs text-muted-foreground">严重等级</Label>
+                                    <Select
+                                      value={edit.severity}
+                                      onValueChange={(v) =>
+                                        setEdit((s) => (s ? { ...s, severity: v as Severity } : s))
+                                      }
+                                    >
+                                      <SelectTrigger size="sm" className="w-28">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {SEVERITIES.map((sv) => (
+                                          <SelectItem key={sv} value={sv}>
+                                            {statusMeta("severity", sv).label}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <Button size="sm" disabled={saving} onClick={() => saveEdit(f)}>
+                                    {saving ? "保存中…" : "保存"}
+                                  </Button>
+                                </div>
+                              )}
                               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                 <ShieldAlertIcon className="size-3.5" />
-                                证据 · {f.id}
+                                证据
                                 {f.vulnclass && (
                                   <span>
                                     · 类型：
@@ -425,6 +579,43 @@ export default function FindingsPage() {
                               <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">
                                 {f.evidence}
                               </pre>
+
+                              {/* 详细报告(Markdown):展开时按 finding_id 懒加载,免进详情页即可查看。 */}
+                              {f.finding_id && (
+                                <div className="flex flex-col gap-1.5">
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <FileTextIcon className="size-3.5" />
+                                    详细报告
+                                  </div>
+                                  {(() => {
+                                    const rep = reports[f.id];
+                                    if (!rep || rep.status === "loading")
+                                      return (
+                                        <p className="text-xs text-muted-foreground">加载中…</p>
+                                      );
+                                    if (rep.status === "error")
+                                      return (
+                                        <p className="text-xs text-muted-foreground">
+                                          报告加载失败。
+                                        </p>
+                                      );
+                                    if (!rep.text.trim())
+                                      return (
+                                        <p className="text-xs text-muted-foreground">
+                                          暂无详细报告。
+                                        </p>
+                                      );
+                                    return (
+                                      // break-words 会继承到段落/列表,pre 另加
+                                      // whitespace-pre-wrap 让代码块也换行——否则长代码行/长 URL
+                                      // 会撑宽 colSpan 单元格,把整张表挤出横向滚动条。
+                                      <div className="min-w-0 break-words rounded-md border bg-background px-3 py-2 [&_pre]:whitespace-pre-wrap">
+                                        <Markdown text={rep.text} />
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>

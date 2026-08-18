@@ -254,6 +254,11 @@ export const api = {
     patch<Finding>(`/exploration/findings/${id}`, { status }),
   setFindingSeverity: (id: string, severity: Severity) =>
     patch<Finding>(`/exploration/findings/${id}`, { severity }),
+  // 一次保存漏洞的名称/类别/严重等级(发现列表行内编辑用),只传出现的字段。
+  updateFinding: (
+    id: string,
+    fields: { name?: string; vulnclass?: string; severity?: Severity; status?: FindingStatus },
+  ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
   tokenStats: (task?: string) =>
     get<{ workers: TokenUsage[]; total: TokenTotal }>(`/exploration/tokens${tq(task)}`).then((r) => ({
