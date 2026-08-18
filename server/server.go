@@ -802,7 +802,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	paused := s.engine.IsPaused(t.ID)
 	running := s.engine.Ready() && s.engine.Started(t.ID) && !paused
 	// stalled: running but no activity for a while and nothing in flight.
-	stalled := running && inFlight == 0 && last > 0 && time.Now().Unix()-last > 60
+	stalled := running && inFlight == 0 && last > 0 && time.Now().Unix()-last > 120
 
 	// engine_mode follows the spec enum (exploring|paused|stalled|idle).
 	switch {
