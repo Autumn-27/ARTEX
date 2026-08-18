@@ -75,6 +75,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/frontier") return D.frontier;
   if (path === "/exploration/findings/stats") {
     const vulnclasses = Array.from(new Set(D.findings.map((f) => f.vulnclass))).sort();
+    // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
+    const taskMap = new Map<string, { description: string; count: number }>();
+    for (const f of D.findings) {
+      if (!f.task_id) continue;
+      const cur = taskMap.get(f.task_id) ?? { description: f.task_description ?? "", count: 0 };
+      cur.count++;
+      taskMap.set(f.task_id, cur);
+    }
+    const tasks = Array.from(taskMap, ([id, v]) => ({ id, description: v.description, count: v.count }));
     return {
       total: D.findings.length,
       pending: D.findings.filter((f) => f.status === "pending").length,
@@ -83,9 +92,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       medium: D.findings.filter((f) => f.severity === "medium").length,
       low: D.findings.filter((f) => f.severity === "low").length,
       vulnclasses,
+      tasks,
     };
   }
-  // 单条 finding:GET 详情 / PATCH 改状态或严重度(demo 直接改内存对象)。
+  // 单条 finding:GET 详情 / PATCH 改状态/严重度/名称/类别(demo 直接改内存对象)。
   if (
     seg[0] === "exploration" &&
     seg[1] === "findings" &&
@@ -98,6 +108,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
       if (typeof b.severity === "string")
         f.severity = b.severity as typeof f.severity;
+      if (typeof b.name === "string") f.name = b.name;
+      if (typeof b.vulnclass === "string") f.vulnclass = b.vulnclass;
     }
     return { ...f, finding_id: f.id };
   }
@@ -117,9 +129,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const fSev = q.get("severity");
     const fStatus = q.get("status");
     const fVuln = q.get("vulnclass");
+    const fTask = q.get("task_id");
     if (fSev) list = list.filter((f) => f.severity === fSev);
     if (fStatus) list = list.filter((f) => f.status === fStatus);
     if (fVuln) list = list.filter((f) => f.vulnclass === fVuln);
+    if (fTask) list = list.filter((f) => f.task_id === fTask);
     list.sort((a, b) =>
       q.get("sort") === "severity"
         ? sev[b.severity] - sev[a.severity] || +new Date(b.ts) - +new Date(a.ts)
