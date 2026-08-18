@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { EyeIcon, GitCompareIcon, InfoIcon, RotateCcwIcon, SaveIcon, Trash2Icon } from "lucide-react";
+import { EyeIcon, GitCompareIcon, InfoIcon, PencilIcon, RotateCcwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -768,6 +768,8 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   const [taskCreateMsg, setTaskCreateMsg] = React.useState("");
   const [toolNames, setToolNames] = React.useState<string[]>([]);
   const [saving, setSaving] = React.useState(false);
+  // null = 新增模式；非 null = 正在编辑该 id 的触发器。
+  const [editingId, setEditingId] = React.useState<number | null>(null);
 
   const reload = React.useCallback(() => {
     api.agentTriggers(agentKey).then(setTriggers).catch(() => setTriggers([]));
@@ -783,7 +785,46 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
     setToolNames((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   }
 
-  async function create() {
+  // resetForm 清空表单并回到「新增」模式。
+  function resetForm() {
+    setEditingId(null);
+    setOnInterval(false);
+    setIntervalSec("60");
+    setOnFinding(false);
+    setOnGoalMet(false);
+    setOnTaskTimeout(false);
+    setOnToolCall(false);
+    setOnTaskCreate(false);
+    setIntervalMsg("");
+    setFindingMsg("");
+    setGoalMsg("");
+    setTaskTimeoutMsg("");
+    setToolCallMsg("");
+    setTaskCreateMsg("");
+    setToolNames([]);
+  }
+
+  // startEdit 把某条已有触发器灌进表单,进入「编辑」模式。
+  function startEdit(t: AgentTrigger) {
+    setEditingId(t.id);
+    setOnInterval(t.interval_sec > 0);
+    setIntervalSec(t.interval_sec > 0 ? String(t.interval_sec) : "60");
+    setOnFinding(t.on_finding);
+    setOnGoalMet(t.on_goal_met);
+    setOnTaskTimeout(t.on_task_timeout);
+    setOnToolCall(t.on_tool_call);
+    setOnTaskCreate(t.on_task_create);
+    setIntervalMsg(t.interval_message);
+    setFindingMsg(t.finding_message);
+    setGoalMsg(t.goal_message);
+    setTaskTimeoutMsg(t.task_timeout_message);
+    setToolCallMsg(t.tool_call_message);
+    setTaskCreateMsg(t.task_create_message);
+    setToolNames(t.tool_names ?? []);
+  }
+
+  // submit 依 editingId 走「新增」或「保存修改」;编辑时保留该触发器的启用状态。
+  async function submit() {
     const n = onInterval ? Math.max(1, Math.floor(Number(intervalSec) || 0)) : 0;
     if (n === 0 && !onFinding && !onGoalMet && !onTaskTimeout && !onToolCall && !onTaskCreate) {
       toast.error("至少选择一种触发条件");
@@ -793,42 +834,35 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
       toast.error("工具调用触发至少选择一个工具");
       return;
     }
+    const body = {
+      interval_sec: n,
+      on_finding: onFinding,
+      on_goal_met: onGoalMet,
+      on_task_timeout: onTaskTimeout,
+      on_tool_call: onToolCall,
+      on_task_create: onTaskCreate,
+      interval_message: intervalMsg.trim(),
+      finding_message: findingMsg.trim(),
+      goal_message: goalMsg.trim(),
+      task_timeout_message: taskTimeoutMsg.trim(),
+      tool_call_message: toolCallMsg.trim(),
+      task_create_message: taskCreateMsg.trim(),
+      tool_names: onToolCall ? toolNames : [],
+    };
     setSaving(true);
     try {
-      await api.createTrigger(agentKey, {
-        enabled: true,
-        interval_sec: n,
-        on_finding: onFinding,
-        on_goal_met: onGoalMet,
-        on_task_timeout: onTaskTimeout,
-        on_tool_call: onToolCall,
-        on_task_create: onTaskCreate,
-        interval_message: intervalMsg.trim(),
-        finding_message: findingMsg.trim(),
-        goal_message: goalMsg.trim(),
-        task_timeout_message: taskTimeoutMsg.trim(),
-        tool_call_message: toolCallMsg.trim(),
-        task_create_message: taskCreateMsg.trim(),
-        tool_names: onToolCall ? toolNames : [],
-      });
-      toast.success("已添加触发器");
-      setOnInterval(false);
-      setIntervalSec("60");
-      setOnFinding(false);
-      setOnGoalMet(false);
-      setOnTaskTimeout(false);
-      setOnToolCall(false);
-      setOnTaskCreate(false);
-      setIntervalMsg("");
-      setFindingMsg("");
-      setGoalMsg("");
-      setTaskTimeoutMsg("");
-      setToolCallMsg("");
-      setTaskCreateMsg("");
-      setToolNames([]);
+      if (editingId != null) {
+        const cur = triggers.find((x) => x.id === editingId);
+        await api.updateTrigger(editingId, { ...body, enabled: cur?.enabled ?? true });
+        toast.success("已保存修改");
+      } else {
+        await api.createTrigger(agentKey, { ...body, enabled: true });
+        toast.success("已添加触发器");
+      }
+      resetForm();
       reload();
     } catch (e) {
-      toast.error("添加失败：" + (e as Error).message);
+      toast.error((editingId != null ? "保存失败：" : "添加失败：") + (e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -859,6 +893,7 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
   async function del(id: number) {
     try {
       await api.deleteTrigger(id);
+      if (editingId === id) resetForm();
       reload();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
@@ -959,9 +994,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
         </p>
       </div>
 
-      {/* 新增触发器 */}
+      {/* 新增 / 编辑触发器 */}
       <div className="grid gap-3 rounded-md border p-3">
-        <Label className="text-muted-foreground text-xs">新增触发器（每种条件可填各自的用户消息）</Label>
+        <Label className="text-muted-foreground text-xs">
+          {editingId != null
+            ? `编辑触发器 #${editingId}（改完点「保存修改」）`
+            : "新增触发器（每种条件可填各自的用户消息）"}
+        </Label>
 
         {/* 定时 */}
         <div className="grid gap-1.5">
@@ -1057,10 +1096,15 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
           )}
         </div>
 
-        <div>
-          <Button size="sm" onClick={create} disabled={saving}>
-            <SaveIcon /> 添加触发器
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={submit} disabled={saving}>
+            <SaveIcon /> {editingId != null ? "保存修改" : "添加触发器"}
           </Button>
+          {editingId != null && (
+            <Button size="sm" variant="ghost" onClick={resetForm} disabled={saving}>
+              <XIcon /> 取消编辑
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1069,7 +1113,13 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
         <Label className="text-muted-foreground text-xs">已有触发器</Label>
         {triggers.length === 0 && <span className="text-muted-foreground text-xs">（暂无）</span>}
         {triggers.map((t) => (
-          <div key={t.id} className="flex items-start gap-2 rounded-md border p-2 text-sm">
+          <div
+            key={t.id}
+            className={cn(
+              "flex items-start gap-2 rounded-md border p-2 text-sm",
+              editingId === t.id && "border-primary bg-primary/5",
+            )}
+          >
             <Switch checked={t.enabled} onCheckedChange={() => toggleEnabled(t)} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-1.5">
@@ -1092,8 +1142,12 @@ function AgentTriggersTab({ agentKey, agent }: { agentKey: string; agent?: Agent
                 )}
               </div>
             </div>
+            <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground"
+              onClick={() => startEdit(t)} title="编辑">
+              <PencilIcon className="size-3.5" />
+            </Button>
             <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-destructive"
-              onClick={() => del(t.id)}>
+              onClick={() => del(t.id)} title="删除">
               <Trash2Icon className="size-3.5" />
             </Button>
           </div>
