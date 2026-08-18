@@ -523,6 +523,12 @@ func (s *Server) seedReporterAgent() {
 	if err := s.m.pg.SeedPromptIfEmpty(a.ID, agent.ReporterDefaultPrompt); err != nil {
 		log.Printf("[reporter] seed prompt 失败: %v", err)
 	}
+	// 触发运行策略：parallel + none —— 一漏洞一报告、多个 finding 并发各写各的。
+	// merge 必须为 none：否则(默认 all)一波 finding 会被合并成一次运行，并行就没意义。
+	// maxParallel=5：同时最多 5 个报告会话，避免瞬时太多 LLM 调用。
+	if err := s.m.pg.SetAgentTriggerBehavior("reporter", "parallel", "none", 5); err != nil {
+		log.Printf("[reporter] 设置触发运行策略失败: %v", err)
+	}
 	// 绑定它需要的工具：写报告 + 读证据/执行过程/态势。
 	if err := s.m.pg.AddAgentToToolBinding("reporter", []string{
 		"update_finding_report", "get_task_node_detail", "list_task_findings",
