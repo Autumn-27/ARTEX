@@ -277,6 +277,17 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// SetFindingReportByNodeID sets the Markdown report on the standalone finding row
+// whose node_id matches — report_finding returns that node id, so an agent tool
+// can address the finding it just created. Returns rows affected (0 when no row).
+func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error) {
+	res, err := d.Exec(`UPDATE findings SET report=$1 WHERE node_id=$2`, report, nodeID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // SetFindingSeverity updates one finding's severity in the standalone table AND
 // keeps the originating exploration node's payload in sync (the per-task view
 // reads severity from the node payload, not this table). Returns rows affected
