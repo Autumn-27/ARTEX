@@ -26,17 +26,23 @@ type chatAttachment struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Size int64  `json:"size"`
+	// Abs 是落盘的绝对路径(m.dir 已是绝对)。建任务前暂存(scope=staging)时前端要用它把
+	// 提示词写进描述;task/session 走 composeAgentMessage 在后端拼路径,不依赖此字段。
+	Abs string `json:"abs,omitempty"`
 }
 
 // chatUpload implements method-1 file support: it saves one or more files into a chat's
 // working dir under uploads/, so the agent opens them with its existing Read/Bash tools
 // and the sent message carries their paths. No LLM-layer change, no multimodal.
 //
-// POST /api/chat/upload?scope=task|session&id=<id>, multipart field "file" (repeatable).
-// Returns {attachments:[{name,path,size}]}. Target dir mirrors the agent CWD layout:
+// POST /api/chat/upload?scope=task|session|staging&id=<id>, multipart field "file"
+// (repeatable). Returns {attachments:[{name,path,size,abs}]}. Target dir mirrors the
+// agent CWD layout:
 //
 //	scope=task    → <workDir>/tasks/<id>/uploads/
 //	scope=session → <workDir>/sessions/<id>/uploads/
+//	scope=staging → <workDir>/drafts/<id>/uploads/   (建任务前暂存:任务尚无 ID,
+//	                文件先落这里,前端按返回的 abs 绝对路径写进任务描述)
 func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 	var sub string
 	switch r.URL.Query().Get("scope") {
@@ -44,8 +50,10 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		sub = "tasks"
 	case "session":
 		sub = "sessions"
+	case "staging":
+		sub = "drafts"
 	default:
-		writeErr(w, 400, "scope 必须是 task 或 session")
+		writeErr(w, 400, "scope 必须是 task / session / staging")
 		return
 	}
 	id := r.URL.Query().Get("id")
@@ -80,7 +88,7 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		base := filepath.Base(dest)
-		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size})
+		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest})
 	}
 	writeJSON(w, 200, map[string]any{"attachments": out})
 }

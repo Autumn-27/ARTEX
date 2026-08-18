@@ -318,8 +318,8 @@ export const api = {
   chat: (message: string, task?: string, attachments?: ChatAttachment[]) =>
     post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments }),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
-  chatUpload: async (scope: "task" | "session", id: string, files: File[]) => {
-    if (MOCK) return { attachments: files.map((f) => ({ name: f.name, path: `uploads/${f.name}`, size: f.size })) };
+  chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
+    if (MOCK) return { attachments: files.map((f) => ({ name: f.name, path: `uploads/${f.name}`, size: f.size, abs: `/mock/${f.name}` })) };
     const fd = new FormData();
     for (const f of files) fd.append("file", f);
     const token = getToken();

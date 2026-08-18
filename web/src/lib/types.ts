@@ -270,6 +270,7 @@ export interface ChatAttachment {
   name: string;
   path: string;
   size: number;
+  abs?: string; // 绝对路径(scope=staging 暂存上传时返回;建任务前把它写进描述)
 }
 
 export interface Activity {

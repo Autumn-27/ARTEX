@@ -10,6 +10,9 @@ import {
   StarIcon,
   SearchIcon,
   XIcon,
+  ChevronRightIcon,
+  PaperclipIcon,
+  Loader2Icon,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
@@ -28,15 +31,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Select,
   SelectContent,
@@ -46,7 +54,30 @@ import {
 } from "@/components/ui/select";
 import { TablePagination } from "@/components/table-pagination";
 import { api } from "@/lib/api";
-import type { Task, TaskStatus, LLMProfile } from "@/lib/types";
+import type { Task, TaskStatus, LLMProfile, ChatAttachment } from "@/lib/types";
+
+// fmtBytes renders a human file size for the upload manifest.
+function fmtBytes(n: number): string {
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+// UPLOAD_MARKER labels the auto-appended block of uploaded-file paths inside the task
+// description, so re-uploads append under the same block instead of adding a new header.
+const UPLOAD_MARKER = "【上传文件（绝对路径）】";
+
+// appendUploads folds newly-uploaded files' ABSOLUTE paths into the description as a
+// Read/Bash-friendly manifest — the worker opens them by path. Keeps one marked block:
+// first upload adds the header, later uploads append bullets under it.
+function appendUploads(desc: string, atts: ChatAttachment[]): string {
+  const bullets = atts.map((a) => `- ${a.abs ?? a.path}（${fmtBytes(a.size)}）`).join("\n");
+  if (desc.includes(UPLOAD_MARKER)) {
+    return `${desc.replace(/\s*$/, "")}\n${bullets}\n`;
+  }
+  const head = desc.trim() ? `${desc.replace(/\s*$/, "")}\n\n` : "";
+  return `${head}${UPLOAD_MARKER} worker 可用 Read/Bash 按路径打开：\n${bullets}\n`;
+}
 
 // ACTIVE_PROFILE is the sentinel Select value for "use the global active profile".
 const ACTIVE_PROFILE = "__active__";
@@ -114,6 +145,11 @@ export default function TasksPage() {
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [open, setOpen] = React.useState(false);
+  // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
+  const [uploading, setUploading] = React.useState(false);
+  const [uploadCount, setUploadCount] = React.useState(0);
+  const draftIdRef = React.useRef<string>("");
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [page, setPage] = React.useState(1);
@@ -166,6 +202,29 @@ export default function TasksPage() {
     return () => clearInterval(i);
   }, []);
 
+  // pickFiles uploads the chosen files into this draft's staging dir and appends their
+  // absolute paths to the description; the task's agents open them by path via Read/Bash.
+  async function pickFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    // crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
+    if (!draftIdRef.current) {
+      draftIdRef.current =
+        globalThis.crypto?.randomUUID?.() ??
+        `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    }
+    setUploading(true);
+    try {
+      const r = await api.chatUpload("staging", draftIdRef.current, Array.from(files));
+      setDescription((prev) => appendUploads(prev, r.attachments));
+      setUploadCount((n) => n + r.attachments.length);
+    } catch (e) {
+      toast.error("上传失败：" + (e as Error).message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = ""; // allow re-picking the same file
+    }
+  }
+
   async function createTask() {
     if (!description.trim() || !goal.trim()) {
       toast.error("请填写描述与目标");
@@ -183,6 +242,8 @@ export default function TasksPage() {
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setUploadCount(0);
+      draftIdRef.current = "";
       setOpen(false);
       load();
     } catch (e) {
@@ -239,106 +300,157 @@ export default function TasksPage() {
           <span className="text-muted-foreground text-xs tabular-nums">
             {filtered.length}/{tasks.length} 条
           </span>
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
+          <Sheet open={open} onOpenChange={setOpen}>
+            <SheetTrigger asChild>
               <Button size="sm" className="ml-auto">
                 <PlusIcon /> 新建任务
               </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-lg">
-              <DialogHeader>
-                <DialogTitle>新建任务</DialogTitle>
-                <DialogDescription>
-                  填写测试对象与目标。
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-4 py-2">
-                <div className="grid gap-2">
-                  <Label htmlFor="description">描述</Label>
-                  <Textarea
-                    id="description"
-                    placeholder="测试对象与背景，例如：测试 example.com 这个站点"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="goal">目标</Label>
-                  <Textarea
-                    id="goal"
-                    placeholder="要达成什么，例如：拿下后台管理权限、获取服务器权限"
-                    value={goal}
-                    onChange={(e) => setGoal(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="llm-profile">LLM 配置</Label>
-                  <Select value={llmProfile} onValueChange={setLlmProfile}>
-                    <SelectTrigger id="llm-profile">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={ACTIVE_PROFILE}>使用激活配置（默认）</SelectItem>
-                      {profiles.map((p) => (
-                        <SelectItem key={p.id} value={String(p.id)}>
-                          {p.name}
-                          {p.is_default ? "（激活）" : ""} · {p.model}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-muted-foreground text-xs">
-                    本任务的 planner/worker 使用所选配置运行；对话仍用激活配置。
-                  </p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="timeout-min">任务超时（分钟，可选）</Label>
-                  <Input
-                    id="timeout-min"
-                    type="number"
-                    min={0}
-                    className="w-40"
-                    placeholder="留空 = 不限时"
-                    value={timeoutMin}
-                    onChange={(e) => setTimeoutMin(e.target.value)}
-                  />
-                  <p className="text-muted-foreground text-xs">
-                    到点后触发优雅收尾（各 agent 写回 + planner 终局判定），任务进入 timeout 终态。
-                  </p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="heartbeat-min">planner 心跳（分钟）</Label>
-                  <Input
-                    id="heartbeat-min"
-                    type="number"
-                    min={10}
-                    className="w-40"
-                    placeholder="默认 10"
-                    value={heartbeatMin}
-                    onChange={(e) => setHeartbeatMin(e.target.value)}
-                  />
-                  <p className="text-muted-foreground text-xs">
-                    距上轮规划结束/任务开始满该时长且期间无触发，自动触发一轮规划（兜底卡死 + 唤醒去监督在跑的 worker）。下限 10 分钟。
-                  </p>
-                </div>
-                <div className="grid gap-2">
-                  <label className="flex items-center gap-2 text-sm">
-                    <Checkbox checked={seedFirstIntent} onCheckedChange={(v) => setSeedFirstIntent(!!v)} />
-                    直接下发首个意图（描述+目标）
-                  </label>
-                  <p className="text-muted-foreground text-xs">
-                    开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner 接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
-                  </p>
+            </SheetTrigger>
+            {/* 45vw 宽的右侧抽屉:整屏高度可滚动,长表单不再受弹窗高度限制。窄屏退化为全宽。
+                内容为 flex 列:头/脚固定,中间字段区 flex-1 独立滚动。 */}
+            <SheetContent
+              side="right"
+              className="w-full! max-w-none! gap-0 p-0 sm:w-[45vw]! sm:max-w-[45vw]!"
+            >
+              <SheetHeader className="border-b p-6">
+                <SheetTitle>新建任务</SheetTitle>
+                <SheetDescription>填写测试对象与目标，高级参数可按需展开。</SheetDescription>
+              </SheetHeader>
+
+              <div className="flex-1 overflow-y-auto p-6">
+                <div className="grid gap-5">
+                  <div className="grid gap-2">
+                    <Label htmlFor="description">描述</Label>
+                    <Textarea
+                      id="description"
+                      className="min-h-32"
+                      placeholder="测试对象与背景，例如：测试 example.com 这个站点"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                    />
+                    {/* 上传文件(可多选):暂存到 drafts/,把绝对路径追加进上方描述,worker 据此 Read/Bash 打开。 */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => void pickFiles(e.target.files)}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading}
+                      >
+                        {uploading ? (
+                          <Loader2Icon className="animate-spin" />
+                        ) : (
+                          <PaperclipIcon />
+                        )}
+                        上传文件
+                      </Button>
+                      <span className="text-muted-foreground text-xs">
+                        {uploadCount > 0
+                          ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
+                          : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="goal">目标</Label>
+                    <Textarea
+                      id="goal"
+                      className="min-h-32"
+                      placeholder="要达成什么，例如：拿下后台管理权限、获取服务器权限"
+                      value={goal}
+                      onChange={(e) => setGoal(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="llm-profile">LLM 配置</Label>
+                    <Select value={llmProfile} onValueChange={setLlmProfile}>
+                      <SelectTrigger id="llm-profile">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={ACTIVE_PROFILE}>使用激活配置（默认）</SelectItem>
+                        {profiles.map((p) => (
+                          <SelectItem key={p.id} value={String(p.id)}>
+                            {p.name}
+                            {p.is_default ? "（激活）" : ""} · {p.model}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-muted-foreground text-xs">
+                      本任务的 planner/worker 使用所选配置运行；对话仍用激活配置。
+                    </p>
+                  </div>
+
+                  {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}
+                  <Collapsible>
+                    <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
+                      <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
+                      高级设置
+                      <span className="text-muted-foreground ml-auto text-xs font-normal">
+                        超时 · 心跳 · 首个意图
+                      </span>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="grid gap-5 pt-5">
+                      <div className="grid gap-2">
+                        <Label htmlFor="timeout-min">任务超时（分钟，可选）</Label>
+                        <Input
+                          id="timeout-min"
+                          type="number"
+                          min={0}
+                          className="w-40"
+                          placeholder="留空 = 不限时"
+                          value={timeoutMin}
+                          onChange={(e) => setTimeoutMin(e.target.value)}
+                        />
+                        <p className="text-muted-foreground text-xs">
+                          到点后触发优雅收尾（各 agent 写回 + planner 终局判定），任务进入 timeout 终态。
+                        </p>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="heartbeat-min">planner 心跳（分钟）</Label>
+                        <Input
+                          id="heartbeat-min"
+                          type="number"
+                          min={10}
+                          className="w-40"
+                          placeholder="默认 10"
+                          value={heartbeatMin}
+                          onChange={(e) => setHeartbeatMin(e.target.value)}
+                        />
+                        <p className="text-muted-foreground text-xs">
+                          距上轮规划结束/任务开始满该时长且期间无触发，自动触发一轮规划（兜底卡死 + 唤醒去监督在跑的 worker）。下限 10 分钟。
+                        </p>
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="flex items-center gap-2 text-sm">
+                          <Checkbox checked={seedFirstIntent} onCheckedChange={(v) => setSeedFirstIntent(!!v)} />
+                          直接下发首个意图（描述+目标）
+                        </label>
+                        <p className="text-muted-foreground text-xs">
+                          开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner 接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
+                        </p>
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
                 </div>
               </div>
-              <DialogFooter>
-                <DialogClose asChild>
+
+              <SheetFooter className="flex-row justify-end gap-2 border-t p-4">
+                <SheetClose asChild>
                   <Button variant="outline">取消</Button>
-                </DialogClose>
+                </SheetClose>
                 <Button onClick={createTask}>创建</Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+              </SheetFooter>
+            </SheetContent>
+          </Sheet>
         </div>
 
         {tasks.length === 0 ? (
