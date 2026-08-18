@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -254,13 +255,16 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	var req struct{ Message string }
+	var req struct {
+		Message     string           `json:"message"`
+		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对会话工作目录)
+	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
 	msg := strings.TrimSpace(req.Message)
-	if msg == "" {
+	if msg == "" && len(req.Attachments) == 0 {
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
@@ -283,15 +287,32 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// persist + float the human turn; auto-title the thread from the first message.
 	// Worker is the agent key (not "user") so the transcript stays a single lane
 	// (no worker chips) — the kind='user' already right-aligns it as a human bubble.
-	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
+	// With attachments, Detail carries {text, attachments} JSON so the transcript
+	// renders attachment cards; without, Detail is the full text (Summary is truncated,
+	// so the transcript lazy-loads Detail to show the message untruncated).
+	ua := userActivityWithAttachments(c.AgentKey, msg, req.Attachments)
+	ua.Summary = firstLine(msg, 200)
+	if ua.Detail == "" {
+		ua.Detail = msg
+	}
+	if _, err := pg.AppendConvActivity(c.ID, ua); err != nil {
 		log.Printf("[conv %d] append user msg failed: %v", c.ID, err)
 	}
 	if c.Title == "" || c.Title == "新对话" {
-		_ = pg.RenameConversation(c.ID, firstLine(msg, 40))
+		title := firstLine(msg, 40)
+		if title == "" {
+			title = "附件消息"
+		}
+		_ = pg.RenameConversation(c.ID, title)
 	}
 	_ = pg.TouchConversation(c.ID)
 
-	s.runConversation(c, msg, busyKey)
+	// Append the uploaded files' ABSOLUTE paths so the ChatAgent opens them with its
+	// Read/Bash tools. baseDir = the agent's per-session CWD (<workDir>/sessions/
+	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
+	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
+	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
+	s.runConversation(c, composeAgentMessage(msg, req.Attachments, baseDir), busyKey)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
