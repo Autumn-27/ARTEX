@@ -16,6 +16,17 @@ import {
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -542,14 +553,30 @@ export default function TasksPage() {
                           进入 <ArrowRightIcon />
                         </Link>
                       </Button>
-                      <Button
-                        size="icon"
-                        variant="outline"
-                        onClick={() => deleteTask(task.id)}
-                        aria-label="删除任务"
-                      >
-                        <Trash2Icon className="text-destructive" />
-                      </Button>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button size="icon" variant="outline" aria-label="删除任务">
+                            <Trash2Icon className="text-destructive" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>确认删除任务 #{task.id}？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              {task.description
+                                ? `「${task.description.length > 80 ? task.description.slice(0, 80) + "…" : task.description}」`
+                                : "该任务"}
+                              的执行记录、会话与产物将被删除，此操作不可撤销（全局资产图保留）。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction onClick={() => deleteTask(task.id)}>
+                              删除
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
                     </div>
                   </TableCell>
                 </TableRow>
