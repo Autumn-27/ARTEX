@@ -18,6 +18,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
+import { Markdown } from "@/components/markdown";
 import { statusMeta } from "@/lib/status";
 import { api } from "@/lib/api";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
@@ -194,6 +195,21 @@ function FindingDetailInner() {
                     </pre>
                   ) : (
                     <p className="text-sm text-muted-foreground">（无证据）</p>
+                  )}
+                </CardContent>
+              </Card>
+              {/* 证据下方：详细报告(Markdown 渲染) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">详细报告</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {finding.report ? (
+                    <Markdown text={finding.report} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      暂无详细报告。
+                    </p>
                   )}
                 </CardContent>
               </Card>

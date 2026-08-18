@@ -21,6 +21,7 @@ type DBFinding struct {
 	Worker          string
 	AssetIDs        []int64
 	Status          string
+	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
 }
@@ -244,25 +245,27 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	return st, rows.Err()
 }
 
-// GetFinding returns a single finding row (with task_description joined), or nil
-// when no row has that id.
+// GetFinding returns a single finding row (with task_description joined and the
+// full Markdown report), or nil when no row has that id. Unlike the list queries
+// it also selects `report` — that column is only needed on the detail page.
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
-	rows, err := d.Query(`SELECT `+findingSelectCols+`
+	f := &DBFinding{}
+	var aidsJSON string
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
-		WHERE f.id = $1`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out, err := scanFindings(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
+		WHERE f.id = $1`, id).Scan(
+		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
+		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
+		&f.TaskDescription, &f.Report)
+	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return out[0], nil
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	return f, nil
 }
 
 // SetFindingStatus updates one finding's triage state. Returns rows affected.

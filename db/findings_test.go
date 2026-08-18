@@ -109,6 +109,16 @@ func TestFindingsPageAndStats(t *testing.T) {
 	if one == nil || one.ID != ids[0] || one.Severity != "critical" || one.Name != "严重漏洞标题" {
 		t.Fatalf("GetFinding mismatch: %+v", one)
 	}
+	if one.Report != "" {
+		t.Fatalf("new finding report should be empty, got %q", one.Report)
+	}
+	// report column round-trips through GetFinding.
+	if _, err := d.Exec(`UPDATE findings SET report=$1 WHERE id=$2`, "# 报告\n正文", ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if one, _ = d.GetFinding(ids[0]); one.Report != "# 报告\n正文" {
+		t.Fatalf("report not read back: %q", one.Report)
+	}
 	if miss, err := d.GetFinding(-1); err != nil || miss != nil {
 		t.Fatalf("GetFinding(-1): want nil,nil got %+v,%v", miss, err)
 	}

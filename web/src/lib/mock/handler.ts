@@ -103,7 +103,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (path === "/exploration/findings") {
     // finding_id=id：真后端用独立表行 id 作为状态/详情句柄,mock 里用自身 id 顶上。
-    const withFid = (f: (typeof D.findings)[number]) => ({ ...f, finding_id: f.id });
+    // report 仅详情接口返回,列表剥掉(与后端一致)。
+    const withFid = (f: (typeof D.findings)[number]) => ({
+      ...f,
+      report: undefined,
+      finding_id: f.id,
+    });
     if (task) return D.findings.filter((f) => f.task_id === task).map(withFid);
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
     if (!q.has("page") && !q.has("limit")) return D.findings.map(withFid);
