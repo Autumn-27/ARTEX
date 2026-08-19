@@ -152,50 +152,51 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
 ];
 
 export function AssetsTab({ taskId }: { taskId: string }) {
-  const [assets, setAssets]   = React.useState<Asset[]>([]);
+  // 服务端分页:只取当前分类的当前页,分类总数走 /assets/counts?task_id=,不做数量截断
+  const [rows, setRows]       = React.useState<Asset[]>([]);
+  const [total, setTotal]     = React.useState(0);
+  const [counts, setCounts]   = React.useState<Record<string, number>>({});
   const [loaded, setLoaded]   = React.useState(false);
   const [tab, setTab]         = React.useState("root_domain");
   const [page, setPage]       = React.useState(0);
   const [size, setSize]       = React.useState(50);
 
-  React.useEffect(() => setPage(0), [tab, size]);
+  // 换分类/换页大小:回到第一页,并清掉旧行(各分类列不同,不能串用)
+  React.useEffect(() => {
+    setPage(0);
+    setRows([]);
+  }, [tab, size]);
 
   React.useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        const results = await Promise.all(
-          TABS.map((t) => api.taskAssets(taskId, t.key)),
-        );
+        const [cur, c] = await Promise.all([
+          api.taskAssets(taskId, tab, size, page * size),
+          api.assetCounts(taskId),
+        ]);
         if (!alive) return;
-        setAssets(results.flat());
-        setLoaded(true);
+        setRows(cur.assets);
+        setTotal(cur.total);
+        setCounts(c ?? {});
       } catch {
+        // 保留上一次的数据
+      } finally {
         if (alive) setLoaded(true);
       }
     };
     load();
     const timer = setInterval(load, 10_000);
     return () => { alive = false; clearInterval(timer); };
-  }, [taskId]);
+  }, [taskId, tab, page, size]);
 
-  const byType = React.useMemo(() => {
-    const m: Record<string, Asset[]> = { root_domain: [], ip: [], subdomain: [], service: [], endpoint: [] };
-    for (const a of assets) {
-      if (a.type in m) m[a.type].push(a);
-    }
-    return m;
-  }, [assets]);
+  // 轮询期间资产变少时,别停在越界的空页上
+  React.useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(total / size) - 1);
+    if (page > maxPage) setPage(maxPage);
+  }, [total, size, page]);
 
-  const counts: Record<string, number> = {
-    root_domain: byType.root_domain.length,
-    ip:          byType.ip.length,
-    subdomain:   byType.subdomain.length,
-    service:     byType.service.length,
-    endpoint:    byType.endpoint.length,
-  };
-
-  const totalAll = assets.length;
+  const totalAll = TABS.reduce((n, t) => n + (counts[t.key] ?? 0), 0);
 
   if (!loaded) {
     return <div className="py-20 text-center text-sm text-muted-foreground">加载中…</div>;
@@ -208,9 +209,6 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       </div>
     );
   }
-
-  const cur = byType[tab] ?? [];
-  const slice = cur.slice(page * size, page * size + size);
 
   return (
     <Tabs orientation="vertical" value={tab} onValueChange={setTab} className="items-start gap-4">
@@ -238,8 +236,8 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       <div className="min-w-0 flex-1 flex flex-col gap-4">
 
         <TabsContent value="root_domain" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["域名", "ICP 备案"]} total={cur.length} page={page} size={size} onSize={setSize} onPage={setPage}>
-            {slice.map((a) => (
+          <AssetCard cols={["域名", "ICP 备案"]} total={total} page={page} size={size} onSize={setSize} onPage={setPage}>
+            {rows.map((a) => (
               <TableRow key={a.id}>
                 <TableCell className="font-mono text-xs font-medium">{a.domain}</TableCell>
                 <TableCell className="text-xs">{a.icp || "—"}</TableCell>
@@ -249,8 +247,8 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["IP", "C段", "绑定域名", "开放端口"]} total={cur.length} page={page} size={size} onSize={setSize} onPage={setPage}>
-            {slice.map((a) => (
+          <AssetCard cols={["IP", "C段", "绑定域名", "开放端口"]} total={total} page={page} size={size} onSize={setSize} onPage={setPage}>
+            {rows.map((a) => (
               <TableRow key={a.id}>
                 <TableCell className="font-mono text-xs font-medium">{a.ip}</TableCell>
                 <TableCell className="font-mono text-xs">{a.c_segment || "—"}</TableCell>
@@ -269,8 +267,8 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="subdomain" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["域名", "根域名", "解析类型", "解析值"]} total={cur.length} page={page} size={size} onSize={setSize} onPage={setPage}>
-            {slice.map((a) => (
+          <AssetCard cols={["域名", "根域名", "解析类型", "解析值"]} total={total} page={page} size={size} onSize={setSize} onPage={setPage}>
+            {rows.map((a) => (
               <TableRow key={a.id}>
                 <TableCell className="font-mono text-xs font-medium">{a.domain}</TableCell>
                 <TableCell className="font-mono text-xs">{a.root_domain || "—"}</TableCell>
@@ -284,13 +282,13 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         <TabsContent value="service" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard
             cols={["地址 / 服务", "状态码", "标题", "响应长度", "指纹", "认证"]}
-            total={cur.length}
+            total={total}
             page={page}
             size={size}
             onSize={setSize}
             onPage={setPage}
           >
-            {slice.map((a) => {
+            {rows.map((a) => {
               const isHttp = a.service_type === "http";
               const addr = isHttp
                 ? (a.url || "")
@@ -330,8 +328,8 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="endpoint" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["方法", "完整地址", "参数"]} total={cur.length} page={page} size={size} onSize={setSize} onPage={setPage}>
-            {slice.map((a) => (
+          <AssetCard cols={["方法", "完整地址", "参数"]} total={total} page={page} size={size} onSize={setSize} onPage={setPage}>
+            {rows.map((a) => (
               <TableRow key={a.id}>
                 <TableCell className="w-16"><MethodBadge method={a.method || ""} /></TableCell>
                 <TableCell className="max-w-sm truncate font-mono text-xs" title={a.url}>{a.url || "—"}</TableCell>

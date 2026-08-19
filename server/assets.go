@@ -217,6 +217,9 @@ func (s *Server) reattribute(w http.ResponseWriter, r *http.Request) {
 // GET /api/assets
 // =====================================================================
 
+// defaultAssetPageSize is the page size used when the caller omits ?limit.
+const defaultAssetPageSize = 50
+
 func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	as := s.assetStore()
 	if as == nil {
@@ -227,8 +230,10 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	typ := q.Get("type")
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	// limit/offset are page controls, not a cap: `total` always reports the full
+	// match count so callers can page through everything.
 	if limit <= 0 {
-		limit = 50
+		limit = defaultAssetPageSize
 	}
 
 	var assets []*db.Asset
@@ -247,11 +252,15 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 		switch {
 		case companyID > 0:
-			assets, err = as.QueryByCompany(companyID, typ, limit)
-			total = len(assets)
+			assets, err = as.QueryByCompany(companyID, typ, limit, offset)
+			if err == nil {
+				total, err = as.CountByCompany(companyID, typ)
+			}
 		case taskID > 0:
-			assets, err = as.QueryByTask(taskID, typ, limit)
-			total = len(assets)
+			assets, err = as.QueryByTask(taskID, typ, limit, offset)
+			if err == nil {
+				total, err = as.CountByTask(taskID, typ)
+			}
 		default:
 			if typ == "" {
 				typ = "root_domain"
@@ -284,7 +293,13 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
-	counts, err := as.CountsByType()
+	var counts map[string]int
+	var err error
+	if taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64); taskID > 0 {
+		counts, err = as.CountsByTypeForTask(taskID)
+	} else {
+		counts, err = as.CountsByType()
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

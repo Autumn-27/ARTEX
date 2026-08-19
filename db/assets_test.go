@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -545,7 +546,7 @@ func TestQueryByTask(t *testing.T) {
 	}
 	defer deleteAsset(d, id)
 
-	assets, err := av2.QueryByTask(taskID, "", 10)
+	assets, err := av2.QueryByTask(taskID, "", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,6 +558,73 @@ func TestQueryByTask(t *testing.T) {
 	}
 	if !found {
 		t.Error("QueryByTask: inserted asset not found")
+	}
+
+	n, err := av2.CountByTask(taskID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Errorf("CountByTask: got %d, want >= 1", n)
+	}
+	if counts, err := av2.CountsByTypeForTask(taskID); err != nil {
+		t.Fatal(err)
+	} else if counts["root_domain"] < 1 {
+		t.Errorf("CountsByTypeForTask: root_domain = %d, want >= 1", counts["root_domain"])
+	}
+
+	// offset past the end must return nothing, not fall back to page 1
+	rest, err := av2.QueryByTask(taskID, "", 10, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("QueryByTask offset=%d: got %d rows, want 0", n, len(rest))
+	}
+}
+
+// 任务资产列表按页取,不再被固定条数截断:60 条资产用 25/页要能完整翻出来。
+func TestQueryByTaskPaging(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	const taskID = int64(99998)
+	const n = 60
+	for i := 0; i < n; i++ {
+		id, err := av2.UpsertRootDomain(UpsertRootDomainReq{
+			Domain: fmt.Sprintf("paging-%02d.querybytask.test", i),
+			TaskID: taskID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer deleteAsset(d, id)
+	}
+
+	total, err := av2.CountByTask(taskID, "root_domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != n {
+		t.Fatalf("CountByTask: got %d, want %d", total, n)
+	}
+
+	const size = 25
+	seen := map[int64]bool{}
+	for offset := 0; offset < total; offset += size {
+		page, err := av2.QueryByTask(taskID, "root_domain", size, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range page {
+			if seen[a.ID] {
+				t.Errorf("offset=%d: asset %d returned twice", offset, a.ID)
+			}
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("paged through %d assets, want %d", len(seen), n)
 	}
 }
 
@@ -582,7 +650,7 @@ func TestQueryByCompany(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assets, err := av2.QueryByCompany(companyID, "root_domain", 10)
+	assets, err := av2.QueryByCompany(companyID, "root_domain", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,6 +662,77 @@ func TestQueryByCompany(t *testing.T) {
 	}
 	if !found {
 		t.Error("QueryByCompany: attributed asset not found")
+	}
+
+	n, err := av2.CountByCompany(companyID, "root_domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Errorf("CountByCompany: got %d, want >= 1", n)
+	}
+
+	// offset past the end must return nothing, not fall back to page 1
+	rest, err := av2.QueryByCompany(companyID, "root_domain", 10, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("QueryByCompany offset=%d: got %d rows, want 0", n, len(rest))
+	}
+}
+
+// 企业资产列表同样按页取,不被固定条数截断。
+func TestQueryByCompanyPaging(t *testing.T) {
+	d, av2, cs := testSetup(t)
+	defer d.Close()
+
+	companyID, _, err := cs.UpsertCompany("QueryByCompanyPagingCorp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupCompany(d, companyID)
+
+	if added, _, _, errs := cs.AddScope(companyID, []string{"qbc-paging.io"}, "test"); added != 1 {
+		t.Fatalf("AddScope: added=%d, errors=%v", added, errs)
+	}
+
+	// UpsertSubdomain 会顺带建根域名资产,一并清掉
+	defer d.Exec(`DELETE FROM assets WHERE root_domain = 'qbc-paging.io'`)
+
+	const n = 60
+	for i := 0; i < n; i++ {
+		if _, err := av2.UpsertSubdomain(UpsertSubdomainReq{
+			Domain: fmt.Sprintf("paging-%02d.qbc-paging.io", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	total, err := av2.CountByCompany(companyID, "subdomain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != n {
+		t.Fatalf("CountByCompany: got %d, want %d", total, n)
+	}
+
+	const size = 25
+	seen := map[int64]bool{}
+	for offset := 0; offset < total; offset += size {
+		page, err := av2.QueryByCompany(companyID, "subdomain", size, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range page {
+			if seen[a.ID] {
+				t.Errorf("offset=%d: asset %d returned twice", offset, a.ID)
+			}
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("paged through %d assets, want %d", len(seen), n)
 	}
 }
 

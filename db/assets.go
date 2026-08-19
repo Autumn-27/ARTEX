@@ -913,10 +913,8 @@ func (s *AssetStore) CountByType(typ string) (int, error) {
 }
 
 // QueryByCompany returns assets for a company, optionally filtered by type.
-func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit int) ([]*Asset, error) {
-	if limit <= 0 {
-		limit = 200
-	}
+// limit <= 0 means no limit — pair it with CountByCompany for server-side paging.
+func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
@@ -933,8 +931,7 @@ FROM assets WHERE company_id = $1`
 		args = append(args, typ)
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
 	}
-	args = append(args, limit)
-	q += fmt.Sprintf(` ORDER BY last_seen DESC LIMIT $%d`, len(args))
+	q += pageClause(&args, limit, offset)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -943,11 +940,38 @@ FROM assets WHERE company_id = $1`
 	return scanAssets(rows)
 }
 
-// QueryByTask returns assets rows that have a given task_id in task_ids.
-func (s *AssetStore) QueryByTask(taskID int64, typ string, limit int) ([]*Asset, error) {
-	if limit <= 0 {
-		limit = 200
+// CountByCompany returns the full number of assets attributed to a company
+// (optionally filtered by type), ignoring limit/offset.
+func (s *AssetStore) CountByCompany(companyID int64, typ string) (int, error) {
+	q := `SELECT count(*) FROM assets WHERE company_id = $1`
+	args := []any{companyID}
+	if typ != "" {
+		args = append(args, typ)
+		q += fmt.Sprintf(` AND type = $%d`, len(args))
 	}
+	var n int
+	err := s.db.QueryRow(q, args...).Scan(&n)
+	return n, err
+}
+
+// pageClause appends limit/offset placeholders to args and returns the trailing
+// ORDER BY … LIMIT … OFFSET fragment. limit <= 0 means no limit.
+func pageClause(args *[]any, limit, offset int) string {
+	q := ` ORDER BY last_seen DESC`
+	if limit > 0 {
+		*args = append(*args, limit)
+		q += fmt.Sprintf(` LIMIT $%d`, len(*args))
+	}
+	if offset > 0 {
+		*args = append(*args, offset)
+		q += fmt.Sprintf(` OFFSET $%d`, len(*args))
+	}
+	return q
+}
+
+// QueryByTask returns assets rows that have a given task_id in task_ids.
+// limit <= 0 means no limit — pair it with CountByTask for server-side paging.
+func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
@@ -964,14 +988,37 @@ FROM assets WHERE $1 = ANY(task_ids)`
 		args = append(args, typ)
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
 	}
-	args = append(args, limit)
-	q += fmt.Sprintf(` ORDER BY last_seen DESC LIMIT $%d`, len(args))
+	q += pageClause(&args, limit, offset)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanAssets(rows)
+}
+
+// CountByTask returns the full number of assets attached to a task (optionally
+// filtered by type), ignoring limit/offset — lets the UI paginate on the server.
+func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
+	q := `SELECT count(*) FROM assets WHERE $1 = ANY(task_ids)`
+	args := []any{taskID}
+	if typ != "" {
+		args = append(args, typ)
+		q += fmt.Sprintf(` AND type = $%d`, len(args))
+	}
+	var n int
+	err := s.db.QueryRow(q, args...).Scan(&n)
+	return n, err
+}
+
+// CountsByTypeForTask returns asset counts per type for a single task.
+func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE $1 = ANY(task_ids) GROUP BY type`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTypeCounts(rows)
 }
 
 const assetSelectCols = `SELECT id, type, company_id, array_to_json(task_ids)::text,
@@ -1072,6 +1119,11 @@ func (s *AssetStore) CountsByType() (map[string]int, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanTypeCounts(rows)
+}
+
+// scanTypeCounts scans a (type, count) result set into a map.
+func scanTypeCounts(rows *sql.Rows) (map[string]int, error) {
 	out := map[string]int{}
 	for rows.Next() {
 		var typ string

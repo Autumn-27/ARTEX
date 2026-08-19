@@ -202,13 +202,15 @@ export const api = {
     get<{ count: number; total: number; assets: Asset[] }>(
       `/assets?dsl=${encodeURIComponent(dsl)}${type ? `&type=${encodeURIComponent(type)}` : ""}&limit=${limit}&offset=${offset}`,
     ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
-  assetCounts: () => get<Record<string, number>>("/assets/counts"),
+  assetCounts: (taskId = "") =>
+    get<Record<string, number>>(`/assets/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   deleteAssets: (ids: number[]) =>
     http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
-  // legacy — kept for task-specific views; hits the same endpoint with task_id filter
-  taskAssets: (taskId: string, type = "") =>
-    get<{ count: number; assets: Asset[] }>(`/assets?task_id=${taskId}&type=${type}`)
-      .then((r) => r?.assets ?? []),
+  // task-scoped view of the same endpoint — server-side paginated like `assets`
+  taskAssets: (taskId: string, type = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
