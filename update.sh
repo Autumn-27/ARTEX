@@ -38,10 +38,13 @@ update_docker(){
     ok "已将 ARTEX_TAG 设为 ${tag}"
   fi
 
-  info "拉取新镜像…"
-  docker compose pull
+  # 只动 artex：postgres 是固定的 16-alpine，不需要跟着升级（拉它纯属浪费带宽，
+  # 且大版本变动还会有兼容风险）。artex 声明了 depends_on postgres，所以带服务名
+  # up 时若 pg 没起会自动拉起，已在跑的则原样保留、不重建。
+  info "拉取新镜像（仅 artex）…"
+  docker compose pull artex
   info "重建并启动（artex 重启时自动迁移 schema）…"
-  docker compose up -d
+  docker compose up -d artex
   ok "更新完成 → http://localhost:8787"
   info "查看日志：docker compose logs -f artex"
   info "清理旧镜像（可选）：docker image prune -f"
