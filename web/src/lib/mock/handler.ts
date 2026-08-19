@@ -148,7 +148,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       page_size: pageSize,
     };
   }
-  if (path === "/exploration/intents") return D.intents;
+  if (path === "/exploration/intents") {
+    if (q.has("page")) {
+      const before = Number(q.get("before") ?? 0);
+      const limit = Number(q.get("limit") ?? 300);
+      let list = D.intents;
+      if (before > 0) list = list.filter((n) => Number(n.id.replace(/\D/g, "") || n.id) < before);
+      return { items: list.slice(0, limit), has_more: list.length > limit };
+    }
+    return D.intents;
+  }
   if (path === "/exploration/tokens") return { workers: D.tokenWorkers, total: D.tokenTotal };
   if (path === "/exploration/graph") return D.explorationGraph;
   if (path === "/exploration/activity" && seg.length === 2) {
@@ -190,6 +199,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/llm/profiles" && m === "GET") return { profiles: D.llmProfiles };
   if (path === "/llm/profiles" && m === "POST") return { id: Number(b.id) || 3 };
   if (path === "/llm/profiles/active") return { ok: true };
+  if (path === "/llm/pool" && m === "GET") return D.llmPool;
+  if (path === "/llm/pool/reset")
+    return { ...D.llmPool, chain: D.llmPool.chain.map((c) => ({ ...c, state: "ok", fails: 0, cooldown_secs: 0 })) };
   if (seg[0] === "llm" && seg[1] === "profiles" && seg.length === 3 && m === "DELETE") return { deleted: Number(seg[2]) };
 
   // ── agents ──
