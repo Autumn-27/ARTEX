@@ -27,6 +27,23 @@ func TestTaskLifecycleAndDeleteCascade(t *testing.T) {
 	if err != nil || got == nil || !got.Paused {
 		t.Fatalf("paused not persisted: %+v err=%v", got, err)
 	}
+	if got.Queued {
+		t.Fatalf("new task should not be queued: %+v", got)
+	}
+
+	// queued (concurrency-hold) flag round-trips independently of paused
+	if err := d.SetQueued(tk.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := d.GetTask(tk.ID); g == nil || !g.Queued {
+		t.Fatalf("queued not persisted: %+v", g)
+	}
+	if err := d.SetQueued(tk.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := d.GetTask(tk.ID); g == nil || g.Queued {
+		t.Fatalf("queued not cleared: %+v", g)
+	}
 
 	// list contains it
 	list, _ := d.ListTasks()

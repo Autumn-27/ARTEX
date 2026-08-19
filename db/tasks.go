@@ -13,6 +13,7 @@ type Task struct {
 	ExplorationID int64      `json:"exploration_id"`
 	Status        string     `json:"status"`
 	Paused        bool       `json:"paused"`
+	Queued        bool       `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
 	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
 	ParentRef     string     `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
 	CreatedAt     time.Time  `json:"created_at"`
@@ -84,11 +85,11 @@ RETURNING id, status, paused, created_at`, description, goal, expID, llmProfileI
 	return t, tx.Commit()
 }
 
-const taskCols = `id, description, goal, exploration_id, status, paused, llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), first_run_at, deadline_at`
+const taskCols = `id, description, goal, exploration_id, status, paused, queued, llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.LLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.LLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -133,6 +134,13 @@ func (d *DB) GetTask(id int64) (*Task, error) {
 // SetPaused persists a task's paused flag.
 func (d *DB) SetPaused(id int64, paused bool) error {
 	_, err := d.Exec(`UPDATE tasks SET paused=$1 WHERE id=$2`, paused, id)
+	return err
+}
+
+// SetQueued persists a task's queued flag (并发上限挂起态). A queued task is held
+// (engine not started) until the concurrency reconciler promotes it into a free slot.
+func (d *DB) SetQueued(id int64, queued bool) error {
+	_, err := d.Exec(`UPDATE tasks SET queued=$1 WHERE id=$2`, queued, id)
 	return err
 }
 

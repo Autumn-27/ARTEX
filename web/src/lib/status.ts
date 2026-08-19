@@ -54,6 +54,7 @@ const intent: Record<string, StatusMeta> = {
 
 const task: Record<string, StatusMeta> = {
   created: { label: "已创建", tone: "slate" },
+  queued: { label: "排队中", tone: "amber" },
   running: { label: "运行中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
   done: { label: "已完成", tone: "green" },

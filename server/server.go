@@ -42,6 +42,11 @@ type Server struct {
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
 
+	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
+	// scheduler tick and an HTTP settings change / task creation can't both count
+	// free slots off the same snapshot and over-promote past the limit.
+	concMu sync.Mutex
+
 	cfgMu     sync.Mutex
 	mainAgent *agent.MainAgent // nil when no LLM provider is configured
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
@@ -227,7 +232,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	// resume the active task's engine; other tasks resume when opened (setActive).
 	// (a restored-paused task's loops still start but idle until resumed.)
-	if t := m.ActiveTask(); t != nil {
+	// 排队中的任务不在此启动——留给 reconcileConcurrency 按空位补位。
+	if t := m.ActiveTask(); t != nil && !t.Queued {
 		s.engine.Run(ctx, t)
 	}
 	return s
@@ -846,6 +852,8 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isTerminalStatus(t.Status): // 持久化终态优先（done/failed/timeout）
 			status = t.Status
+		case t.Queued: // 因并发上限挂起、等待空位(尚未启动)
+			status = "queued"
 		case t.Paused || s.engine.IsPaused(t.ID):
 			status = "paused"
 		case s.engine.Ready() && s.engine.Started(t.ID):
@@ -880,7 +888,8 @@ func (s *Server) setActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// resume the engine for the opened task (idempotent — no-op if already running).
-	if t, ok := s.m.Task(req.ID); ok {
+	// 排队中的任务:仅设为活跃可查看,不启动引擎(维持并发上限,由 reconcile 补位)。
+	if t, ok := s.m.Task(req.ID); ok && !t.Queued {
 		s.engine.Run(s.ctx, t)
 	}
 	writeJSON(w, 200, map[string]any{"active": req.ID})
@@ -2145,16 +2154,22 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
+	concOn, concLimit := s.m.ConcurrencyLimit()
+	if concLimit == 0 {
+		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
+	}
 	return map[string]any{
-		"traffic_capture":    s.m.TrafficEnabled(),
-		"llm_record":         s.m.LLMRecordEnabled(),
-		"web_search_enabled": on,
-		"web_search_backend": backend,
-		"brave_key_set":      strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":     strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":   proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"python_interpreter": strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":            s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"traffic_capture":          s.m.TrafficEnabled(),
+		"llm_record":               s.m.LLMRecordEnabled(),
+		"web_search_enabled":       on,
+		"web_search_backend":       backend,
+		"brave_key_set":            strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
 	}
 }
 
@@ -2188,6 +2203,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
+		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
+		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -2198,6 +2216,26 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, err.Error())
 			return
 		}
+	}
+	if req.ConcurrencyEnabled != nil || req.ConcurrencyLimit != nil {
+		// 部分 PUT:未给的字段用当前值兜底,避免只改一个把另一个重置。
+		curOn, curLimit := s.m.ConcurrencyLimit()
+		if curLimit == 0 {
+			curLimit = defaultConcurrencyLimit
+		}
+		on, limit := curOn, curLimit
+		if req.ConcurrencyEnabled != nil {
+			on = *req.ConcurrencyEnabled
+		}
+		if req.ConcurrencyLimit != nil {
+			limit = *req.ConcurrencyLimit
+		}
+		if err := s.m.SetConcurrency(on, limit); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		// 立即协调一次:关闭时放行全部排队,调高上限时补位启动,不必等下一个 tick。
+		go s.reconcileConcurrency()
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {

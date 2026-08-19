@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -29,21 +30,116 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	if seedFirstIntent {
 		s.seedFirstIntent(t)
 	}
-	go func() {
-		s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
-			Summary: "第 0 轮目标拆解"})
-		goals := s.createGoals(s.ctx, t, func(r db.Activity) {
-			s.engine.emitActivity(t, r)
-		})
-		for _, g := range goals {
-			summary := g.Text
-			if g.VulnClass != "" {
-				summary = fmt.Sprintf("[%s] %s", g.VulnClass, g.Text)
-			}
-			s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: summary})
+	// 并发上限:满了就挂起排队(不做目标拆解、不启动引擎),由 reconcileConcurrency 补位启动。
+	if s.queueIfAtCapacity(t) {
+		return
+	}
+	go s.startTaskEngine(t)
+}
+
+// startTaskEngine does the actual running work: 第0轮目标拆解 + 启动引擎循环。
+// Shared by fresh launches and by the concurrency reconciler promoting a queued task.
+func (s *Server) startTaskEngine(t *Task) {
+	s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
+		Summary: "第 0 轮目标拆解"})
+	goals := s.createGoals(s.ctx, t, func(r db.Activity) {
+		s.engine.emitActivity(t, r)
+	})
+	for _, g := range goals {
+		summary := g.Text
+		if g.VulnClass != "" {
+			summary = fmt.Sprintf("[%s] %s", g.VulnClass, g.Text)
 		}
-		s.engine.Run(s.ctx, t)
-	}()
+		s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: summary})
+	}
+	s.engine.Run(s.ctx, t)
+}
+
+// occupiesSlot reports whether a task counts against the concurrency cap: it is
+// live (not terminal), not queued, and not paused. A just-created / decomposing
+// task counts too (it will run momentarily).
+func (s *Server) occupiesSlot(t *Task) bool {
+	if t == nil || t.Queued || isTerminalStatus(t.Status) {
+		return false
+	}
+	return !t.Paused && !s.engine.IsPaused(t.ID)
+}
+
+// runningTaskCount counts tasks occupying a concurrency slot, excluding excludeID
+// (pass the candidate's id when deciding admission so it doesn't count itself).
+func (s *Server) runningTaskCount(excludeID string) int {
+	n := 0
+	for _, t := range s.m.List() {
+		if t.ID == excludeID {
+			continue
+		}
+		if s.occupiesSlot(t) {
+			n++
+		}
+	}
+	return n
+}
+
+// queueIfAtCapacity holds a task in the queued state when the concurrency cap is
+// enabled and already full. Returns true if the task was queued (caller must not
+// start it). No-op (false) when the feature is off or a slot is free.
+func (s *Server) queueIfAtCapacity(t *Task) bool {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	enabled, limit := s.m.ConcurrencyLimit()
+	if !enabled || s.runningTaskCount(t.ID) < limit {
+		return false
+	}
+	if err := s.m.SetTaskQueued(t.ID, true); err != nil {
+		log.Printf("[concurrency] task %s 置排队失败: %v", t.ID, err)
+		return false // 落库失败宁可放它跑,也别静默丢任务
+	}
+	t.Queued = true
+	s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "text",
+		Summary: fmt.Sprintf("已排队：达到并发上限 %d，等待空位后自动开始", limit)})
+	log.Printf("[concurrency] task %s 排队(并发上限 %d)", t.ID, limit)
+	return true
+}
+
+// reconcileConcurrency promotes queued tasks into free slots. Runs on every
+// scheduler tick. When the feature is disabled it releases ALL queued tasks;
+// when enabled it starts the oldest-queued tasks up to (limit - running).
+func (s *Server) reconcileConcurrency() {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	var queued []*Task
+	for _, t := range s.m.List() {
+		if t.Queued && !isTerminalStatus(t.Status) {
+			queued = append(queued, t)
+		}
+	}
+	if len(queued) == 0 {
+		return
+	}
+	// 最早排队的先启动。
+	sort.Slice(queued, func(i, j int) bool { return queued[i].CreatedAt < queued[j].CreatedAt })
+
+	enabled, limit := s.m.ConcurrencyLimit()
+	slots := len(queued) // feature off → 全部放行
+	if enabled {
+		if !s.engine.Ready() {
+			return // 引擎未就绪(无 LLM):继续挂起,别空跑
+		}
+		slots = limit - s.runningTaskCount("")
+	}
+	for _, t := range queued {
+		if slots <= 0 {
+			break
+		}
+		if err := s.m.SetTaskQueued(t.ID, false); err != nil {
+			log.Printf("[concurrency] task %s 解除排队失败: %v", t.ID, err)
+			continue
+		}
+		t.Queued = false
+		log.Printf("[concurrency] task %s 出队启动", t.ID)
+		go s.startTaskEngine(t)
+		slots--
+	}
 }
 
 // reviveTask 让一个已停下的任务重新跑起来:把终态(done/failed/timeout)拉回 running、
@@ -54,6 +150,10 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 // 图 + Notify 唤不醒已判完成的任务;重启后终态任务的 goroutine 也可能已不在,故还要 Run。
 func (s *Server) reviveTask(t *Task) {
 	if t == nil {
+		return
+	}
+	// 排队中的任务不复活启动——它本就等待并发空位,交给 reconcileConcurrency。
+	if t.Queued {
 		return
 	}
 	// 终态 → 拉回 running(SetTaskStatus 会清 completed_at 并同步内存 handle 的 Status,

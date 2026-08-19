@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status         TEXT NOT NULL DEFAULT 'created'
                      CHECK (status IN ('created','running','paused','done','failed','timeout')),
     paused         BOOLEAN NOT NULL DEFAULT false,
+    queued         BOOLEAN NOT NULL DEFAULT false,
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
     company_id     BIGINT REFERENCES companies(id) ON DELETE SET NULL,
     parent_ref     TEXT,
@@ -253,6 +254,8 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 -- planner 心跳触发间隔(秒);补旧库。默认 300s(5min)。见 docs/planner-trigger-impl-plan.md
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
+-- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
 
 -- 任务测试范围（资产覆盖度的分母 + 授权边界）。
 --   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围

@@ -32,6 +32,7 @@ type Task struct {
 	CreatedAt    int64  `json:"created_at"`
 	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
 	Paused       bool   `json:"paused"`
+	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
 	ParentRef    string `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
 	LLMProfileID *int64 `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
 	Status       string `json:"status"`                   // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
@@ -85,11 +86,44 @@ const (
 	settingWebSearchProxy   = "web_search_proxy"
 	settingWorkers          = "workers"
 	settingLLMRecord        = "llm_record"
+	// 任务并发上限:开关 + 上限数。默认关闭;开启后默认上限 5(见 defaultConcurrencyLimit)。
+	settingConcurrencyOn    = "task_concurrency_enabled"
+	settingConcurrencyLimit = "task_concurrency_limit"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// defaultWorkers is the concurrent work-agent count when the setting is unset.
 	defaultWorkers = 3
+	// defaultConcurrencyLimit is the simultaneous-running-task cap when the feature
+	// is enabled but no explicit limit was saved.
+	defaultConcurrencyLimit = 5
 )
+
+// ConcurrencyLimit returns whether the simultaneous-running-task cap is enabled and
+// its limit (default 5 when enabled but unset). limit is always >=1 when enabled.
+func (m *Manager) ConcurrencyLimit() (enabled bool, limit int) {
+	on, _, _ := m.pg.GetSetting(settingConcurrencyOn)
+	if strings.TrimSpace(on) != "true" {
+		return false, 0
+	}
+	limit = defaultConcurrencyLimit
+	if v, ok, _ := m.pg.GetSetting(settingConcurrencyLimit); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 {
+			limit = n
+		}
+	}
+	return true, limit
+}
+
+// SetConcurrency persists the running-task concurrency cap. limit<1 is clamped to 1.
+func (m *Manager) SetConcurrency(enabled bool, limit int) error {
+	if limit < 1 {
+		limit = defaultConcurrencyLimit
+	}
+	if err := m.pg.SetSetting(settingConcurrencyLimit, strconv.Itoa(limit)); err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingConcurrencyOn, strconv.FormatBool(enabled))
+}
 
 // Workers returns the configured concurrent work-agent count (default 3). Read
 // per-task at engine.Run, so a change applies to tasks started afterwards.
@@ -457,7 +491,7 @@ func unixOrZero(t *time.Time) int64 {
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:   pt.LLMProfileID,
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
@@ -524,6 +558,24 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 		return err
 	}
 	return m.pg.SetPaused(n, paused)
+}
+
+// SetTaskQueued persists a task's queued (concurrency-hold) state and syncs the
+// in-memory handle so listTasks/占位统计 see it immediately.
+func (m *Manager) SetTaskQueued(id string, queued bool) error {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	if err := m.pg.SetQueued(n, queued); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.Queued = queued
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // TaskStatus returns a task's current in-memory status (empty if unknown).

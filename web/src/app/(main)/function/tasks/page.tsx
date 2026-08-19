@@ -13,6 +13,7 @@ import {
   ChevronRightIcon,
   PaperclipIcon,
   Loader2Icon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
@@ -30,8 +31,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
@@ -143,6 +155,7 @@ function fmtDateTime(unix?: number): string {
 
 const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "created", label: "已创建" },
+  { value: "queued", label: "排队中" },
   { value: "running", label: "运行中" },
   { value: "paused", label: "已暂停" },
   { value: "done", label: "已完成" },
@@ -263,6 +276,7 @@ export default function TasksPage() {
           <span className="text-muted-foreground text-xs tabular-nums">
             {filtered.length}/{tasks.length} 条
           </span>
+          <ConcurrencySettingsDialog />
           <CreateTaskSheet onCreated={load} />
         </div>
 
@@ -423,6 +437,99 @@ const TaskRow = React.memo(function TaskRow({
   );
 });
 
+// ConcurrencySettingsDialog is the 齿轮 button left of 新建任务: toggle the
+// simultaneous-running-task cap and pick the limit. Default off; default limit 5.
+// Persisted globally via /api/settings — applies to tasks created afterwards.
+function ConcurrencySettingsDialog() {
+  const [open, setOpen] = React.useState(false);
+  const [enabled, setEnabled] = React.useState(false);
+  const [limit, setLimit] = React.useState("5");
+  const [loading, setLoading] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+
+  // 每次打开都拉取当前值,避免显示陈旧状态。
+  React.useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    api
+      .settings()
+      .then((s) => {
+        setEnabled(!!s.task_concurrency_enabled);
+        setLimit(String(s.task_concurrency_limit ?? 5));
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  async function save() {
+    const n = Math.max(1, Math.floor(Number(limit) || 5));
+    setSaving(true);
+    try {
+      await api.setSettings({ task_concurrency_enabled: enabled, task_concurrency_limit: n });
+      toast.success(enabled ? `已开启并发限制：最多同时运行 ${n} 个任务` : "已关闭任务并发限制");
+      setOpen(false);
+    } catch (e) {
+      toast.error("保存失败：" + (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline" className="ml-auto" aria-label="任务并发设置">
+          <SlidersHorizontalIcon /> 并发设置
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>任务并发限制</DialogTitle>
+          <DialogDescription>
+            限制同时「运行中」的任务数量。关闭时不限制；开启后新建任务若已达上限，会进入「排队中」，有空位时自动开始。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-5 py-2">
+          <div className="flex items-center justify-between gap-4">
+            <div className="grid gap-1">
+              <Label htmlFor="conc-enabled">开启任务并发限制</Label>
+              <span className="text-muted-foreground text-xs">默认关闭（不限制并发）</span>
+            </div>
+            <Switch id="conc-enabled" checked={enabled} onCheckedChange={setEnabled} disabled={loading} />
+          </div>
+
+          {enabled && (
+            <div className="grid gap-2">
+              <Label htmlFor="conc-limit">并发数量（同时运行的任务上限）</Label>
+              <Input
+                id="conc-limit"
+                type="number"
+                min={1}
+                className="w-32"
+                value={limit}
+                onChange={(e) => setLimit(e.target.value)}
+                disabled={loading}
+              />
+              <span className="text-muted-foreground text-xs">开启后默认 5，最小 1。</span>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline">取消</Button>
+          </DialogClose>
+          <Button onClick={save} disabled={loading || saving}>
+            {saving ? <Loader2Icon className="animate-spin" /> : null}
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // CreateTaskSheet is the 新建任务 drawer. Its form state lives HERE, not in TasksPage: with
 // 描述/目标 held by the page component every keystroke re-rendered the whole task table
 // behind the drawer (plus its sticky column and 20 AlertDialog trees), which showed up as
@@ -499,7 +606,7 @@ function CreateTaskSheet({ onCreated }: { onCreated: () => void }) {
   return (
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>
-          <Button size="sm" className="ml-auto">
+          <Button size="sm">
             <PlusIcon /> 新建任务
           </Button>
         </SheetTrigger>
