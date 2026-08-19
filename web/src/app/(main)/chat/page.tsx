@@ -77,8 +77,8 @@ function LiveBadge() {
   );
 }
 
-// Composer is the shared bottom input (textarea grows to a cap, Enter sends,
-// Shift+Enter newlines) — the same affordance across DraftChat and ChatView.
+// Composer is the shared bottom input (textarea grows to a cap, Enter newlines,
+// Ctrl/Cmd+Enter sends) — the same affordance across DraftChat and ChatView.
 function Composer({
   value,
   onChange,
@@ -112,7 +112,8 @@ function Composer({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Enter 换行；只有 Ctrl/Cmd+Enter 才发送(避免长消息误发)。
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       onSend();
     }
@@ -363,7 +364,7 @@ function DraftChat({
         onChange={setInput}
         onSend={send}
         disabled={sending || uploading || !agentKey}
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+        placeholder="输入消息，Enter 换行，Ctrl+Enter 发送"
         leftSlot={agentPicker}
         onPickFiles={pickFiles}
         uploading={uploading}
@@ -691,7 +692,7 @@ function ChatView({
         onChange={setInput}
         onSend={send}
         disabled={running}
-        placeholder={running ? "Agent 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"}
+        placeholder={running ? "Agent 正在回复…" : "输入消息，Enter 换行，Ctrl+Enter 发送"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}

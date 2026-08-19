@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { Transcript } from "@/components/transcript";
 import { TodoPopover } from "@/components/todo-popover";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
@@ -1070,7 +1070,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 ))}
               </div>
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex items-end gap-2">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1087,12 +1087,18 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               >
                 {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
               </Button>
-              <Input
-                placeholder="给主 Agent 发消息，引导探索方向…"
+              <Textarea
+                className="max-h-40 min-h-9 flex-1 resize-none"
+                rows={1}
+                placeholder="给主 Agent 发消息，Enter 换行，Ctrl+Enter 发送…"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !mainLive) send();
+                  // Enter 换行；只有 Ctrl/Cmd+Enter 才发送。
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    if (!mainLive) send();
+                  }
                 }}
                 disabled={mainLive}
               />
