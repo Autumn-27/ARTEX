@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -532,6 +533,59 @@ func TestQueryByType(t *testing.T) {
 	}
 	if !found {
 		t.Error("QueryByType: inserted asset not found")
+	}
+}
+
+// TestDeleteByTaskID: 独有资产被删,与其他任务共享的资产仅解除关联(保留),host 反查正确。
+func TestDeleteByTaskID(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	const taskA = int64(90001)
+	const taskB = int64(90002)
+	// solo:仅属 taskA
+	solo, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "solo-del.test", TaskID: taskA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, solo)
+	// shared:先 taskA 再 taskB → task_ids={A,B}
+	shared, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "shared-del.test", TaskID: taskA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, shared)
+	if _, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "shared-del.test", TaskID: taskB}); err != nil {
+		t.Fatal(err)
+	}
+
+	// host 反查(删资产前):应含两个域名
+	hosts, err := av2.HostsByTask(taskA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(hosts, "solo-del.test") || !slices.Contains(hosts, "shared-del.test") {
+		t.Fatalf("HostsByTask 缺 host: %v", hosts)
+	}
+
+	n, err := av2.DeleteByTaskID(taskA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("DeleteByTaskID: 应删 1 个独有资产,实删 %d", n)
+	}
+	// solo 已删
+	if a, _ := av2.GetByIDs([]int64{solo}); len(a) != 0 {
+		t.Fatalf("solo 资产应被删除")
+	}
+	// shared 保留,且 task_ids 只剩 taskB
+	sa, _ := av2.GetByIDs([]int64{shared})
+	if len(sa) != 1 {
+		t.Fatalf("shared 资产应保留")
+	}
+	if slices.Contains(sa[0].TaskIDs, taskA) || !slices.Contains(sa[0].TaskIDs, taskB) {
+		t.Fatalf("shared task_ids 应解除 A 保留 B,得 %v", sa[0].TaskIDs)
 	}
 }
 

@@ -66,14 +66,61 @@ func decode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decod
 
 // ---------- tasks (delete) ----------
 
+// pgDeleteTask removes a task and, per opt-in flags in the (optional) JSON body,
+// its associated data: assets (task-owned), findings, recorded traffic (by the
+// task's hosts) and the per-task working directory. Empty body → all flags false →
+// only the task + its exploration subgraph are removed (legacy behavior).
 func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	var opts struct {
+		Assets   bool `json:"assets"`
+		Findings bool `json:"findings"`
+		Traffic  bool `json:"traffic"`
+		Files    bool `json:"files"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&opts) // optional body; ignore EOF/parse errors
+
+	result := map[string]any{"deleted": id}
+	nid, _ := strconv.ParseInt(id, 10, 64)
+	as := s.m.Assets()
+
+	// Traffic first: it needs the task's hosts, which come from assets that a later
+	// asset-delete would remove. Traffic is host-keyed (no per-task tag), so this
+	// purges ALL recorded traffic for those hosts, not just this task's.
+	if opts.Traffic && nid > 0 && as != nil {
+		if tr := s.m.Traffic(); tr != nil {
+			if hosts, err := as.HostsByTask(nid); err == nil && len(hosts) > 0 {
+				if n, err := tr.DeleteHostsExact(hosts); err == nil {
+					result["traffic_deleted"] = n
+				}
+			}
+		}
+	}
+	if opts.Findings && nid > 0 {
+		if n, err := s.m.pg.DeleteFindingsByTask(nid); err == nil {
+			result["findings_deleted"] = n
+		}
+	}
+	if opts.Assets && nid > 0 && as != nil {
+		if n, err := as.DeleteByTaskID(nid); err == nil {
+			result["assets_deleted"] = n
+		}
+	}
+
 	s.engine.Pause(id, agent.AbortTaskDeleted) // cancel running loops before removing
 	if err := s.m.DeleteTask(id); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": id})
+
+	// Files last: the per-task working dir <workDir>/tasks/<id> (worker artifacts +
+	// uploads). Confined to the work dir; id is numeric so no traversal risk.
+	if opts.Files && nid > 0 {
+		if err := os.RemoveAll(filepath.Join(s.m.dir, "tasks", id)); err == nil {
+			result["files_deleted"] = true
+		}
+	}
+	writeJSON(w, 200, result)
 }
 
 // ---------- agents ----------

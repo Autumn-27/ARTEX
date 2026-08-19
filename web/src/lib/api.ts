@@ -122,7 +122,16 @@ export const api = {
       seed_first_intent: seedFirstIntent ?? false,
       plan_heartbeat_seconds: planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
     }),
-  deleteTask: (id: string) => del<{ deleted: number }>(`/tasks/${id}`),
+  // 删除任务;opts 里的四个可选项默认不删:assets 关联资产、findings 发现漏洞、
+  // traffic 测试流量(按任务 host 清)、files 测试过程写的文件(tasks/<id> 目录)。
+  deleteTask: (
+    id: string,
+    opts?: { assets?: boolean; findings?: boolean; traffic?: boolean; files?: boolean },
+  ) =>
+    del<{ deleted: string; assets_deleted?: number; findings_deleted?: number; traffic_deleted?: number; files_deleted?: boolean }>(
+      `/tasks/${id}`,
+      opts,
+    ),
   controlTask: (id: string, action: "pause" | "resume") => post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),

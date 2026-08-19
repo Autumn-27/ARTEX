@@ -227,15 +227,18 @@ export default function TasksPage() {
     return () => clearInterval(i);
   }, [hasRunning]);
 
-  const deleteTask = React.useCallback(async (id: string) => {
-    try {
-      await api.deleteTask(id);
-      toast.success("任务已删除（全局资产图保留）");
-      load();
-    } catch (e) {
-      toast.error("删除失败：" + (e as Error).message);
-    }
-  }, [load]);
+  const deleteTask = React.useCallback(
+    async (id: string, opts: DeleteOpts) => {
+      try {
+        await api.deleteTask(id, opts);
+        toast.success("任务已删除");
+        load();
+      } catch (e) {
+        toast.error("删除失败：" + (e as Error).message);
+      }
+    },
+    [load],
+  );
 
   return (
     <Card>
@@ -333,6 +336,15 @@ export default function TasksPage() {
 // the POLL_MS list refresh only re-render the rows whose data actually moved — a table page
 // is 20 rows × (StatusBadge + Link + a Radix AlertDialog tree), far too heavy to rebuild
 // wholesale on every parent render.
+type DeleteOpts = { assets: boolean; findings: boolean; traffic: boolean; files: boolean };
+
+const DELETE_EXTRAS: { key: keyof DeleteOpts; label: string; hint: string }[] = [
+  { key: "assets", label: "删除关联的资产", hint: "仅本任务独有的资产;与其他任务共享的仅解除关联" },
+  { key: "findings", label: "删除发现的漏洞", hint: "本任务记录的全部漏洞" },
+  { key: "traffic", label: "删除测试的流量", hint: "按本任务涉及的 host 清除录制流量" },
+  { key: "files", label: "删除测试过程中写的文件", hint: "本任务工作目录 tasks/<id>(产物 + 上传)" },
+];
+
 const TaskRow = React.memo(function TaskRow({
   task,
   nowSec,
@@ -340,8 +352,14 @@ const TaskRow = React.memo(function TaskRow({
 }: {
   task: Task;
   nowSec: number;
-  onDelete: (id: string) => void;
+  onDelete: (id: string, opts: DeleteOpts) => void;
 }) {
+  const [delOpts, setDelOpts] = React.useState<DeleteOpts>({
+    assets: false,
+    findings: false,
+    traffic: false,
+    files: false,
+  });
   return (
     <TableRow className="group border-border/60">
       <TableCell>
@@ -430,12 +448,35 @@ const TaskRow = React.memo(function TaskRow({
                   ) : (
                     "该任务"
                   )}
-                  的执行记录、会话与产物将被删除，此操作不可撤销（全局资产图保留）。
+                  的执行记录、会话与产物将被删除，此操作不可撤销。
                 </AlertDialogDescription>
               </AlertDialogHeader>
+
+              {/* 额外清理项:默认都不选,勾选后连带删除。全局资产图默认保留。 */}
+              <div className="grid gap-2 rounded-md border bg-muted/30 p-3">
+                <span className="text-xs font-medium text-muted-foreground">
+                  同时删除以下关联数据（默认不删）：
+                </span>
+                {DELETE_EXTRAS.map((opt) => (
+                  <label key={opt.key} className="flex items-start gap-2 text-sm">
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={delOpts[opt.key]}
+                      onCheckedChange={(v) =>
+                        setDelOpts((s) => ({ ...s, [opt.key]: v === true }))
+                      }
+                    />
+                    <span className="grid gap-0.5">
+                      <span>{opt.label}</span>
+                      <span className="text-xs text-muted-foreground">{opt.hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
               <AlertDialogFooter>
                 <AlertDialogCancel>取消</AlertDialogCancel>
-                <AlertDialogAction onClick={() => onDelete(task.id)}>
+                <AlertDialogAction onClick={() => onDelete(task.id, delOpts)}>
                   删除
                 </AlertDialogAction>
               </AlertDialogFooter>

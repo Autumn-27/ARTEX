@@ -1053,6 +1053,45 @@ func (s *AssetStore) GetByIDs(ids []int64) ([]*Asset, error) {
 	return scanAssets(rows)
 }
 
+// DeleteByTaskID removes a task's assets: hard-deletes assets owned solely by this
+// task (task_ids = {taskID}) and de-associates the rest (drops this task from their
+// task_ids, keeping assets shared with other tasks intact). Returns rows deleted.
+func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if _, err := s.db.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, taskID); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
+// HostsByTask returns the distinct hostnames/IPs the task's assets carry (domain,
+// root_domain, ip) — used to purge host-keyed traffic recorded for that task.
+func (s *AssetStore) HostsByTask(taskID int64) ([]string, error) {
+	rows, err := s.db.Query(`
+SELECT DISTINCT h FROM (
+    SELECT NULLIF(domain,'')      AS h FROM assets WHERE $1 = ANY(task_ids)
+    UNION SELECT NULLIF(root_domain,'') FROM assets WHERE $1 = ANY(task_ids)
+    UNION SELECT NULLIF(ip,'')          FROM assets WHERE $1 = ANY(task_ids)
+) q WHERE h IS NOT NULL AND h <> ''`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // DeleteByCompanyID hard-deletes all assets belonging to a company. Returns rows deleted.
 func (s *AssetStore) DeleteByCompanyID(companyID int64) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM assets WHERE company_id = $1`, companyID)

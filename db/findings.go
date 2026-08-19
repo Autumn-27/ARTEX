@@ -329,6 +329,17 @@ func (d *DB) DeleteFinding(id int64) (int64, error) {
 	return 1, nil
 }
 
+// DeleteFindingsByTask removes all findings rows of a task. The originating
+// exploration finding nodes are cascade-deleted separately when the task's
+// exploration subgraph is dropped. Returns rows deleted.
+func (d *DB) DeleteFindingsByTask(taskID int64) (int64, error) {
+	res, err := d.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // SetFindingStatus updates one finding's triage state. Returns rows affected.
 func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 	res, err := d.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, status, id)
