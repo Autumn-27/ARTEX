@@ -19,6 +19,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/norma/llm"
@@ -53,6 +54,11 @@ type Server struct {
 	llmCfg    agent.Config     // current LLM config (key not exposed)
 	llmOn     bool
 	llmProf   string // active LLM profile name (for llmrec tagging)
+	// llmProv is the fully-decorated global provider (recorder + failover chain)
+	// applyLLM installed. Kept so one-off callers (goal decomposition) reuse the
+	// same instance instead of building a private one that skips the rate limiter,
+	// the recorder and failover.
+	llmProv llm.Provider
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -97,6 +103,12 @@ type Server struct {
 	// leaving it unset), just not deduped. Cleared alongside profAgents on profile edits.
 	provCacheMu   sync.Mutex
 	provByProfile map[int64]*provEntry
+
+	// llmHealth is the process-wide circuit-breaker state for LLM failover (轮询).
+	// It deliberately lives OUTSIDE the provider caches: rebuilding the chain
+	// (saving an unrelated profile, flipping a setting) must not erase what we
+	// learned about which backends are out of credit / rate-limited.
+	llmHealth *llmpool.Registry
 }
 
 // profBundle is a planner/worker pair built from one LLM profile.
@@ -131,7 +143,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
-		provByProfile: map[int64]*provEntry{}}
+		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg)}
 	// per-task LLM: a task pinned to a specific profile runs on that profile's
 	// dedicated planner/worker; unpinned tasks fall back to the global active pair.
 	s.engine.SetAgentResolver(func(t *Task) (*agent.Planner, *agent.Worker) {
@@ -291,10 +303,15 @@ func (s *Server) saveLLMConfig(cfg agent.Config) {
 		format = "openai"
 	}
 	var id int64
+	// agent.Config carries no failover fields, so carry the stored ones forward —
+	// otherwise this legacy endpoint would silently reset the profile's priority
+	// and pool_exclude to zero values on every save.
+	var priority int
+	var poolExclude bool
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
-				id = p.ID
+				id, priority, poolExclude = p.ID, p.Priority, p.PoolExclude
 				break
 			}
 		}
@@ -303,6 +320,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) {
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
+		Priority: priority, PoolExclude: poolExclude,
 	})
 	if err == nil {
 		_ = s.m.pg.SetActiveProfile(newID)
@@ -371,6 +389,12 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	profName := s.llmProf
 	s.cfgMu.Unlock()
 	prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, s.m.LLMRecordEnabled)
+	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
+	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
+	// 默认仍然独占该配置(见 poolForBinding)。关闭或无备选时返回原 provider,行为不变。
+	if act, err := s.m.pg.ActiveProfile(); err == nil && act != nil {
+		prov = s.poolForActive(act.ID, prov, cfg)
+	}
 	pl, wk := s.buildPlannerWorker(nil, prov, cfg)
 	s.engine.UseLLM(pl, wk)
 
@@ -391,6 +415,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
 	s.llmCfg = cfg
+	s.llmProv = prov
 	s.llmOn = true
 	s.cfgMu.Unlock()
 
@@ -468,10 +493,14 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 
 // providerForAgent returns the provider+cfg one agent should run on: its bound/pinned
 // profile if that resolves, else the passed global fallback (gProv/gCfg).
+// A bound/pinned profile is EXCLUSIVE by default: it does not fail over, so an
+// agent deliberately put on a specific model never silently runs on another one.
+// Turning on llm_pool_bind_fallback relaxes that — poolForBinding then appends the
+// failover chain behind it.
 func (s *Server) providerForAgent(agentKey string, pinID *int64, gProv llm.Provider, gCfg agent.Config) (llm.Provider, agent.Config) {
 	if eff := s.effectiveProfileForAgent(agentKey, pinID); eff != nil {
 		if prov, cfg, ok := s.providerForProfile(*eff); ok {
-			return prov, cfg
+			return s.poolForBinding(*eff, prov, cfg), cfg
 		}
 	}
 	return gProv, gCfg
@@ -492,7 +521,9 @@ func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
 	if !ok {
 		return nil, nil
 	}
-	pl, wk := s.buildPlannerWorker(&id, prov, cfg)
+	// The pin is the fallback for agents without their own binding — same
+	// exclusive-by-default rule, so route it through poolForBinding too.
+	pl, wk := s.buildPlannerWorker(&id, s.poolForBinding(id, prov, cfg), cfg)
 	s.profMu.Lock()
 	if ex := s.profAgents[id]; ex != nil { // lost the race → keep the winner
 		pl, wk = ex.pl, ex.wk
@@ -517,7 +548,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 		return nil
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	ca := agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
+	ca := agent.NewChatAgent(s.poolForBinding(id, prov, cfg), cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
@@ -726,6 +757,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
 	mux.HandleFunc("DELETE /api/llm/profiles/{id}", s.pgDeleteProfile)
 	mux.HandleFunc("POST /api/llm/profiles/active", s.pgActivateProfile)
+	mux.HandleFunc("GET /api/llm/pool", s.pgLLMPoolStatus)
+	mux.HandleFunc("POST /api/llm/pool/reset", s.pgLLMPoolReset)
 	mux.HandleFunc("POST /api/llm/models", s.pgListModels)
 
 	// 拦截规则管理
@@ -2191,6 +2224,10 @@ func (s *Server) settingsPayload() map[string]any {
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
 		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
+		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
+		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
+		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
+		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
 	}
 }
 
@@ -2227,6 +2264,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
+		// LLM 轮询(故障转移)开关 + 「绑定配置失败也兜底回轮询链」开关。两者都需要
+		// 重建 provider 链才生效，走下面的 changed → applyLLM 路径。
+		LLMPoolEnabled      *bool `json:"llm_pool_enabled"`
+		LLMPoolBindFallback *bool `json:"llm_pool_bind_fallback"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -2272,6 +2313,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed := false
+	if req.LLMPoolEnabled != nil {
+		if err := s.m.SetLLMPoolEnabled(*req.LLMPoolEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		changed = true // the provider chain itself changes shape → rebuild
+	}
+	if req.LLMPoolBindFallback != nil {
+		if err := s.m.SetLLMPoolBindFallback(*req.LLMPoolBindFallback); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		changed = true
+	}
+	if req.LLMPoolEnabled != nil || req.LLMPoolBindFallback != nil {
+		// Pinned tasks' planner/worker and per-profile chat agents hold providers
+		// built under the OLD switch state — drop them so they pick up the new one.
+		s.invalidateProfileAgents()
+	}
 	if req.TrafficCapture != nil {
 		if err := s.m.SetTrafficEnabled(*req.TrafficCapture); err != nil {
 			writeErr(w, 500, err.Error())

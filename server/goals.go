@@ -10,6 +10,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/llm"
 )
 
 type goalSpec struct {
@@ -188,7 +189,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	// so FromEnv returned empty and every task silently fell back to the crude rule
 	// splitter (which shredded URLs / made meaningless 2-way splits).
 	var specs []goalSpec
-	if cfg, ok := s.goalsLLMConfig(t); ok {
+	if prov, ok := s.goalsProvider(t); ok {
 		var as *db.AssetStore
 		if s.m != nil {
 			as = s.m.Assets()
@@ -197,7 +198,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		// DecomposeGoals persists each decomposed goal via the set_goals tool straight
 		// into t.Store; it returns the specs it wrote so we can emit activity + spot the
 		// empty (LLM error / no provider) case below. No write-back needed here anymore.
-		for _, g := range agent.DecomposeGoals(ctx, cfg, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, emit) {
+		for _, g := range agent.DecomposeGoals(ctx, prov, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, emit) {
 			if strings.TrimSpace(g.Text) != "" {
 				specs = append(specs, goalSpec{Text: g.Text, VulnClass: g.VulnClass})
 			}
@@ -220,18 +221,22 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	return specs
 }
 
-// goalsLLMConfig resolves the LLM config for goal decomposition by the standard
-// precedence: the goals agent's own binding → the task's pinned profile → the global
-// active profile (same source the engine runs on).
-func (s *Server) goalsLLMConfig(t *Task) (agent.Config, bool) {
+// goalsProvider resolves the provider for goal decomposition by the standard
+// precedence: the goals agent's own binding → the task's pinned profile → the
+// global active provider (the very instance the engine runs on, so decomposition
+// shares its rate limiter, gets recorded, and follows LLM failover).
+func (s *Server) goalsProvider(t *Task) (llm.Provider, bool) {
 	var pin *int64
 	if t != nil {
 		pin = t.LLMProfileID
 	}
 	if eff := s.effectiveProfileForAgent("goals", pin); eff != nil {
-		if cfg, ok := s.loadProfileConfig(*eff); ok {
-			return cfg, true
+		if prov, cfg, ok := s.providerForProfile(*eff); ok {
+			return s.poolForBinding(*eff, prov, cfg), true
 		}
 	}
-	return s.loadLLMConfig()
+	s.cfgMu.Lock()
+	prov, on := s.llmProv, s.llmOn
+	s.cfgMu.Unlock()
+	return prov, on && prov != nil
 }

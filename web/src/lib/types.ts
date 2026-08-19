@@ -501,6 +501,11 @@ export interface Settings {
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
   task_concurrency_enabled?: boolean; // 默认 false
   task_concurrency_limit?: number; // 开启后默认 5
+  // LLM 轮询(故障转移)。默认关；开启后「未指定模型」的 agent 在当前配置不可用
+  // （余额不足/key 失效/限流/服务异常）时自动切到下一个配置。
+  llm_pool_enabled?: boolean; // 默认 false
+  // 绑定了指定配置的 agent/任务失败时是否也回落到轮询链。默认 false = 绑定即独占。
+  llm_pool_bind_fallback?: boolean;
 }
 
 // ---- LLM config ----
@@ -518,6 +523,37 @@ export interface LLMProfile {
   // 思考模式: ""=默认(不发送) | "off"=关闭 | "low"/"medium"/"high"/"max"=开启并设强度
   reasoning_effort?: string;
   is_default: boolean;
+  // 轮询顺位：越大越先被选中。激活配置恒为链首，与本值无关。
+  priority?: number;
+  // true = 不作为故障转移目标（仍可被 agent/任务显式绑定使用）。
+  pool_exclude?: boolean;
+}
+
+// ---- LLM 轮询（故障转移）----
+// 一个配置在轮询链中的位置与健康状态。state:
+//   ok       正常
+//   degraded 有连续失败但未达熔断阈值
+//   tripped  已熔断，冷却期内被跳过（cooldown_secs 为剩余秒数）
+export interface LLMPoolMember {
+  profile_id: string;
+  name: string;
+  model: string;
+  format: string;
+  priority: number;
+  active: boolean; // 是否为当前激活配置（恒为链首）
+  excluded: boolean; // pool_exclude：不参与轮询
+  state: "ok" | "degraded" | "tripped";
+  fails: number;
+  trips: number;
+  cooldown_secs: number;
+  last_error?: string;
+  last_at?: string;
+}
+
+export interface LLMPoolStatus {
+  enabled: boolean;
+  bind_fallback: boolean;
+  chain: LLMPoolMember[];
 }
 
 // ---- Agents ----

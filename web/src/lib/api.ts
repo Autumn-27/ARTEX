@@ -14,7 +14,7 @@ import type {
   InterceptRule, InterceptPending, InterceptApprovalRow,
   TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData, CoverageAssetRefs,
   WorkspaceListing, WorkspaceFile,
-  CommandRecord, LLMRecordItem, LLMRecordDetail, LLMTask,
+  CommandRecord, LLMRecordItem, LLMRecordDetail, LLMTask, LLMPoolStatus,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -409,9 +409,15 @@ export const api = {
     rate_per_minute?: number;
     context_window_k?: number;
     reasoning_effort?: string; // ""|"off"|"low"|"medium"|"high"|"max"
+    priority?: number; // 轮询顺位，越大越先用
+    pool_exclude?: boolean; // true=不作为故障转移目标
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
+  // 轮询链的实际顺序 + 各配置的熔断状态。
+  llmPool: () => get<LLMPoolStatus>("/llm/pool"),
+  // 清除熔断，让下一次调用立刻重试该配置；不传 id = 全部清除。
+  resetLLMPool: (id?: string) => post<LLMPoolStatus>("/llm/pool/reset", { id: id ? Number(id) : 0 }),
   fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number) =>
     post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
       provider,

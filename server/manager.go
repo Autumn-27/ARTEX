@@ -86,6 +86,12 @@ const (
 	settingWebSearchProxy   = "web_search_proxy"
 	settingWorkers          = "workers"
 	settingLLMRecord        = "llm_record"
+	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
+	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
+	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
+	// 绑定了某个配置就只用它、失败即失败;开启后绑定的配置失败也会回落到轮询链。
+	settingLLMPoolOn           = "llm_pool_enabled"
+	settingLLMPoolBindFallback = "llm_pool_bind_fallback"
 	// 任务并发上限:开关 + 上限数。默认关闭;开启后默认上限 5(见 defaultConcurrencyLimit)。
 	settingConcurrencyOn    = "task_concurrency_enabled"
 	settingConcurrencyLimit = "task_concurrency_limit"
@@ -264,6 +270,36 @@ func (m *Manager) SetLLMRecordEnabled(on bool) error {
 	m.llmRecOn = on
 	m.mu.Unlock()
 	return nil
+}
+
+// LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
+// settings.llm_pool_enabled). Read when the provider chain is built (applyLLM),
+// so a change requires a rebuild — putSettings does that.
+func (m *Manager) LLMPoolEnabled() bool {
+	if m.pg == nil {
+		return false
+	}
+	return m.pg.GetBool(settingLLMPoolOn, false)
+}
+
+// SetLLMPoolEnabled persists the failover toggle. Callers rebuild agents
+// (applyLLM) afterwards so it takes effect.
+func (m *Manager) SetLLMPoolEnabled(on bool) error { return m.pg.SetBool(settingLLMPoolOn, on) }
+
+// LLMPoolBindFallback reports whether an agent/task that is BOUND to a specific
+// profile still falls back to the chain when that profile fails (默认关：绑定即
+// 独占，失败即失败). Only meaningful while LLMPoolEnabled.
+func (m *Manager) LLMPoolBindFallback() bool {
+	if m.pg == nil {
+		return false
+	}
+	return m.pg.GetBool(settingLLMPoolBindFallback, false)
+}
+
+// SetLLMPoolBindFallback persists the bound-profile fallback toggle. Callers
+// rebuild agents (applyLLM) afterwards.
+func (m *Manager) SetLLMPoolBindFallback(on bool) error {
+	return m.pg.SetBool(settingLLMPoolBindFallback, on)
 }
 
 // WebSearch returns the current web-search config: whether it is enabled, the

@@ -2,7 +2,17 @@
 
 import * as React from "react";
 
-import { Loader2Icon, PlugZapIcon, PlusIcon, RefreshCwIcon, SaveIcon, StarIcon, Trash2Icon } from "lucide-react";
+import {
+  Loader2Icon,
+  PlugZapIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  RotateCcwIcon,
+  SaveIcon,
+  StarIcon,
+  Trash2Icon,
+  ZapIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -23,8 +33,9 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
-import type { LLMProfile } from "@/lib/types";
+import type { LLMPoolStatus, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // 思考强度档位（仅在开关打开时生效）。
@@ -48,6 +59,203 @@ const toStore = (mode: ThinkMode, effort: string) => (mode === "on" ? effort : m
 const modeFromStore = (v?: string): ThinkMode => (!v ? "none" : v === "off" ? "off" : "on");
 const effortFromStore = (v?: string) => (v && v !== "off" ? v : "high");
 
+// 熔断状态 → 徽章样式。degraded 是「在失败但还没到熔断阈值」的中间态。
+const STATE_BADGE: Record<string, { label: string; cls: string }> = {
+  ok: { label: "正常", cls: "border-emerald-500/50 text-emerald-600 dark:text-emerald-400" },
+  degraded: { label: "异常", cls: "border-amber-500/50 text-amber-600 dark:text-amber-400" },
+  tripped: { label: "已熔断", cls: "border-destructive/50 text-destructive" },
+};
+
+function cooldownText(secs: number) {
+  if (secs <= 0) return "";
+  if (secs < 60) return `${secs}s`;
+  return `${Math.ceil(secs / 60)}min`;
+}
+
+// PoolCard 是轮询功能的总控：主开关、绑定兜底开关，以及后端算出来的**实际**链路顺序。
+// 顺序预览很关键——「激活 + 优先级 + 不参与轮询」三个因素叠加后，光看单张配置卡片
+// 是猜不出真实顺序的。
+function PoolCard({ refreshKey }: { refreshKey: number }) {
+  const [pool, setPool] = React.useState<LLMPoolStatus | null>(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setPool(await api.llmPool());
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is a prop — bumping it is exactly how the parent asks for a refetch after a profile edit
+  React.useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
+  // 冷却倒计时是后端算的剩余秒数，定时拉一次让它走起来（只在有熔断时才轮询）。
+  React.useEffect(() => {
+    if (!pool?.enabled || !pool.chain.some((m) => m.state !== "ok")) return;
+    const t = setInterval(() => void load(), 10_000);
+    return () => clearInterval(t);
+  }, [pool, load]);
+
+  async function toggle(patch: { llm_pool_enabled?: boolean; llm_pool_bind_fallback?: boolean }) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.setSettings(patch);
+      await load();
+      if (patch.llm_pool_enabled !== undefined) {
+        toast.success(patch.llm_pool_enabled ? "已开启 LLM 轮询" : "已关闭 LLM 轮询");
+      } else {
+        toast.success("已更新绑定兜底设置");
+      }
+    } catch (e) {
+      toast.error(`设置失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recover(id?: string) {
+    try {
+      setPool(await api.resetLLMPool(id));
+      toast.success(id ? "已恢复该配置" : "已恢复全部配置");
+    } catch (e) {
+      toast.error(`恢复失败：${(e as Error).message}`);
+    }
+  }
+
+  const enabled = pool?.enabled ?? false;
+  // 链路顺序 = 后端返回的顺序；不参与轮询的配置仍会列出（灰显并标注），
+  // 这样用户能看见「它为什么不在队列里」，而不是凭空消失。
+  const chain = pool?.chain ?? [];
+  const inChain = chain.filter((m) => m.active || !m.excluded);
+  const tripped = chain.filter((m) => m.state === "tripped");
+
+  return (
+    <Card>
+      <CardHeader className="has-data-[slot=card-action]:grid-cols-[1fr_auto]">
+        <CardTitle className="flex items-center gap-2">
+          <ZapIcon className="size-4" /> LLM 轮询 · 故障转移
+        </CardTitle>
+        <CardDescription>
+          开启后，<b>未指定模型</b>的 Agent 在当前配置不可用（余额不足 / Key 失效 / 限流 /
+          服务异常）时自动切换到下一个配置。 指定了模型的 Agent 与任务默认不参与轮询。
+        </CardDescription>
+        <CardAction className="self-center">
+          <Switch
+            checked={enabled}
+            disabled={busy}
+            onCheckedChange={(v) => void toggle({ llm_pool_enabled: v })}
+            aria-label="LLM 轮询开关"
+          />
+        </CardAction>
+      </CardHeader>
+      {enabled && (
+        <CardContent className="grid gap-4">
+          <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
+            <div className="grid gap-0.5">
+              <Label className="text-sm">指定模型失败时也兜底</Label>
+              <p className="text-muted-foreground text-xs">
+                默认关闭：Agent 或任务指定了某个配置就只用它，失败即失败（不会悄悄换成别的模型）。
+                开启后，指定的配置失败时也会回落到下面的轮询链。
+              </p>
+            </div>
+            <Switch
+              checked={pool?.bind_fallback ?? false}
+              disabled={busy}
+              onCheckedChange={(v) => void toggle({ llm_pool_bind_fallback: v })}
+              aria-label="绑定配置失败兜底开关"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">轮询顺序</Label>
+              {tripped.length > 0 && (
+                <Button size="sm" variant="ghost" onClick={() => void recover()}>
+                  <RotateCcwIcon /> 全部恢复
+                </Button>
+              )}
+            </div>
+            {inChain.length < 2 && (
+              <p className="text-muted-foreground text-xs">
+                当前只有 {inChain.length} 个可用配置，轮询不会生效——至少需要 2 个已填 API Key 且参与轮询的配置。
+              </p>
+            )}
+            <div className="grid gap-2">
+              {chain.map((m) => {
+                const badge = STATE_BADGE[m.state] ?? STATE_BADGE.ok;
+                const order =
+                  m.excluded && !m.active ? null : inChain.findIndex((x) => x.profile_id === m.profile_id) + 1;
+                return (
+                  <div
+                    key={m.profile_id}
+                    className={cn(
+                      "flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border p-2.5 text-sm",
+                      m.excluded && !m.active && "opacity-55",
+                      m.state === "tripped" && "border-destructive/40",
+                    )}
+                  >
+                    <span className="w-6 shrink-0 text-center font-mono text-muted-foreground text-xs">
+                      {order ?? "—"}
+                    </span>
+                    <span className="font-medium">{m.name}</span>
+                    <code className="truncate font-mono text-muted-foreground text-xs">{m.model}</code>
+                    {m.active && (
+                      <Badge variant="outline" className="border-amber-400/50 text-amber-500">
+                        激活
+                      </Badge>
+                    )}
+                    {m.excluded && !m.active && <Badge variant="outline">不参与轮询</Badge>}
+                    {!m.active && <span className="text-muted-foreground text-xs">优先级 {m.priority}</span>}
+                    <div className="ml-auto flex items-center gap-2">
+                      {m.state === "tripped" && m.cooldown_secs > 0 && (
+                        <span className="text-muted-foreground text-xs">冷却 {cooldownText(m.cooldown_secs)}</span>
+                      )}
+                      {m.state === "degraded" && (
+                        <span className="text-muted-foreground text-xs">连续失败 {m.fails} 次</span>
+                      )}
+                      <Badge variant="outline" className={badge.cls}>
+                        {badge.label}
+                      </Badge>
+                      {m.state !== "ok" && (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-7"
+                          aria-label="立即恢复"
+                          title="立即恢复：清除熔断，下次调用重试该配置"
+                          onClick={() => void recover(m.profile_id)}
+                        >
+                          <RotateCcwIcon className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                    {m.last_error && (
+                      <p className="w-full truncate font-mono text-muted-foreground text-xs" title={m.last_error}>
+                        {m.last_error}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+              {chain.length === 0 && (
+                <div className="rounded-lg border border-dashed p-4 text-center text-muted-foreground text-sm">
+                  暂无配置
+                </div>
+              )}
+            </div>
+            <p className="text-muted-foreground text-xs">
+              激活配置恒为第 1 顺位，其余按优先级从高到低。某个配置失败后进入冷却（60s → 5min → 30min），
+              冷却期内被跳过；恢复后自动切回。上下文窗口装不下当前请求的配置会被跳过。
+            </p>
+          </div>
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
 function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
@@ -61,6 +269,8 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
   const [cw, setCw] = React.useState("0");
   const [thinkMode, setThinkMode] = React.useState<ThinkMode>("none");
   const [effort, setEffort] = React.useState("high");
+  const [priority, setPriority] = React.useState("0");
+  const [poolExclude, setPoolExclude] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
   const [loadingModels, setLoadingModels] = React.useState(false);
   const [modelsOpen, setModelsOpen] = React.useState(false);
@@ -77,6 +287,8 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
     setCw("0");
     setThinkMode("none");
     setEffort("high");
+    setPriority("0");
+    setPoolExclude(false);
     setModels([]);
     setModelsOpen(false);
   }
@@ -118,6 +330,8 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
         rate_per_minute: Number(rpm) || 0,
         context_window_k: Number(cw) || 0,
         reasoning_effort: toStore(thinkMode, effort),
+        priority: Number(priority) || 0,
+        pool_exclude: poolExclude,
       });
       toast.success(`已新建 Profile：${name.trim()}（在列表中「设为激活」以启用）`);
       reset();
@@ -278,9 +492,36 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
           <div className="grid gap-3 rounded-lg border p-3">
             <div className="flex items-center justify-between gap-4">
               <div className="grid gap-0.5">
+                <Label htmlFor="np-priority" className="text-sm">
+                  轮询优先级
+                </Label>
+                <p className="text-muted-foreground text-xs">数字越大越先被选中；激活配置恒为第 1 顺位。</p>
+              </div>
+              <Input
+                id="np-priority"
+                type="number"
+                className="w-24 shrink-0"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">不参与轮询</Label>
+                <p className="text-muted-foreground text-xs">
+                  开启后不会被当作故障转移目标（仍可被 Agent / 任务显式指定使用）。
+                </p>
+              </div>
+              <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
+            </div>
+          </div>
+          <div className="grid gap-3 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-0.5">
                 <Label className="text-sm">思考模式 · Extended Thinking</Label>
                 <p className="text-muted-foreground text-xs">
-                  不发送=不带思考字段（兼容 MiniMax 等不支持该字段的模型）；显式关闭=发 disabled（默认开思考的模型才需要）；开启=先推理再作答。
+                  不发送=不带思考字段（兼容 MiniMax 等不支持该字段的模型）；显式关闭=发
+                  disabled（默认开思考的模型才需要）；开启=先推理再作答。
                 </p>
               </div>
               <Select value={thinkMode} onValueChange={(v) => setThinkMode(v as ThinkMode)}>
@@ -344,6 +585,10 @@ export default function LLMPage() {
   const [cw, setCw] = React.useState("0"); // 上下文窗口(K tokens);0=默认200K
   const [thinkMode, setThinkMode] = React.useState<ThinkMode>("none");
   const [effort, setEffort] = React.useState("high");
+  const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
+  const [poolExclude, setPoolExclude] = React.useState(false); // true=不作为故障转移目标
+  // 任何 profile 的改动都可能改变轮询链的形状，用它触发 PoolCard 重新拉取。
+  const [poolKey, setPoolKey] = React.useState(0);
   const [testing, setTesting] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
   const [loadingModels, setLoadingModels] = React.useState(false);
@@ -353,6 +598,7 @@ export default function LLMPage() {
     try {
       const ps = await api.llmProfiles();
       setProfiles(ps);
+      setPoolKey((k) => k + 1); // 链路顺序可能变了，让 PoolCard 重拉
       setSelectedId((prev) => {
         if (prev && ps.some((p) => p.id === prev)) return prev;
         return ps.find((p) => p.is_default)?.id ?? ps[0]?.id ?? null;
@@ -380,6 +626,8 @@ export default function LLMPage() {
     setCw(String(selected.context_window_k ?? 0));
     setThinkMode(modeFromStore(selected.reasoning_effort));
     setEffort(effortFromStore(selected.reasoning_effort));
+    setPriority(String(selected.priority ?? 0));
+    setPoolExclude(selected.pool_exclude ?? false);
     setApiKey("");
     setKeyHint(selected.api_key_hint ?? "");
   }, [selected]);
@@ -389,13 +637,7 @@ export default function LLMPage() {
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(
-        format,
-        baseUrl,
-        apiKey,
-        proxy,
-        selectedId ? Number(selectedId) : undefined,
-      );
+      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, selectedId ? Number(selectedId) : undefined);
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -457,6 +699,8 @@ export default function LLMPage() {
         rate_per_minute: Number(rpm) || 0,
         context_window_k: Number(cw) || 0,
         reasoning_effort: toStore(thinkMode, effort),
+        priority: Number(priority) || 0,
+        pool_exclude: poolExclude,
       });
       toast.success(selected?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
       setApiKey("");
@@ -498,6 +742,7 @@ export default function LLMPage() {
         <p className="text-muted-foreground text-sm">全 Agent 共享的格式 / 模型 / 限速配置</p>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
+        <PoolCard refreshKey={poolKey} />
         <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-3">
           <Card className="lg:order-2 lg:col-span-2">
             <CardHeader>
@@ -572,7 +817,10 @@ export default function LLMPage() {
                         </Button>
                       </PopoverTrigger>
                       {models.length > 0 && (
-                        <PopoverContent className="max-h-72 w-72 gap-0 overflow-y-auto overscroll-contain p-1" align="end">
+                        <PopoverContent
+                          className="max-h-72 w-72 gap-0 overflow-y-auto overscroll-contain p-1"
+                          align="end"
+                        >
                           {models.map((m) => (
                             <button
                               key={m}
@@ -660,9 +908,41 @@ export default function LLMPage() {
                 <div className="grid gap-3 rounded-lg border p-3">
                   <div className="flex items-center justify-between gap-4">
                     <div className="grid gap-0.5">
+                      <Label htmlFor="priority" className="text-sm">
+                        轮询优先级
+                      </Label>
+                      <p className="text-muted-foreground text-xs">
+                        数字越大越先被选中；激活配置恒为第 1
+                        顺位，与本值无关。相同优先级的配置会轮流打头，天然分摊额度。
+                      </p>
+                    </div>
+                    <Input
+                      id="priority"
+                      type="number"
+                      className="w-24 shrink-0"
+                      value={priority}
+                      onChange={(e) => setPriority(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-4 border-t pt-3">
+                    <div className="grid gap-0.5">
+                      <Label className="text-sm">不参与轮询</Label>
+                      <p className="text-muted-foreground text-xs">
+                        开启后不会被当作故障转移目标（仍可被 Agent / 任务显式指定使用）。 适合「只给某个 Agent
+                        专用、不希望别人失败时烧掉」的昂贵配置。
+                      </p>
+                    </div>
+                    <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
+                  </div>
+                </div>
+
+                <div className="grid gap-3 rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="grid gap-0.5">
                       <Label className="text-sm">思考模式 · Extended Thinking</Label>
                       <p className="text-muted-foreground text-xs">
-                        不发送=不带思考字段（兼容 MiniMax 等不支持该字段的模型）；显式关闭=发 disabled（默认开思考的模型才需要）；开启=先推理再作答。
+                        不发送=不带思考字段（兼容 MiniMax 等不支持该字段的模型）；显式关闭=发
+                        disabled（默认开思考的模型才需要）；开启=先推理再作答。
                       </p>
                     </div>
                     <Select value={thinkMode} onValueChange={(v) => setThinkMode(v as ThinkMode)}>
@@ -780,6 +1060,8 @@ export default function LLMPage() {
                         {p.reasoning_effort && (
                           <span>思考 {p.reasoning_effort === "off" ? "关" : p.reasoning_effort}</span>
                         )}
+                        {!p.is_default &&
+                          (p.pool_exclude ? <span>不参与轮询</span> : <span>优先级 {p.priority ?? 0}</span>)}
                       </div>
                     </div>
                   </div>

@@ -214,6 +214,11 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     context_window_k INTEGER NOT NULL DEFAULT 0,
     reasoning_effort TEXT NOT NULL DEFAULT '',
     is_default       BOOLEAN NOT NULL DEFAULT false,
+    -- 轮询(故障转移)参数，见 docs/LLM轮询设计.md：
+    --   priority     顺位，越大越先被选中；激活配置(is_default)永远排链首，与本值无关。
+    --   pool_exclude true=不作为故障转移目标(仍可被 agent/任务显式绑定使用)。
+    priority         INTEGER NOT NULL DEFAULT 0,
+    pool_exclude     BOOLEAN NOT NULL DEFAULT false,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -221,6 +226,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default)
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- 轮询顺位/排除标记；补旧库。默认 0 / false = 全部配置都参与轮询。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
+
+-- LLM 轮询熔断状态：某个配置连续失败(余额不足/key 失效/限流)后进入冷却，冷却期内
+-- 轮询直接跳过它。内存态为准，这里落库只为重启后不丢冷却窗口——加载时只取尚未
+-- 到期的行(open_until > now)，已到期的自然回到"正常"，等下一次调用半开试探。
+CREATE TABLE IF NOT EXISTS llm_profile_health (
+    profile_id  BIGINT PRIMARY KEY REFERENCES llm_profiles(id) ON DELETE CASCADE,
+    fails       INTEGER NOT NULL DEFAULT 0,  -- 当前连续失败次数(成功即清零)
+    trips       INTEGER NOT NULL DEFAULT 0,  -- 累计熔断次数,用于冷却时间指数退避
+    open_until  TIMESTAMPTZ,                 -- 冷却截止;NULL/过期 = 未熔断
+    last_error  TEXT NOT NULL DEFAULT '',
+    last_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- =====================================================================
 -- D. 任务层

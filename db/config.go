@@ -27,10 +27,29 @@ type LLMProfile struct {
 	// 开启思考并设强度. Mapped to the provider request in agent.Config.NewProvider.
 	ReasoningEffort string `json:"reasoning_effort"`
 	IsDefault       bool   `json:"is_default"`
+	// Priority orders the failover chain: higher goes first. The ACTIVE profile
+	// (IsDefault) always heads the chain regardless of this value.
+	Priority int `json:"priority"`
+	// PoolExclude=true keeps this profile out of the failover chain — it stays
+	// usable when an agent/task binds it explicitly, it just never gets picked up
+	// as a fallback target.
+	PoolExclude bool `json:"pool_exclude"`
+}
+
+// profileCols is the read column list (hint variant, no api key) shared by the
+// list query; profileColsKey is the same with api_key for the single-row loads.
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude`
+
+// scanProfile reads one row in the profileCols / profileColsKey column order. The
+// 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
+func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile) error {
+	return sc.Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, into,
+		&p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault, &p.Priority, &p.PoolExclude)
 }
 
 func (d *DB) ListProfiles() ([]*LLMProfile, error) {
-	rows, err := d.Query(`SELECT id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default FROM llm_profiles ORDER BY id`)
+	rows, err := d.Query(`SELECT ` + profileCols + ` FROM llm_profiles ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +57,7 @@ func (d *DB) ListProfiles() ([]*LLMProfile, error) {
 	var out []*LLMProfile
 	for rows.Next() {
 		var p LLMProfile
-		if err := rows.Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, &p.APIKeyHint, &p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault); err != nil {
+		if err := scanProfile(rows, &p.APIKeyHint, &p); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -49,8 +68,7 @@ func (d *DB) ListProfiles() ([]*LLMProfile, error) {
 // ActiveProfile returns the default (active) profile with its api key, or nil.
 func (d *DB) ActiveProfile() (*LLMProfile, error) {
 	var p LLMProfile
-	err := d.QueryRow(`SELECT id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default FROM llm_profiles WHERE is_default LIMIT 1`).
-		Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, &p.APIKey, &p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault)
+	err := scanProfile(d.QueryRow(`SELECT `+profileColsKey+` FROM llm_profiles WHERE is_default LIMIT 1`), &p.APIKey, &p)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -61,12 +79,35 @@ func (d *DB) ActiveProfile() (*LLMProfile, error) {
 // Used to run a task on a specific (non-default) LLM profile.
 func (d *DB) ProfileByID(id int64) (*LLMProfile, error) {
 	var p LLMProfile
-	err := d.QueryRow(`SELECT id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default FROM llm_profiles WHERE id=$1`, id).
-		Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, &p.APIKey, &p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault)
+	err := scanProfile(d.QueryRow(`SELECT `+profileColsKey+` FROM llm_profiles WHERE id=$1`, id), &p.APIKey, &p)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	return &p, err
+}
+
+// PoolProfiles returns the failover chain in run order, api keys included: the
+// active profile first, then every other keyed profile that isn't excluded, by
+// priority DESC (id ASC to stay stable). Profiles without an api key can't serve
+// a request, so they never enter the chain. The ordering IS the policy — callers
+// walk the slice front to back.
+func (d *DB) PoolProfiles() ([]*LLMProfile, error) {
+	rows, err := d.Query(`SELECT ` + profileColsKey + ` FROM llm_profiles
+WHERE COALESCE(api_key,'') <> '' AND (is_default OR NOT pool_exclude)
+ORDER BY is_default DESC, priority DESC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*LLMProfile
+	for rows.Next() {
+		var p LLMProfile
+		if err := scanProfile(rows, &p.APIKey, &p); err != nil {
+			return nil, err
+		}
+		out = append(out, &p)
+	}
+	return out, rows.Err()
 }
 
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
@@ -77,18 +118,18 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	}
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11) RETURNING id`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort).Scan(&id)
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13) RETURNING id`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude).Scan(&id)
 		return id, err
 	}
 	if p.APIKey == "" {
-		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9 WHERE id=$10`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.ID)
+		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11 WHERE id=$12`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ID)
 		return p.ID, err
 	}
-	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11 WHERE id=$12`,
-		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.ID)
+	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13 WHERE id=$14`,
+		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ID)
 	return p.ID, err
 }
 

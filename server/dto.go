@@ -436,6 +436,10 @@ type LLMProfileDTO struct {
 	ContextWindowK  int     `json:"context_window_k"`
 	ReasoningEffort string  `json:"reasoning_effort"`
 	IsDefault       bool    `json:"is_default"`
+	// 轮询(故障转移)参数：priority 越大越先被选中(激活配置恒为链首)；
+	// pool_exclude=true 则不作为故障转移目标，但仍可被 agent/任务显式绑定。
+	Priority    int  `json:"priority"`
+	PoolExclude bool `json:"pool_exclude"`
 }
 
 func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
@@ -452,6 +456,8 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		ContextWindowK:  p.ContextWindowK,
 		ReasoningEffort: p.ReasoningEffort,
 		IsDefault:       p.IsDefault,
+		Priority:        p.Priority,
+		PoolExclude:     p.PoolExclude,
 	}
 }
 

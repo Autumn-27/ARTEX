@@ -1609,10 +1609,10 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	// Editing a profile rebuilds any task pinned to it on its next round.
 	s.invalidateProfileAgents()
-	// If we just edited the active profile, hot-apply so changes take effect now.
-	if act, _ := pg.ActiveProfile(); act != nil && act.ID == id {
-		s.reapplyActiveProfile()
-	}
+	// Hot-apply. Not just when the ACTIVE profile changed: with failover on, any
+	// profile's key/model/priority/pool_exclude edit reshapes the chain, so the
+	// engine's provider has to be rebuilt either way.
+	s.reapplyActiveProfile()
 	writeJSON(w, 200, map[string]any{"id": id})
 }
 
@@ -1627,6 +1627,8 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidateProfileAgents() // drop cached agents for the removed profile
+	s.llmHealth.Reset(id)      // its breaker state is meaningless now (row is FK-cascaded away)
+	s.reapplyActiveProfile()   // the deleted profile may have been in the failover chain
 	writeJSON(w, 200, map[string]any{"deleted": id})
 }
 
@@ -1649,6 +1651,40 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 	s.invalidateProfileAgents() // active change may affect pinned-task fallbacks
 	s.reapplyActiveProfile()    // switch the running engine to the newly activated profile
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// pgLLMPoolStatus reports the failover ("轮询") switches, the resolved chain order
+// and every profile's circuit-breaker state — what the LLM page renders as the
+// "轮询顺序" strip and the per-card health badges.
+func (s *Server) pgLLMPoolStatus(w http.ResponseWriter, r *http.Request) {
+	if s.pg(w) == nil {
+		return
+	}
+	writeJSON(w, 200, s.llmPoolStatus())
+}
+
+// pgLLMPoolReset clears a tripped profile's circuit breaker so the next call
+// tries it again immediately ("立即恢复"). id=0 clears every profile.
+func (s *Server) pgLLMPoolReset(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var body struct {
+		ID int64 `json:"id"` // 0 / omitted = all
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if body.ID > 0 {
+		s.llmHealth.Reset(body.ID)
+	} else {
+		for id := range s.llmHealth.Snapshot() {
+			s.llmHealth.Reset(id)
+		}
+	}
+	writeJSON(w, 200, s.llmPoolStatus())
 }
 
 // pgListModels fetches available models from the provider's API endpoint.

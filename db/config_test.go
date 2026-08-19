@@ -5,6 +5,54 @@ import (
 	"testing"
 )
 
+// TestPoolProfilesOrder pins the failover chain query: keyless profiles can't
+// serve a request and excluded ones aren't fallback targets, so neither belongs
+// in the chain; the rest come back by priority, highest first.
+// Deliberately does NOT touch is_default — flipping the active profile would be a
+// side effect on the shared dev database.
+func TestPoolProfilesOrder(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	mk := func(name string, priority int, exclude bool, key string) int64 {
+		id, err := d.SaveProfile(&LLMProfile{
+			Name: name, Format: "openai", Model: "m", APIKey: key,
+			Priority: priority, PoolExclude: exclude,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, id) })
+		return id
+	}
+	lo := mk("t-pool-lo", 1, false, "k1")
+	hi := mk("t-pool-hi", 9, false, "k2")
+	mk("t-pool-excluded", 99, true, "k3") // excluded despite the top priority
+	mk("t-pool-nokey", 50, false, "")     // no key → cannot serve anything
+
+	chain, err := d.PoolProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []int64
+	for _, p := range chain {
+		switch p.Name {
+		case "t-pool-lo", "t-pool-hi":
+			got = append(got, p.ID)
+		case "t-pool-excluded":
+			t.Fatal("pool_exclude profile entered the failover chain")
+		case "t-pool-nokey":
+			t.Fatal("keyless profile entered the failover chain")
+		}
+	}
+	if len(got) != 2 || got[0] != hi || got[1] != lo {
+		t.Fatalf("chain order = %v, want [hi=%d lo=%d]", got, hi, lo)
+	}
+}
+
 func TestConfigStores(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
