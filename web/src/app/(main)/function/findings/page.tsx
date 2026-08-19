@@ -7,10 +7,22 @@ import {
   ShieldAlertIcon,
   ArrowUpRightIcon,
   FileTextIcon,
+  Trash2Icon,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Markdown } from "@/components/markdown";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -231,6 +243,24 @@ export default function FindingsPage() {
     [edit],
   );
 
+  // deleteFinding 删除一个漏洞(需二次确认):删成功后从列表移除、收起行、刷新统计。
+  const deleteFinding = React.useCallback(
+    async (f: Finding) => {
+      if (!f.finding_id) return;
+      try {
+        await api.deleteFinding(f.finding_id);
+        setFindings((cur) => cur.filter((x) => x.id !== f.id));
+        setTotal((t) => Math.max(0, t - 1));
+        setExpanded((cur) => (cur === f.id ? null : cur));
+        toast.success("已删除漏洞");
+        api.findingStats().then(setStats).catch(() => {});
+      } catch (e) {
+        toast.error("删除失败：" + (e as Error).message);
+      }
+    },
+    [],
+  );
+
   const statCards: { label: string; value: number; tone?: string }[] = [
     { label: "发现总数", value: stats.total },
     { label: "待处理", value: stats.pending, tone: "text-amber-500" },
@@ -375,6 +405,7 @@ export default function FindingsPage() {
                   <TableHead className="w-28">状态</TableHead>
                   <TableHead className="w-36 max-w-[9rem]">所属任务</TableHead>
                   <TableHead className="w-32">时间</TableHead>
+                  <TableHead className="w-16 text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -490,12 +521,41 @@ export default function FindingsPage() {
                         <TableCell className="text-xs text-muted-foreground tabular-nums">
                           {fmtTime(f.ts)}
                         </TableCell>
+                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                          {f.finding_id && (
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="size-7 text-muted-foreground hover:text-destructive"
+                                  aria-label="删除漏洞"
+                                >
+                                  <Trash2Icon className="size-4" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>确认删除该漏洞？</AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    「{f.name || f.vulnclass || f.summary || `#${f.finding_id}`}」将被永久删除，
+                                    同时从发现列表、任务发现 Tab 与探索图中移除，此操作不可撤销。
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>取消</AlertDialogCancel>
+                                  <AlertDialogAction onClick={() => deleteFinding(f)}>删除</AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          )}
+                        </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow className="hover:bg-transparent">
                           {/* whitespace-normal 覆盖 TableCell 默认的 nowrap,否则展开区文字
                               被强制单行、直接溢出单元格。 */}
-                          <TableCell colSpan={7} className="bg-muted/30 whitespace-normal">
+                          <TableCell colSpan={8} className="bg-muted/30 whitespace-normal">
                             <div className="flex flex-col gap-2 px-2 py-1">
                               {/* 行内编辑:名称/类别/严重等级,可改并保存(仅独立 finding 行)。 */}
                               {f.finding_id && edit && (
@@ -626,7 +686,7 @@ export default function FindingsPage() {
                 {findings.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={7}
+                      colSpan={8}
                       className="py-12 text-center text-sm text-muted-foreground"
                     >
                       没有匹配的发现。

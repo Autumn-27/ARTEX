@@ -308,6 +308,27 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	return f, nil
 }
 
+// DeleteFinding removes a finding entirely: the standalone findings row and its
+// originating exploration node (kind='finding'), so it disappears from the findings
+// list, the per-task 发现 Tab, and the exploration graph alike. Deleting the node
+// cascades its edges + node_assets and nulls any activity referencing it. Returns
+// rows affected (0 = no finding with that id).
+func (d *DB) DeleteFinding(id int64) (int64, error) {
+	var nodeID *int64
+	err := d.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if nodeID != nil {
+		// best-effort: the finding is already gone; a stray node must not fail the op.
+		_, _ = d.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, *nodeID)
+	}
+	return 1, nil
+}
+
 // SetFindingStatus updates one finding's triage state. Returns rows affected.
 func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 	res, err := d.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, status, id)

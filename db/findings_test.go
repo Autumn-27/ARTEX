@@ -5,6 +5,54 @@ import (
 	"testing"
 )
 
+// TestDeleteFinding verifies删除漏洞 removes both the findings row and its
+// originating exploration node (kind='finding').
+func TestDeleteFinding(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	tk, err := d.CreateTask("删除漏洞测试", "目标", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(tk.ID)
+
+	// seed a finding node in the task's exploration graph, then a findings row on it
+	es := d.Exploration(tk.ExplorationID)
+	nodeID, err := es.AddNode(KindFinding, map[string]any{"summary": "x", "severity": "high"}, 5, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid, err := d.AddFinding(tk.ID, nodeID, "XSS", "反射型 XSS", "high", "summary", "poc", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := d.DeleteFinding(fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("DeleteFinding rows: want 1, got %d", n)
+	}
+	if f, _ := d.GetFinding(fid); f != nil {
+		t.Fatalf("finding row should be gone, got %+v", f)
+	}
+	var cnt int
+	d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE id=$1`, nodeID).Scan(&cnt)
+	if cnt != 0 {
+		t.Fatalf("originating finding node should be deleted, still %d", cnt)
+	}
+
+	// deleting a non-existent finding is a no-op (0 rows), not an error
+	if n, err := d.DeleteFinding(fid); err != nil || n != 0 {
+		t.Fatalf("re-delete: want (0,nil), got (%d,%v)", n, err)
+	}
+}
+
 // TestFindingsPageAndStats exercises ListFindingsPage (filter/sort/paging) and
 // FindingStats against the live dev PG. It tags its rows with a unique vulnclass
 // so assertions are isolated from any pre-existing data, and cleans up after.

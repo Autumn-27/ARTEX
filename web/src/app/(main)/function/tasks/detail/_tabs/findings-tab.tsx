@@ -2,10 +2,22 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
+import { ArrowUpRightIcon, ChevronRightIcon, Trash2Icon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -31,9 +43,11 @@ const FINDING_STATUSES: FindingStatus[] = [
 function Row({
   f,
   onStatus,
+  onDelete,
 }: {
   f: Finding;
   onStatus: (f: Finding, next: FindingStatus) => void;
+  onDelete: (f: Finding) => void;
 }) {
   const [open, setOpen] = React.useState(false);
   return (
@@ -116,8 +130,30 @@ function Row({
       </div>
       {open && (
         <div className="bg-muted/30 px-4 pb-4 pl-11">
-          <div className="mb-1 text-xs font-medium text-muted-foreground">
-            证据 / PoC
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">证据 / PoC</span>
+            {f.finding_id && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-7 text-destructive">
+                    <Trash2Icon /> 删除
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>确认删除该漏洞？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      「{f.name || f.vulnclass || f.summary || `#${f.finding_id}`}」将被永久删除，
+                      同时从发现列表、任务发现 Tab 与探索图中移除，此操作不可撤销。
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>取消</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => onDelete(f)}>删除</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
           </div>
           <pre className="overflow-auto rounded-md border bg-background p-3 font-mono text-xs whitespace-pre-wrap">
             {f.evidence}
@@ -169,6 +205,17 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     [],
   );
 
+  const onDelete = React.useCallback(async (f: Finding) => {
+    if (!f.finding_id) return;
+    try {
+      await api.deleteFinding(f.finding_id);
+      setFindings((cur) => cur.filter((x) => x.id !== f.id));
+      toast.success("已删除漏洞");
+    } catch (e) {
+      toast.error("删除失败：" + (e as Error).message);
+    }
+  }, []);
+
   const items = findings
     .filter((f) => f.task_id === taskId)
     .sort((a, b) => {
@@ -180,7 +227,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     <Card className="overflow-hidden py-0">
       <CardContent className="px-0">
         {items.map((f) => (
-          <Row key={f.id} f={f} onStatus={onStatus} />
+          <Row key={f.id} f={f} onStatus={onStatus} onDelete={onDelete} />
         ))}
         {items.length === 0 && (
           <p className="px-4 py-8 text-center text-sm text-muted-foreground">
