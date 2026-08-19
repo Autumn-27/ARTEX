@@ -155,18 +155,21 @@ func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	if len(want) == 0 {
-		return
-	}
 	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastFinding), 10, 64)
 	events, err := sc.pg.NewFindingsSince(last)
 	if err != nil || len(events) == 0 {
 		return
 	}
+	// Advance the watermark whether or not any on_finding trigger is active: a
+	// finding fires only for triggers live at the moment it appears. Otherwise a
+	// trigger enabled later would replay the entire historical backlog at once.
 	maxID := last
 	for _, e := range events {
 		if e.NodeID > maxID {
 			maxID = e.NodeID
+		}
+		if len(want) == 0 {
+			continue
 		}
 		msgCtx := fmt.Sprintf("\n\n【本次由任务发现 finding 触发】\n任务: #%d %s（目标：%s）\n发现: [%s/%s] %s",
 			e.TaskID, e.TaskDesc, e.TaskGoal, e.VulnClass, e.Severity, e.Summary)
@@ -185,13 +188,12 @@ func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	if len(want) == 0 {
-		return
-	}
 	events, err := sc.pg.MetGoals()
 	if err != nil || len(events) == 0 {
 		return
 	}
+	// Mark goals as consumed whether or not a trigger is active, so enabling an
+	// on_goal_met trigger later doesn't replay every already-met goal.
 	fired := sc.firedGoalSet()
 	changed := false
 	for _, e := range events {
@@ -200,6 +202,9 @@ func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 		}
 		fired[e.NodeID] = true
 		changed = true
+		if len(want) == 0 {
+			continue
+		}
 		msgCtx := fmt.Sprintf("\n\n【本次由任务完成目标触发】\n任务: #%d %s（目标：%s）\n达成目标: %s",
 			e.TaskID, e.TaskDesc, e.TaskGoal, e.Summary)
 		for _, tr := range want {
@@ -220,18 +225,19 @@ func (sc *Scheduler) fireTaskTimeouts(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	if len(want) == 0 {
-		return
-	}
 	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastTimeout), 10, 64)
 	events, err := sc.pg.TimedOutTasksSince(last)
 	if err != nil || len(events) == 0 {
 		return
 	}
+	// Advance the watermark even with no active trigger — see fireFindings.
 	maxID := last
 	for _, e := range events {
 		if e.NodeID > maxID {
 			maxID = e.NodeID
+		}
+		if len(want) == 0 {
+			continue
 		}
 		msgCtx := fmt.Sprintf("\n\n【本次由任务超时触发】\n任务: #%d %s（目标：%s）",
 			e.TaskID, e.TaskDesc, e.TaskGoal)
@@ -251,18 +257,19 @@ func (sc *Scheduler) fireTaskCreates(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	if len(want) == 0 {
-		return
-	}
 	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastTaskCreate), 10, 64)
 	events, err := sc.pg.NewTasksSince(last)
 	if err != nil || len(events) == 0 {
 		return
 	}
+	// Advance the watermark even with no active trigger — see fireFindings.
 	maxID := last
 	for _, e := range events {
 		if e.NodeID > maxID {
 			maxID = e.NodeID
+		}
+		if len(want) == 0 {
+			continue
 		}
 		msgCtx := fmt.Sprintf("\n\n【本次由任务创建触发】\n任务ID: #%d\n任务描述: %s\n任务目标: %s",
 			e.TaskID, e.TaskDesc, e.TaskGoal)
@@ -283,18 +290,19 @@ func (sc *Scheduler) fireToolCalls(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	if len(want) == 0 {
-		return
-	}
 	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastToolCall), 10, 64)
 	events, err := sc.pg.NewToolCallsSince(last)
 	if err != nil || len(events) == 0 {
 		return
 	}
+	// Advance the watermark even with no active trigger — see fireFindings.
 	maxID := last
 	for _, e := range events {
 		if e.NodeID > maxID {
 			maxID = e.NodeID
+		}
+		if len(want) == 0 {
+			continue
 		}
 		errTag := ""
 		if e.ToolIsErr {
