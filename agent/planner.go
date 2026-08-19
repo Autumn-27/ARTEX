@@ -334,7 +334,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	runCtx := ctx
 	if maxDur > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, maxDur+settleHardGrace)
+		runCtx, cancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
 		defer cancel()
 	}
 	_, _, err = captureRun(runCtx, opts, input,

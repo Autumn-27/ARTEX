@@ -62,7 +62,7 @@ export function MainContent({ children }: { children: ReactNode }) {
           </div>
           <div className="flex items-center gap-2">
             {version && (
-              <span className="text-muted-foreground text-xs font-medium tabular-nums">版本·v{version}</span>
+              <span className="text-muted-foreground text-xs font-medium tabular-nums">版本 · {version}</span>
             )}
             <LayoutControls />
             <ThemeSwitcher />

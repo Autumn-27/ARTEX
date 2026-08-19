@@ -183,7 +183,12 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                 />
-                <Popover open={modelsOpen} onOpenChange={setModelsOpen}>
+                {/* modal: this Popover lives inside a Dialog, and its content is
+                    portaled to <body> — outside the Dialog's react-remove-scroll
+                    lock, which then cancels every wheel event over it (the list
+                    rendered but refused to scroll). modal makes the Popover own
+                    the topmost scroll lock, so its own list scrolls again. */}
+                <Popover open={modelsOpen} onOpenChange={setModelsOpen} modal>
                   <PopoverTrigger asChild>
                     <Button
                       type="button"
@@ -198,12 +203,12 @@ function NewProfileDialog({ onCreated }: { onCreated: (id: string) => void }) {
                     </Button>
                   </PopoverTrigger>
                   {models.length > 0 && (
-                    <PopoverContent className="w-72 max-h-64 overflow-y-auto p-1" align="end">
+                    <PopoverContent className="max-h-72 w-72 gap-0 overflow-y-auto overscroll-contain p-1" align="end">
                       {models.map((m) => (
                         <button
                           key={m}
                           type="button"
-                          className="w-full rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
+                          className="w-full shrink-0 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
                           onClick={() => {
                             setModel(m);
                             setModelsOpen(false);
@@ -567,12 +572,12 @@ export default function LLMPage() {
                         </Button>
                       </PopoverTrigger>
                       {models.length > 0 && (
-                        <PopoverContent className="w-72 max-h-64 overflow-y-auto p-1" align="end">
+                        <PopoverContent className="max-h-72 w-72 gap-0 overflow-y-auto overscroll-contain p-1" align="end">
                           {models.map((m) => (
                             <button
                               key={m}
                               type="button"
-                              className="w-full rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
+                              className="w-full shrink-0 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
                               onClick={() => {
                                 setModel(m);
                                 setModelsOpen(false);

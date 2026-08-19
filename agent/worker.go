@@ -361,7 +361,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	runCtx := ctx
 	if maxDur > 0 {
 		var runCancel context.CancelFunc
-		runCtx, runCancel = context.WithTimeout(ctx, maxDur+settleHardGrace)
+		runCtx, runCancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
 		defer runCancel()
 	}
 	_, reason, err := captureRunSession(runCtx, s, input, emitWrap)

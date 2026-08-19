@@ -60,7 +60,7 @@ type Server struct {
 	// convBusyKey), so a manual stop can abort JUST that session's agent run. Set/
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
-	chatCancel map[string]context.CancelFunc
+	chatCancel map[string]context.CancelCauseFunc
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
@@ -123,7 +123,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
-		chatCancel: map[string]context.CancelFunc{}, triggerQ: map[string][]triggeredRun{},
+		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile: map[int64]*provEntry{}}
@@ -217,7 +217,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
 		}
 		if t.Paused {
-			s.engine.Pause(t.ID)
+			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
@@ -902,7 +902,7 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Action {
 	case "pause":
-		s.engine.Pause(t.ID)
+		s.engine.Pause(t.ID, agent.AbortPausedByUser)
 	case "resume":
 		s.engine.Run(s.ctx, t) // ensure loops are alive, then un-pause + nudge
 		s.engine.Resume(t)
@@ -2330,7 +2330,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		// Cancellable context so stopChat can abort this turn without affecting
 		// the server's root context (mirrors the conversation stop pattern).
-		ctx, cancel := context.WithCancel(s.ctx)
+		ctx, cancel := context.WithCancelCause(s.ctx)
 		s.chatBusy[t.ID] = true
 		s.chatCancel[t.ID] = cancel
 		s.chatMu.Unlock()
@@ -2342,7 +2342,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// handler returns immediately and the browser never needs to hold the request.
 		go func() {
 			defer func() {
-				cancel()
+				cancel(agent.AbortChatTurnFinished)
 				s.chatMu.Lock()
 				delete(s.chatBusy, t.ID)
 				delete(s.chatCancel, t.ID)
@@ -2386,7 +2386,7 @@ func (s *Server) stopChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "idle"})
 		return
 	}
-	cancel()
+	cancel(agent.AbortChatStoppedByUser)
 	writeJSON(w, 200, map[string]any{"status": "stopping"})
 }
 

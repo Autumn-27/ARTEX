@@ -304,7 +304,7 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 			if _, ok := s.m.Task(a.TaskID); !ok {
 				return actool.Errorf("task 不存在: " + a.TaskID), nil
 			}
-			s.engine.Pause(a.TaskID)
+			s.engine.Pause(a.TaskID, agent.AbortPausedByOrchestrator)
 			return actool.Text("task paused: " + a.TaskID), nil
 		})
 }

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/server"
 )
@@ -70,8 +71,16 @@ func main() {
 		log.Printf("[config] 配置文件: %s (不存在 — 将仅尝试环境变量 ARTEX_PG_DSN)", cfgPath)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// re-wrap with a named cause so a run cancelled by shutdown says "后端进程正在
+	// 关停" in its trace instead of a bare context.Canceled (see agent/cancelcause.go).
+	ctx, shutdown := context.WithCancelCause(sigCtx)
+	defer shutdown(agent.AbortShutdown)
+	go func() {
+		<-sigCtx.Done()
+		shutdown(agent.AbortShutdown)
+	}()
 
 	mgr, err := server.NewManager(*dataDir, *proxy)
 	if err != nil {

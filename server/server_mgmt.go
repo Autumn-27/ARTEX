@@ -68,7 +68,7 @@ func decode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decod
 
 func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.engine.Pause(id) // cancel running loops before removing
+	s.engine.Pause(id, agent.AbortTaskDeleted) // cancel running loops before removing
 	if err := s.m.DeleteTask(id); err != nil {
 		writeErr(w, 500, err.Error())
 		return

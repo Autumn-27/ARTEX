@@ -159,7 +159,7 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	for e.inflightCount(t.ID) > 0 {
 		if time.Now().After(hardStop) {
 			log.Printf("[deadline] task %s drain 超时(%s),硬取消在跑 run", t.ID, settleDrainGrace)
-			e.cancelExec(t.ID)
+			e.cancelExec(t.ID, agent.AbortSettleDrainTimeout)
 			_ = sleepCtx(ctx, 3*time.Second) // 给 worker 分支一点时间落库/归类
 			break
 		}

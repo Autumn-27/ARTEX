@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 )
@@ -243,7 +244,7 @@ func (s *Server) pgStopConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "idle"}) // nothing running
 		return
 	}
-	cancel()
+	cancel(agent.AbortChatStoppedByUser)
 	writeJSON(w, 200, map[string]any{"status": "stopping"})
 }
 
@@ -331,12 +332,12 @@ func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
 func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancel(intercept.WithConvID(s.ctx, c.ID))
+	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, c.ID))
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
 	s.chatMu.Unlock()
 	defer func() {
-		cancel()
+		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
