@@ -416,10 +416,20 @@ const TaskRow = React.memo(function TaskRow({
             <AlertDialogContent>
               <AlertDialogHeader>
                 <AlertDialogTitle>确认删除任务 #{task.id}？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  {task.description
-                    ? `「${task.description.length > 80 ? task.description.slice(0, 80) + "…" : task.description}」`
-                    : "该任务"}
+                <AlertDialogDescription className="break-words">
+                  {task.description ? (
+                    <>
+                      「
+                      <span className="break-all">
+                        {task.description.length > 80
+                          ? task.description.slice(0, 80) + "…"
+                          : task.description}
+                      </span>
+                      」
+                    </>
+                  ) : (
+                    "该任务"
+                  )}
                   的执行记录、会话与产物将被删除，此操作不可撤销（全局资产图保留）。
                 </AlertDialogDescription>
               </AlertDialogHeader>

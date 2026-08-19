@@ -142,8 +142,8 @@ function Row({
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>确认删除该漏洞？</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      「{f.name || f.vulnclass || f.summary || `#${f.finding_id}`}」将被永久删除，
+                    <AlertDialogDescription className="break-words">
+                      「<span className="break-all">{f.name || f.vulnclass || f.summary || `#${f.finding_id}`}</span>」将被永久删除，
                       同时从发现列表、任务发现 Tab 与探索图中移除，此操作不可撤销。
                     </AlertDialogDescription>
                   </AlertDialogHeader>

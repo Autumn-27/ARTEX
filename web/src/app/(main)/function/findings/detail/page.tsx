@@ -193,8 +193,8 @@ function FindingDetailInner() {
             <AlertDialogContent>
               <AlertDialogHeader>
                 <AlertDialogTitle>确认删除该漏洞？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  「{title}」将被永久删除，同时从发现列表、任务发现 Tab 与探索图中移除，此操作不可撤销。
+                <AlertDialogDescription className="break-words">
+                  「<span className="break-all">{title}</span>」将被永久删除，同时从发现列表、任务发现 Tab 与探索图中移除，此操作不可撤销。
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
