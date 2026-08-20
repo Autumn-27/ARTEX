@@ -29,6 +29,10 @@ export const tasks: Task[] = [
     paused: false, active: true, in_flight: 3, stalled: false,
     goals_total: 5, goals_met: 2, engine_mode: "exploring",
     llm_profile_id: 1,
+    llm_profile_ids: [1, 2],
+    active_llm_profile_id: 1,
+    llm_failover_state: "ready",
+    source_task_ids: [],
     tokens: { input_tokens: 1284500, output_tokens: 96320, cache_read_tokens: 890400, cache_write_tokens: 132000 },
   },
   {
@@ -43,6 +47,10 @@ export const tasks: Task[] = [
     paused: false, active: false, in_flight: 2, stalled: false,
     goals_total: 4, goals_met: 1, engine_mode: "exploring",
     llm_profile_id: 1,
+    llm_profile_ids: [1, 2],
+    active_llm_profile_id: 1,
+    llm_failover_state: "ready",
+    source_task_ids: ["t-acme-web"],
     tokens: { input_tokens: 642300, output_tokens: 51200, cache_read_tokens: 401000, cache_write_tokens: 60000 },
   },
   {
@@ -57,6 +65,10 @@ export const tasks: Task[] = [
     paused: true, active: false, in_flight: 0, stalled: false,
     goals_total: 4, goals_met: 1, engine_mode: "paused",
     llm_profile_id: 2,
+    llm_profile_ids: [2, 1],
+    active_llm_profile_id: 2,
+    llm_failover_state: "ready",
+    source_task_ids: ["t-acme-web", "t-acme-api"],
     tokens: { input_tokens: 233000, output_tokens: 18700, cache_read_tokens: 120000, cache_write_tokens: 22000 },
   },
   {
@@ -73,6 +85,10 @@ export const tasks: Task[] = [
     paused: false, active: false, in_flight: 0, stalled: false,
     goals_total: 3, goals_met: 3, engine_mode: "idle",
     llm_profile_id: 1,
+    llm_profile_ids: [1],
+    active_llm_profile_id: 1,
+    llm_failover_state: "ready",
+    source_task_ids: [],
     tokens: { input_tokens: 512000, output_tokens: 40100, cache_read_tokens: 300000, cache_write_tokens: 41000 },
   },
 ];
@@ -90,20 +106,26 @@ const grandTotal: TokenTotal = tasks.reduce(
 );
 
 // ── Stats ──────────────────────────────────────────────────────────────────
-export function stats(taskId?: string): Stats & { active_task?: unknown } {
+export function stats(
+  taskId?: string,
+  state: { tasks?: readonly Task[]; findings?: readonly Finding[]; activeTask?: string } = {},
+): Stats & { active_task?: unknown } {
+  const taskList = state.tasks ?? tasks;
+  const findingList = state.findings ?? findings;
   const base: Stats = {
     assets: assets.length,
     engine_mode: "exploring",
     llm_configured: true,
     roe_enabled: true,
-    findings_confirmed: findings.filter((f) => f.severity !== "low").length,
+    findings_confirmed: findingList.filter((f) => f.severity !== "low").length,
   };
-  const t = taskId ? getTask(taskId) : getTask(ACTIVE_TASK);
+  const selectedTaskID = taskId ?? state.activeTask ?? ACTIVE_TASK;
+  const t = taskList.find((item) => item.id === selectedTaskID);
   if (!t) return base;
   return {
     ...base,
     engine_mode: t.engine_mode ?? "idle",
-    findings_confirmed: findings.filter((f) => f.task_id === t.id).length,
+    findings_confirmed: findingList.filter((f) => f.task_id === t.id).length,
     active_task: {
       id: t.id, in_flight: t.in_flight, goals_total: t.goals_total,
       goals_met: t.goals_met, engine_mode: t.engine_mode, paused: t.paused,
@@ -892,8 +914,8 @@ const llmTaskCounts: Record<string, number> = {};
 for (const r of llmRecords) if (r.task_id) llmTaskCounts[r.task_id] = (llmTaskCounts[r.task_id] ?? 0) + 1;
 export const llmTasks: LLMTask[] = Object.entries(llmTaskCounts).map(([task_id, count]) => ({ task_id, count }));
 
-export function llmRecordDetail(id: number) {
-  const item = llmRecords.find((r) => r.id === id) ?? llmRecords[0];
+export function llmRecordDetail(id: number, records = llmRecords) {
+  const item = records.find((r) => r.id === id) ?? records[0];
   return {
     ...item,
     request_body: JSON.stringify(

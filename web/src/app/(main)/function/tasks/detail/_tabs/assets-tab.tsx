@@ -152,7 +152,6 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
 ];
 
 export function AssetsTab({ taskId }: { taskId: string }) {
-  // 服务端分页:只取当前分类的当前页,分类总数走 /assets/counts?task_id=,不做数量截断
   const [rows, setRows]       = React.useState<Asset[]>([]);
   const [total, setTotal]     = React.useState(0);
   const [counts, setCounts]   = React.useState<Record<string, number>>({});
@@ -161,7 +160,6 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const [page, setPage]       = React.useState(0);
   const [size, setSize]       = React.useState(50);
 
-  // 换分类/换页大小:回到第一页,并清掉旧行(各分类列不同,不能串用)
   React.useEffect(() => {
     setPage(0);
     setRows([]);
@@ -171,17 +169,16 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     let alive = true;
     const load = async () => {
       try {
-        const [cur, c] = await Promise.all([
+        const [cur, nextCounts] = await Promise.all([
           api.taskAssets(taskId, tab, size, page * size),
           api.assetCounts(taskId),
         ]);
         if (!alive) return;
         setRows(cur.assets);
         setTotal(cur.total);
-        setCounts(c ?? {});
+        setCounts(nextCounts ?? {});
+        setLoaded(true);
       } catch {
-        // 保留上一次的数据
-      } finally {
         if (alive) setLoaded(true);
       }
     };
@@ -190,7 +187,6 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     return () => { alive = false; clearInterval(timer); };
   }, [taskId, tab, page, size]);
 
-  // 轮询期间资产变少时,别停在越界的空页上
   React.useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(total / size) - 1);
     if (page > maxPage) setPage(maxPage);

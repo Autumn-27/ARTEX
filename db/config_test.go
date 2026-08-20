@@ -1,7 +1,9 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -53,6 +55,15 @@ func TestPoolProfilesOrder(t *testing.T) {
 	}
 }
 
+func TestDeleteProfileContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var d DB
+	if err := d.DeleteProfileContext(ctx, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteProfileContext error=%v, want context cancellation", err)
+	}
+}
+
 func TestConfigStores(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
@@ -68,6 +79,9 @@ func TestConfigStores(t *testing.T) {
 	defer d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, pid)
 	if err := d.SetActiveProfile(pid); err != nil {
 		t.Fatal(err)
+	}
+	if err := d.DeleteProfile(pid); !errors.Is(err, ErrActiveLLMProfileDelete) {
+		t.Fatalf("deleting active profile error=%v, want %v", err, ErrActiveLLMProfileDelete)
 	}
 	act, err := d.ActiveProfile()
 	if err != nil || act == nil || act.APIKey != "secret123" {

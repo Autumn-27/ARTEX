@@ -45,9 +45,11 @@ type chatAttachment struct {
 //	                文件先落这里,前端按返回的 abs 绝对路径写进任务描述)
 func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 	var sub string
+	taskScoped := false
 	switch r.URL.Query().Get("scope") {
 	case "task":
 		sub = "tasks"
+		taskScoped = true
 	case "session":
 		sub = "sessions"
 	case "staging":
@@ -60,6 +62,17 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 	if !safeChatID.MatchString(id) {
 		writeErr(w, 400, "非法 id")
 		return
+	}
+	if taskScoped {
+		if s.m.ResolveTask(id) == nil {
+			writeErr(w, 404, "task not found")
+			return
+		}
+		if !s.engine.beginTaskOperation(id) {
+			writeErr(w, http.StatusConflict, "任务正在删除，无法上传附件")
+			return
+		}
+		defer s.engine.decInflight(id)
 	}
 	dir := filepath.Join(s.m.dir, sub, id, "uploads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

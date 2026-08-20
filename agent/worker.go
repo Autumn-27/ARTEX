@@ -49,6 +49,7 @@ type Worker struct {
 	mem         *memory.Store     // cross-engagement tradecraft memory (G4)
 	tx          *transcript.Store // raw LLM conversation persistence (nil = off)
 	window      int               // context window in tokens (for compaction)
+	windowFn    func() int        // optional dynamic task-chain minimum
 	maxTurns    int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
@@ -82,6 +83,15 @@ func (w *Worker) SetMemory(m *memory.Store) { w.mem = m }
 
 func NewWorker(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int, extra ...actool.CoreTool) *Worker {
 	return &Worker{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, extraTools: extra}
+}
+
+func (w *Worker) SetCompactionWindowResolver(fn func() int) { w.windowFn = fn }
+
+func (w *Worker) compactionWindow() int {
+	if w.windowFn != nil {
+		return w.windowFn()
+	}
+	return w.window
 }
 
 // SetProxy configures the recording proxy address that workers route target
@@ -306,8 +316,8 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
 		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
 		ToolOutputDir: cmdOutDir(runDir),
-		Compaction:    compactionConfig(w.window), // long tool-heavy runs stay within the window
-		Todos:         actool.NewTodoStore(),      // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
+		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks

@@ -129,19 +129,40 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     state          TEXT NOT NULL DEFAULT 'open',
     origin         TEXT,
     owner          TEXT,
+    blocked_reason TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
     CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
-        (kind='intent'  AND state IN ('open','running','done','blocked','exhausted','stopped')) OR
+        (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed'))
     )
 );
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exploration_nodes'::regclass
+          AND conname='ck_node_state'
+          AND pg_get_constraintdef(oid) NOT LIKE '%paused%'
+    ) THEN
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
+            (kind='begin'   AND state IN ('open')) OR
+            (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
+            (kind='goal'    AND state IN ('open','met','abandoned')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='finding' AND state IN ('confirmed','dismissed')) OR
+            (kind='hint'    AND state IN ('active','consumed'))
+        );
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_expnodes_part     ON exploration_nodes(exploration_id, kind);
 CREATE INDEX IF NOT EXISTS idx_expnodes_frontier ON exploration_nodes(exploration_id, priority DESC)
     WHERE kind='intent' AND state='open';
@@ -179,12 +200,14 @@ CREATE TABLE IF NOT EXISTS activity (
     is_error           BOOLEAN NOT NULL DEFAULT false,
     summary            TEXT,
     detail             TEXT,
+    metadata           JSONB NOT NULL DEFAULT '{}',
     input_tokens       INTEGER,
     output_tokens      INTEGER,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
@@ -256,6 +279,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     paused         BOOLEAN NOT NULL DEFAULT false,
     queued         BOOLEAN NOT NULL DEFAULT false,
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    llm_chain_revision BIGINT NOT NULL DEFAULT 0,
     company_id     BIGINT REFERENCES companies(id) ON DELETE SET NULL,
     parent_ref     TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
@@ -276,6 +301,57 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
 -- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+
+-- Direct, read-only task context inheritance. Relations are intentionally not
+-- recursive: a task sees only the source tasks explicitly chosen at creation.
+CREATE TABLE IF NOT EXISTS task_relations (
+    task_id        BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    source_task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, source_task_id),
+    CONSTRAINT ck_task_relation_not_self CHECK (task_id <> source_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_relations_source ON task_relations(source_task_id);
+
+-- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
+-- until the user saves/resets the chain, which clears all failure state.
+CREATE TABLE IF NOT EXISTS task_llm_profiles (
+    task_id          BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    profile_id       BIGINT NOT NULL REFERENCES llm_profiles(id) ON DELETE CASCADE,
+    position         INTEGER NOT NULL CHECK (position >= 0),
+    status           TEXT NOT NULL DEFAULT 'ready'
+                       CHECK (status IN ('ready','quota_exhausted')),
+    last_error       TEXT,
+    exhausted_at     TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, profile_id),
+    UNIQUE (task_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_order ON task_llm_profiles(task_id, position);
+CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_profile ON task_llm_profiles(profile_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_llm_profile ON tasks(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_active_llm_profile ON tasks(active_llm_profile_id) WHERE active_llm_profile_id IS NOT NULL;
+DROP TRIGGER IF EXISTS trg_task_llm_profiles_upd ON task_llm_profiles;
+CREATE TRIGGER trg_task_llm_profiles_upd BEFORE UPDATE ON task_llm_profiles
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- One-time-compatible backfill: old pinned tasks become one-entry chains. A user
+-- can still clear the chain later because the update path also clears the legacy
+-- llm_profile_id column, preventing this block from re-adding it on restart.
+INSERT INTO task_llm_profiles(task_id, profile_id, position)
+SELECT t.id, t.llm_profile_id, 0
+FROM tasks t
+WHERE t.llm_profile_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id)
+ON CONFLICT DO NOTHING;
+UPDATE tasks t
+SET active_llm_profile_id = t.llm_profile_id
+WHERE t.active_llm_profile_id IS NULL
+  AND t.llm_profile_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id AND x.profile_id=t.llm_profile_id);
 
 -- 任务测试范围（资产覆盖度的分母 + 授权边界）。
 --   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围
@@ -335,6 +411,7 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NUL
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
 -- per-agent LLM 绑定(agent 级默认模型):列自初版即在上方 CREATE 中,此 ALTER 仅为极旧库兜底(幂等)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_llm_profile ON agents(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -454,6 +531,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_conversations_llm_profile ON conversations(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_conversations_upd ON conversations;
 CREATE TRIGGER trg_conversations_upd BEFORE UPDATE ON conversations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

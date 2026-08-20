@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,38 +13,44 @@ import (
 	"sync"
 	"time"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/artex/agent"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // Task is one engagement: a description + goal + its own exploration store,
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ID           string `json:"id"`
-	ExpID        int64  `json:"exploration_id"`
-	Description  string `json:"description"`
-	Goal         string `json:"goal"`
-	CreatedAt    int64  `json:"created_at"`
-	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused       bool   `json:"paused"`
-	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
-	ParentRef    string `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
-	LLMProfileID *int64 `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
-	Status       string `json:"status"`                   // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
+	ID                 string  `json:"id"`
+	ExpID              int64   `json:"exploration_id"`
+	Description        string  `json:"description"`
+	Goal               string  `json:"goal"`
+	CreatedAt          int64   `json:"created_at"`
+	CompletedAt        int64   `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused             bool    `json:"paused"`
+	Queued             bool    `json:"queued"`                   // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	ParentRef          string  `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
+	LLMProfileID       *int64  `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
+	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
+	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
+	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
+	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
-	TimeoutSeconds       int   `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int   `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	FirstRunAt           int64 `json:"first_run_at,omitempty"`
-	DeadlineAt           int64 `json:"deadline_at,omitempty"`
-	Store          *pgdb.ExplorationStore `json:"-"`
-	Guard          *guard.Guard           `json:"-"`
-	notify         chan struct{}
+	TimeoutSeconds       int                    `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
+	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
+	Store                *pgdb.ExplorationStore `json:"-"`
+	Guard                *guard.Guard           `json:"-"`
+	notify               chan struct{}
+	llmMu                sync.RWMutex
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
@@ -52,14 +59,74 @@ type Task struct {
 	pendingTriggers []agent.TriggerEvent
 }
 
+type taskLLMState struct {
+	ProfileID      *int64
+	ProfileIDs     []int64
+	ActiveID       *int64
+	FailoverState  string
+	FailoverReason string
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func (t *Task) llmStateSnapshot() taskLLMState {
+	t.llmMu.RLock()
+	defer t.llmMu.RUnlock()
+	return taskLLMState{
+		ProfileID:      cloneInt64Ptr(t.LLMProfileID),
+		ProfileIDs:     append(make([]int64, 0, len(t.LLMProfileIDs)), t.LLMProfileIDs...),
+		ActiveID:       cloneInt64Ptr(t.ActiveLLMProfileID),
+		FailoverState:  t.LLMFailoverState,
+		FailoverReason: t.LLMFailoverReason,
+	}
+}
+
+func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, state, reason string) {
+	t.llmMu.Lock()
+	t.LLMProfileID = cloneInt64Ptr(profileID)
+	t.ActiveLLMProfileID = cloneInt64Ptr(activeID)
+	t.LLMProfileIDs = append(t.LLMProfileIDs[:0], profileIDs...)
+	t.LLMFailoverState = state
+	t.LLMFailoverReason = reason
+	t.llmMu.Unlock()
+}
+
+// DeleteTaskOptions controls cleanup of data stored outside the task's own
+// exploration graph. All options default to false for backward compatibility.
+type DeleteTaskOptions struct {
+	DeleteAssets     bool `json:"delete_assets"`
+	DeleteTraffic    bool `json:"delete_traffic"`
+	DeleteFiles      bool `json:"delete_files"`
+	DeleteFindings   bool `json:"delete_findings"`
+	DeleteLLMRecords bool `json:"delete_llm_records"`
+}
+
+// DeleteTaskResult makes destructive cleanup auditable to API callers.
+type DeleteTaskResult struct {
+	Deleted           string `json:"deleted"`
+	AssetsDeleted     int64  `json:"assets_deleted"`
+	AssetsDetached    int64  `json:"assets_detached"`
+	TrafficDeleted    int64  `json:"traffic_deleted"`
+	FilesDeleted      bool   `json:"files_deleted"`
+	FindingsDeleted   int64  `json:"findings_deleted"`
+	LLMRecordsDeleted int64  `json:"llm_records_deleted"`
+	CleanupWarning    string `json:"cleanup_warning,omitempty"`
+}
+
 // Manager owns the PostgreSQL data source (asset graph + every task's exploration
 // graph + config) and the in-memory set of task handles.
 type Manager struct {
 	dir         string
 	pg          *pgdb.DB
 	assets      *pgdb.AssetStore
-	traffic     *traffic.Traffic    // process-wide recording proxy (may be nil)
-	enrich      *enrich.Engine      // engine-side asset auto-completion (DNS/HTTP)
+	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
+	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
 	interceptor *intercept.Interceptor // user-configured tool-call interception rules
 
 	mu        sync.RWMutex
@@ -529,7 +596,10 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
-		LLMProfileID:   pt.LLMProfileID,
+		LLMProfileID:  pt.LLMProfileID,
+		LLMProfileIDs: append([]int64(nil), pt.LLMProfileIDs...), ActiveLLMProfileID: pt.ActiveLLMProfileID,
+		LLMFailoverState: pt.LLMFailoverState, LLMFailoverReason: pt.LLMFailoverReason,
+		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
@@ -539,7 +609,17 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 // CreateTask creates a task + its exploration and makes it active.
 // timeoutSeconds is the task-level wall-clock budget (0 = 不限时).
 func (m *Manager) CreateTask(description, goal string, llmProfileID *int64, timeoutSeconds, planHeartbeatSeconds int) (*Task, error) {
-	pt, err := m.pg.CreateTask(description, goal, llmProfileID, timeoutSeconds, planHeartbeatSeconds)
+	var ids []int64
+	if llmProfileID != nil {
+		ids = []int64{*llmProfileID}
+	}
+	return m.CreateTaskWithOptions(description, goal, pgdb.TaskCreateOptions{
+		LLMProfileIDs: ids, TimeoutSeconds: timeoutSeconds, PlanHeartbeatSeconds: planHeartbeatSeconds,
+	})
+}
+
+func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.TaskCreateOptions) (*Task, error) {
+	pt, err := m.pg.CreateTaskWithOptions(description, goal, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -549,6 +629,35 @@ func (m *Manager) CreateTask(description, goal string, llmProfileID *int64, time
 	m.active = t.ID
 	m.mu.Unlock()
 	return t, nil
+}
+
+// ReplaceTaskLLMProfiles resets a non-terminal task's ordered provider chain and
+// mirrors the committed state onto the live task handle.
+func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activeProfileID int64) (int64, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if err := m.pg.ReplaceTaskLLMProfiles(n, profileIDs, activeProfileID); err != nil {
+		return 0, err
+	}
+	pt, err := m.pg.GetTask(n)
+	if err != nil || pt == nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	if task := m.tasks[id]; task != nil {
+		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMFailoverState, pt.LLMFailoverReason)
+	}
+	m.mu.Unlock()
+	if task, ok := m.Task(id); ok {
+		reopened, reopenErr := task.Store.ReopenIntentsByBlockedReason(pgdb.IntentBlockedLLMQuota)
+		if reopenErr != nil {
+			return reopened, reopenErr
+		}
+		return reopened, nil
+	}
+	return 0, nil
 }
 
 // LoadExisting rebuilds in-memory task handles from the PG task registry.
@@ -706,17 +815,123 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	return nil
 }
 
-// DeleteTask removes a task (and its exploration subgraph) from PG + memory.
-func (m *Manager) DeleteTask(id string) error {
+// DeleteTask removes a task and optionally its related global data. Traffic has
+// no task-id column, so related exchanges are resolved by exact hosts from the
+// task's asset rows. Files are staged before the database operation; traffic is
+// staged while PostgreSQL excludes asset/anchor writers. Both are restored on a
+// database failure and purged only after its commit.
+func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResult, error) {
+	result := DeleteTaskResult{Deleted: id}
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
-		return err
+		return result, err
 	}
-	if err := m.pg.DeleteTask(n); err != nil {
-		return err
+	registered, err := m.pg.GetTask(n)
+	if err != nil {
+		return result, err
 	}
+	if registered == nil {
+		m.forgetTask(id, n)
+		return result, nil
+	}
+
+	var fileStage *taskFileDeleteStage
+	if opts.DeleteFiles {
+		fileStage, err = stageTaskFiles(m.dir, id, registered.ExplorationID)
+		if err != nil {
+			return result, err
+		}
+		result.FilesDeleted = fileStage.deleted
+	}
+
+	var trafficStage *traffic.HostDeleteStage
+	var prepare func(pgdb.TaskDeletePreparation) error
+	if opts.DeleteTraffic && m.traffic != nil {
+		prepare = func(p pgdb.TaskDeletePreparation) error {
+			if len(p.TrafficHosts) == 0 {
+				return nil
+			}
+			trafficStage, err = m.traffic.StageDeleteHostsExact(p.TrafficHosts)
+			if err != nil {
+				return err
+			}
+			result.TrafficDeleted = trafficStage.Deleted()
+			return nil
+		}
+	}
+
+	dbResult, err := m.pg.DeleteTaskCascadePrepared(
+		n, opts.DeleteAssets, opts.DeleteFindings, opts.DeleteLLMRecords, prepare,
+	)
+	if err != nil {
+		return result, rollbackTaskDelete(err, trafficStage, fileStage)
+	}
+	result.AssetsDeleted = dbResult.AssetsDeleted
+	result.AssetsDetached = dbResult.AssetsDetached
+	result.FindingsDeleted = dbResult.FindingsDeleted
+	result.LLMRecordsDeleted = dbResult.LLMRecordsDeleted
+
+	// PostgreSQL is now authoritative: finalize the staged external deletion and
+	// forget the live task even if a final purge reports an error. Such errors are
+	// typed so the HTTP layer can still tear down the task runtime instead of
+	// incorrectly reviving a task whose database row is already gone.
+	var finalizeErrs []error
+	if trafficStage != nil {
+		if err := trafficStage.Commit(); err != nil {
+			finalizeErrs = append(finalizeErrs, fmt.Errorf("finalize traffic deletion: %w", err))
+		}
+	}
+	if fileStage != nil {
+		if err := fileStage.commit(); err != nil {
+			finalizeErrs = append(finalizeErrs, fmt.Errorf("finalize task file deletion: %w", err))
+		}
+	}
+	m.forgetTask(id, n)
+	if err := errors.Join(finalizeErrs...); err != nil {
+		return result, &taskDeleteCommittedError{err: err}
+	}
+	return result, nil
+}
+
+// taskDeleteCommittedError means PostgreSQL deletion succeeded but purging one
+// of the recoverable staging directories failed. The task must stay deleted.
+type taskDeleteCommittedError struct{ err error }
+
+func (e *taskDeleteCommittedError) Error() string {
+	return "task deletion committed; external cleanup incomplete: " + e.err.Error()
+}
+
+func (e *taskDeleteCommittedError) Unwrap() error { return e.err }
+
+func rollbackTaskDelete(cause error, trafficStage *traffic.HostDeleteStage, fileStage *taskFileDeleteStage) error {
+	errs := []error{cause}
+	// Reverse the preparation order. Both restorations are attempted even if the
+	// first one fails, and errors.Join preserves the original PostgreSQL error.
+	if trafficStage != nil {
+		if err := trafficStage.Rollback(); err != nil {
+			errs = append(errs, fmt.Errorf("restore traffic after task delete failure: %w", err))
+		}
+	}
+	if fileStage != nil {
+		if err := fileStage.rollback(); err != nil {
+			errs = append(errs, fmt.Errorf("restore task files after task delete failure: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (m *Manager) forgetTask(id string, numericID int64) {
 	m.mu.Lock()
 	delete(m.tasks, id)
+	for _, task := range m.tasks {
+		kept := task.SourceTaskIDs[:0]
+		for _, sourceID := range task.SourceTaskIDs {
+			if sourceID != numericID {
+				kept = append(kept, sourceID)
+			}
+		}
+		task.SourceTaskIDs = kept
+	}
 	if m.active == id {
 		m.active = ""
 		for _, t := range m.tasks {
@@ -725,7 +940,128 @@ func (m *Manager) DeleteTask(id string) error {
 		}
 	}
 	m.mu.Unlock()
-	return nil
+}
+
+type stagedTaskPath struct {
+	source string
+	staged string
+}
+
+type taskFileDeleteStage struct {
+	stageDir string
+	moves    []stagedTaskPath
+	deleted  bool
+	done     bool
+}
+
+// stageTaskFiles atomically renames the task workspace and owned transcripts to
+// a same-filesystem staging directory. The trailing dash in the transcript
+// prefix is significant: exploration 12 must not match exploration 123.
+func stageTaskFiles(dataDir, taskID string, explorationID int64) (*taskFileDeleteStage, error) {
+	stage := &taskFileDeleteStage{}
+	var targets []string
+	taskDir := filepath.Join(dataDir, "tasks", taskID)
+	if _, err := os.Lstat(taskDir); err == nil {
+		targets = append(targets, taskDir)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	transcriptDir := filepath.Join(dataDir, "transcripts")
+	entries, err := os.ReadDir(transcriptDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		entries = nil
+	}
+	prefix := fmt.Sprintf("exp%d-", explorationID)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || (!entry.IsDir() && !strings.HasSuffix(name, ".jsonl")) {
+			continue
+		}
+		targets = append(targets, filepath.Join(transcriptDir, name))
+	}
+	if len(targets) == 0 {
+		stage.done = true
+		return stage, nil
+	}
+
+	parent := filepath.Join(dataDir, ".delete-staging")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nil, err
+	}
+	stage.stageDir, err = os.MkdirTemp(parent, "task-"+taskID+"-")
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range targets {
+		staged := filepath.Join(stage.stageDir, fmt.Sprintf("%d-%s", len(stage.moves), filepath.Base(source)))
+		if err := os.Rename(source, staged); err != nil {
+			cause := fmt.Errorf("stage task file %s: %w", source, err)
+			if restoreErr := stage.rollback(); restoreErr != nil {
+				return nil, errors.Join(cause, fmt.Errorf("restore partially staged task files: %w", restoreErr))
+			}
+			return nil, cause
+		}
+		stage.moves = append(stage.moves, stagedTaskPath{source: source, staged: staged})
+	}
+	stage.deleted = true
+	return stage, nil
+}
+
+func (s *taskFileDeleteStage) commit() error {
+	if s == nil || s.done {
+		return nil
+	}
+	err := os.RemoveAll(s.stageDir)
+	s.done = true
+	return err
+}
+
+func (s *taskFileDeleteStage) rollback() error {
+	if s == nil || s.done {
+		return nil
+	}
+	var errs []error
+	for i := len(s.moves) - 1; i >= 0; i-- {
+		move := s.moves[i]
+		if _, err := os.Lstat(move.source); err == nil {
+			errs = append(errs, fmt.Errorf("restore destination already exists: %s", move.source))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect restore destination %s: %w", move.source, err))
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(move.source), 0o755); err != nil {
+			errs = append(errs, fmt.Errorf("create restore parent for %s: %w", move.source, err))
+			continue
+		}
+		if err := os.Rename(move.staged, move.source); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", move.source, err))
+		}
+	}
+	if len(errs) == 0 && s.stageDir != "" {
+		if err := os.RemoveAll(s.stageDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove task file stage: %w", err))
+		}
+	}
+	s.done = true
+	return errors.Join(errs...)
+}
+
+// deleteTaskFiles retains the standalone helper contract used by focused tests.
+func deleteTaskFiles(dataDir, taskID string, explorationID int64) (bool, error) {
+	stage, err := stageTaskFiles(dataDir, taskID, explorationID)
+	if err != nil {
+		return false, err
+	}
+	deleted := stage.deleted
+	if err := stage.commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
 }
 
 func (m *Manager) Task(id string) (*Task, bool) {

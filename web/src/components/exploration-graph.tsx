@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -235,7 +236,7 @@ function ExploreNode({ data, selected }: NodeProps<ExploreRFNode>) {
   const Icon = meta.icon;
   const showState = n.type === "goal" || n.type === "intent";
   const showPriority = (n.type === "goal" || n.type === "intent") && n.priority > 0;
-  const isLive = n.type === "intent" && n.state === "running";
+  const isLive = !n.inherited && n.type === "intent" && n.state === "running";
 
   return (
     <div
@@ -273,7 +274,11 @@ function ExploreNode({ data, selected }: NodeProps<ExploreRFNode>) {
           {nodeSummary(n) || meta.label}
         </div>
         <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
-          {showState ? (
+          {n.inherited && n.source_task_id ? (
+            <Badge variant="outline" className="max-w-32 truncate" title={`继承自任务 #${n.source_task_id}，只读`}>
+              来源 #{n.source_task_id}
+            </Badge>
+          ) : showState ? (
             <StatusBadge domain={n.type === "goal" ? "goal" : "intent"} value={n.state} dot className="px-1.5 py-0 text-[10px]" />
           ) : (
             <span className="text-[10px] text-neutral-400 dark:text-neutral-500">{meta.label}</span>
@@ -334,6 +339,11 @@ function NodeDetailSheet({
                   <SheetTitle className="leading-tight">{meta.label}</SheetTitle>
                   <span className="text-muted-foreground font-mono text-xs">{node.id}</span>
                 </div>
+                {node.inherited && node.source_task_id && (
+                  <Badge variant="outline" className="ml-auto shrink-0">
+                    来源任务 #{node.source_task_id} · 只读
+                  </Badge>
+                )}
               </div>
             </SheetHeader>
 
@@ -355,6 +365,11 @@ function NodeDetailSheet({
                   <DetailRow label="来源">
                     <span className="font-mono text-xs">{node.origin}</span>
                   </DetailRow>
+                  {node.inherited && node.source_task_id && (
+                    <DetailRow label="来源任务">
+                      <span className="font-mono text-xs">#{node.source_task_id}（继承，只读）</span>
+                    </DetailRow>
+                  )}
                   <DetailRow label="时间">{new Date(node.ts).toLocaleString("zh-CN")}</DetailRow>
                 </section>
 
@@ -398,7 +413,7 @@ function ExplorationGraphInner({
   React.useEffect(() => {
     setSelected((cur) => (cur ? (nodes.find((n) => n.id === cur.id) ?? cur) : cur));
     const liveTargets = new Set(
-      nodes.filter((n) => n.type === "intent" && n.state === "running").map((n) => n.id),
+      nodes.filter((n) => !n.inherited && n.type === "intent" && n.state === "running").map((n) => n.id),
     );
     const layout = computeLayout(nodes, edges);
     setRfNodes((prev) => {

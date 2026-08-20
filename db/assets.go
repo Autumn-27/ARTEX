@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -913,7 +914,7 @@ func (s *AssetStore) CountByType(typ string) (int, error) {
 }
 
 // QueryByCompany returns assets for a company, optionally filtered by type.
-// limit <= 0 means no limit — pair it with CountByCompany for server-side paging.
+// limit <= 0 means no limit.
 func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
@@ -940,8 +941,6 @@ FROM assets WHERE company_id = $1`
 	return scanAssets(rows)
 }
 
-// CountByCompany returns the full number of assets attributed to a company
-// (optionally filtered by type), ignoring limit/offset.
 func (s *AssetStore) CountByCompany(companyID int64, typ string) (int, error) {
 	q := `SELECT count(*) FROM assets WHERE company_id = $1`
 	args := []any{companyID}
@@ -954,8 +953,6 @@ func (s *AssetStore) CountByCompany(companyID int64, typ string) (int, error) {
 	return n, err
 }
 
-// pageClause appends limit/offset placeholders to args and returns the trailing
-// ORDER BY … LIMIT … OFFSET fragment. limit <= 0 means no limit.
 func pageClause(args *[]any, limit, offset int) string {
 	q := ` ORDER BY last_seen DESC`
 	if limit > 0 {
@@ -970,7 +967,6 @@ func pageClause(args *[]any, limit, offset int) string {
 }
 
 // QueryByTask returns assets rows that have a given task_id in task_ids.
-// limit <= 0 means no limit — pair it with CountByTask for server-side paging.
 func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
@@ -997,8 +993,6 @@ FROM assets WHERE $1 = ANY(task_ids)`
 	return scanAssets(rows)
 }
 
-// CountByTask returns the full number of assets attached to a task (optionally
-// filtered by type), ignoring limit/offset — lets the UI paginate on the server.
 func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
 	q := `SELECT count(*) FROM assets WHERE $1 = ANY(task_ids)`
 	args := []any{taskID}
@@ -1011,7 +1005,6 @@ func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
 	return n, err
 }
 
-// CountsByTypeForTask returns asset counts per type for a single task.
 func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE $1 = ANY(task_ids) GROUP BY type`, taskID)
 	if err != nil {
@@ -1019,6 +1012,151 @@ func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
 	}
 	defer rows.Close()
 	return scanTypeCounts(rows)
+}
+
+// DeleteByTaskID removes assets owned only by taskID and detaches taskID from
+// assets shared with other tasks. Full task deletion uses the coordinated
+// transaction in DeleteTaskCascadePrepared; this method remains for callers
+// that explicitly manage only asset associations.
+func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	deleted, _ := res.RowsAffected()
+	if _, err := s.db.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, taskID); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+// HostsByTask returns the exact HTTP host candidates attached to a task's
+// assets. Domain/IP columns cover root domains, subdomains and non-HTTP
+// services; URL covers HTTP services and endpoints.
+func (s *AssetStore) HostsByTask(taskID int64) ([]string, error) {
+	rows, err := s.db.Query(`
+SELECT COALESCE(domain,''), COALESCE(ip,''), COALESCE(url,'')
+FROM assets WHERE $1 = ANY(task_ids)`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	hosts := make(map[string]struct{})
+	add := func(host string) {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host != "" {
+			hosts[host] = struct{}{}
+		}
+	}
+	for rows.Next() {
+		var domain, ip, rawURL string
+		if err := rows.Scan(&domain, &ip, &rawURL); err != nil {
+			return nil, err
+		}
+		add(domain)
+		add(ip)
+		if u, err := url.Parse(rawURL); err == nil {
+			add(u.Hostname())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(hosts))
+	for host := range hosts {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// HostsForTaskDeletion returns hosts that belong to the task being deleted and
+// are not referenced by any other live task. Current-task candidates include
+// both task_ids ownership and exploration anchors so legacy seeded assets (which
+// were anchor-only) are covered. Protection is host-wide: if another live task
+// references any asset for a candidate host, that host's global traffic remains.
+func (s *AssetStore) HostsForTaskDeletion(taskID, explorationID int64) ([]string, error) {
+	return hostsForTaskDeletion(s.db, taskID, explorationID)
+}
+
+type rowsQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// hostsForTaskDeletion is shared by the read-only AssetStore API and the task
+// deletion transaction. Coordinated traffic deletion must call it through the
+// transaction path so asset/anchor writes stay locked until the task delete is
+// committed.
+func hostsForTaskDeletion(q rowsQuerier, taskID, explorationID int64) ([]string, error) {
+	rows, err := q.Query(`
+WITH current_assets AS (
+  SELECT id FROM assets WHERE $1 = ANY(task_ids)
+  UNION
+  SELECT ea.asset_id
+  FROM exploration_anchors ea
+  JOIN exploration_nodes n ON n.id=ea.node_id
+  WHERE n.exploration_id=$2
+),
+other_assets AS (
+  SELECT DISTINCT a.id
+  FROM assets a
+  WHERE EXISTS (
+    SELECT 1 FROM tasks t
+    WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
+  ) OR EXISTS (
+    SELECT 1
+    FROM exploration_anchors ea
+    JOIN exploration_nodes n ON n.id=ea.node_id
+    JOIN tasks t ON t.exploration_id=n.exploration_id
+    WHERE ea.asset_id=a.id AND t.id<>$1 AND t.deleted_at IS NULL
+  )
+)
+SELECT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,''), true
+FROM assets a JOIN current_assets c ON c.id=a.id
+UNION ALL
+SELECT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,''), false
+FROM assets a JOIN other_assets o ON o.id=a.id`, taskID, explorationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	candidates := make(map[string]struct{})
+	protected := make(map[string]struct{})
+	add := func(dst map[string]struct{}, raw string) {
+		raw = strings.TrimSpace(strings.ToLower(raw))
+		if raw != "" {
+			dst[raw] = struct{}{}
+		}
+	}
+	for rows.Next() {
+		var domain, ip, rawURL string
+		var candidate bool
+		if err := rows.Scan(&domain, &ip, &rawURL, &candidate); err != nil {
+			return nil, err
+		}
+		dst := protected
+		if candidate {
+			dst = candidates
+		}
+		add(dst, domain)
+		add(dst, ip)
+		if u, err := url.Parse(rawURL); err == nil {
+			add(dst, u.Hostname())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(candidates))
+	for host := range candidates {
+		if _, shared := protected[host]; !shared {
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 const assetSelectCols = `SELECT id, type, company_id, array_to_json(task_ids)::text,
@@ -1051,45 +1189,6 @@ func (s *AssetStore) GetByIDs(ids []int64) ([]*Asset, error) {
 	}
 	defer rows.Close()
 	return scanAssets(rows)
-}
-
-// DeleteByTaskID removes a task's assets: hard-deletes assets owned solely by this
-// task (task_ids = {taskID}) and de-associates the rest (drops this task from their
-// task_ids, keeping assets shared with other tasks intact). Returns rows deleted.
-func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]`, taskID)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	if _, err := s.db.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, taskID); err != nil {
-		return n, err
-	}
-	return n, nil
-}
-
-// HostsByTask returns the distinct hostnames/IPs the task's assets carry (domain,
-// root_domain, ip) — used to purge host-keyed traffic recorded for that task.
-func (s *AssetStore) HostsByTask(taskID int64) ([]string, error) {
-	rows, err := s.db.Query(`
-SELECT DISTINCT h FROM (
-    SELECT NULLIF(domain,'')      AS h FROM assets WHERE $1 = ANY(task_ids)
-    UNION SELECT NULLIF(root_domain,'') FROM assets WHERE $1 = ANY(task_ids)
-    UNION SELECT NULLIF(ip,'')          FROM assets WHERE $1 = ANY(task_ids)
-) q WHERE h IS NOT NULL AND h <> ''`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			return nil, err
-		}
-		out = append(out, h)
-	}
-	return out, rows.Err()
 }
 
 // DeleteByCompanyID hard-deletes all assets belonging to a company. Returns rows deleted.
@@ -1161,7 +1260,6 @@ func (s *AssetStore) CountsByType() (map[string]int, error) {
 	return scanTypeCounts(rows)
 }
 
-// scanTypeCounts scans a (type, count) result set into a map.
 func scanTypeCounts(rows *sql.Rows) (map[string]int, error) {
 	out := map[string]int{}
 	for rows.Next() {

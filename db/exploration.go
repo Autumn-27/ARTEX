@@ -25,34 +25,40 @@ func utf8Clean(s string) string {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
-	ID        int64           `json:"id"`
-	Kind      string          `json:"kind"`
-	Payload   json.RawMessage `json:"payload"`
-	Priority  int             `json:"priority"`
-	State     string          `json:"state"`
-	Origin    string          `json:"origin,omitempty"`
-	Owner     string          `json:"owner,omitempty"`
-	Anchors   []int64         `json:"anchors,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID            int64           `json:"id"`
+	Kind          string          `json:"kind"`
+	Payload       json.RawMessage `json:"payload"`
+	Priority      int             `json:"priority"`
+	State         string          `json:"state"`
+	Origin        string          `json:"origin,omitempty"`
+	Owner         string          `json:"owner,omitempty"`
+	BlockedReason string          `json:"blocked_reason,omitempty"`
+	Anchors       []int64         `json:"anchors,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	SourceTaskID  int64           `json:"source_task_id,omitempty"`
+	Inherited     bool            `json:"inherited,omitempty"`
 }
 
 // Activity is one worker execution step (= old task_activity).
 type Activity struct {
-	ID        int64     `json:"id"`
-	NodeID    *int64    `json:"node_id,omitempty"`
-	Worker    string    `json:"worker,omitempty"`
-	Kind      string    `json:"kind,omitempty"`
-	Tool      string    `json:"tool,omitempty"`
-	ToolUseID string    `json:"tool_use_id,omitempty"`
-	IsError   bool      `json:"is_error"`
-	Summary   string    `json:"summary,omitempty"`
-	Detail    string    `json:"-"` // full blob; lazy-loaded, omitted from list payloads
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64           `json:"id"`
+	NodeID    *int64          `json:"node_id,omitempty"`
+	Worker    string          `json:"worker,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	Tool      string          `json:"tool,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	IsError   bool            `json:"is_error"`
+	Summary   string          `json:"summary,omitempty"`
+	Detail    string          `json:"-"` // full blob; lazy-loaded, omitted from list payloads
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 	// Token usage — set only on the terminal kind='result' record; nil elsewhere.
-	InputTokens      *int `json:"input_tokens,omitempty"`
-	OutputTokens     *int `json:"output_tokens,omitempty"`
-	CacheReadTokens  *int `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens *int `json:"cache_write_tokens,omitempty"`
+	InputTokens      *int  `json:"input_tokens,omitempty"`
+	OutputTokens     *int  `json:"output_tokens,omitempty"`
+	CacheReadTokens  *int  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int  `json:"cache_write_tokens,omitempty"`
+	SourceTaskID     int64 `json:"source_task_id,omitempty"`
+	Inherited        bool  `json:"inherited,omitempty"`
 }
 
 // TokenUsage is a per-worker token aggregate (TokenStatsByWorker).
@@ -201,17 +207,17 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 
 // SetNodeState updates any node's state (never deletes).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
+	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
 	return err
 }
 
-// SetIntentState updates an intent node's state (done/blocked/exhausted/open).
+// SetIntentState updates an intent node's state.
 // ResetRunningIntents returns any intent left in 'running' back to 'open' so it
 // is re-claimed. Called on startup: a 'running' intent with no live worker (a
 // backend restart or crashed worker goroutine left it stuck) would otherwise spin
 // forever in the UI. Workers re-run an intent from scratch, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -226,7 +232,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 // changed (false = intent absent or not in a rerunnable state). Used by the "重跑" button.
 func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
-SET state='open', completed_at=NULL
+SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
   AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
 	if err != nil {
@@ -240,7 +246,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
 // number reopened. Workers re-run each from scratch; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -253,17 +259,92 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	// terminal states stamp completed_at; reopening (back to open/running) clears it.
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
-SET state=$1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
+SET state=$1, blocked_reason=NULL, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
 	return err
 }
 
-const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), created_at`
+// IntentCleanup summarizes the blackboard records removed when a user cancels
+// one worker intent. Global assets and traffic are deliberately not part of this
+// operation; exploration anchors disappear only because their owning nodes do.
+type IntentCleanup struct {
+	Intents    int64 `json:"intents"`
+	Facts      int64 `json:"facts"`
+	Findings   int64 `json:"findings"`
+	Activities int64 `json:"activities"`
+}
+
+// CancelIntent removes one local intent and the fact/finding nodes it directly
+// yielded. The standalone finding row must be deleted before its node (whose FK
+// otherwise uses ON DELETE SET NULL), so the entire cleanup is kept in one DB
+// transaction. The caller must first stop a running worker to prevent late writes.
+func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
+	var out IntentCleanup
+	tx, err := s.db.Begin()
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+
+	var state string
+	if err := tx.QueryRow(`SELECT state FROM exploration_nodes
+		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state); err != nil {
+		if err == sql.ErrNoRows {
+			return out, fmt.Errorf("intent not found")
+		}
+		return out, err
+	}
+	if state != "running" && state != "paused" {
+		return out, fmt.Errorf("intent state %s cannot be cancelled", state)
+	}
+
+	if err := tx.QueryRow(`SELECT
+		COUNT(*) FILTER (WHERE n.kind='fact'),
+		COUNT(*) FILTER (WHERE n.kind='finding')
+	FROM exploration_edges e
+	JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+	WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+	  AND n.kind IN ('fact','finding')`, s.expID, id, RelYields).Scan(&out.Facts, &out.Findings); err != nil {
+		return out, err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM findings f USING exploration_edges e, exploration_nodes n
+		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+		  AND n.id=e.dst_id AND n.exploration_id=e.exploration_id
+		  AND n.kind='finding' AND f.node_id=n.id`, s.expID, id, RelYields); err != nil {
+		return out, err
+	}
+	res, err := tx.Exec(`DELETE FROM activity WHERE exploration_id=$1 AND node_id=$2`, s.expID, id)
+	if err != nil {
+		return out, err
+	}
+	out.Activities, _ = res.RowsAffected()
+
+	res, err = tx.Exec(`DELETE FROM exploration_nodes
+		WHERE exploration_id=$1 AND (
+			id=$2 OR id IN (
+				SELECT e.dst_id FROM exploration_edges e
+				JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+				WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+				  AND n.kind IN ('fact','finding')
+			)
+		)`, s.expID, id, RelYields)
+	if err != nil {
+		return out, err
+	}
+	if removed, _ := res.RowsAffected(); removed != 1+out.Facts+out.Findings {
+		return out, fmt.Errorf("intent cleanup changed concurrently")
+	}
+	out.Intents = 1
+	return out, tx.Commit()
+}
+
+const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), created_at`
 
 func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 	var n Node
 	var payload []byte
-	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.CreatedAt); err != nil {
+	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.BlockedReason, &n.CreatedAt); err != nil {
 		return nil, err
 	}
 	n.Payload = json.RawMessage(payload)
@@ -455,6 +536,31 @@ WHERE e.exploration_id=$1 AND e.rel=$2 AND n.kind='finding'`, s.expID, RelYields
 	return out, rows.Err()
 }
 
+// FindingIntentsTerminal is the inherited-history variant: it returns finding
+// lineage only when the producing intent has reached an immutable terminal
+// state. This keeps a source task's live worker topology private.
+func (s *ExplorationStore) FindingIntentsTerminal() (map[int64]int64, error) {
+	rows, err := s.db.Query(`SELECT e.dst_id, e.src_id
+	FROM exploration_edges e
+	JOIN exploration_nodes finding ON finding.id=e.dst_id AND finding.exploration_id=e.exploration_id
+	JOIN exploration_nodes intent ON intent.id=e.src_id AND intent.exploration_id=e.exploration_id
+	WHERE e.exploration_id=$1 AND e.rel=$2 AND finding.kind='finding'
+	  AND intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')`, s.expID, RelYields)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var findingID, intentID int64
+		if err := rows.Scan(&findingID, &intentID); err != nil {
+			return nil, err
+		}
+		out[findingID] = intentID
+	}
+	return out, rows.Err()
+}
+
 // Frontier returns open intents ordered by priority desc then id (FIFO tiebreak).
 func (s *ExplorationStore) Frontier(limit int) ([]*Node, error) {
 	if limit <= 0 {
@@ -516,12 +622,16 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 
 // AppendActivity records one worker step and returns its id.
 func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
+	metadata := a.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
 	var id int64
 	err := s.db.QueryRow(`
-INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13)
+INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14)
 RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError, utf8Clean(a.Summary), utf8Clean(a.Detail),
-		a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens).Scan(&id)
+		metadata, a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens).Scan(&id)
 	return id, err
 }
 
@@ -659,7 +769,7 @@ func (s *ExplorationStore) ActivityList(nodeID *int64, sinceID int64, limit int)
 	}
 	var rows *sql.Rows
 	var err error
-	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
 	if nodeID != nil {
 		rows, err = s.db.Query(`SELECT `+cols+`
 FROM activity WHERE exploration_id=$1 AND node_id=$2 AND id>$3 ORDER BY id LIMIT $4`, s.expID, *nodeID, sinceID, limit)
@@ -667,6 +777,43 @@ FROM activity WHERE exploration_id=$1 AND node_id=$2 AND id>$3 ORDER BY id LIMIT
 		rows, err = s.db.Query(`SELECT `+cols+`
 FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, sinceID, limit)
 	}
+	if err != nil {
+		return nil, sinceID, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	cursor := sinceID
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt,
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			return nil, sinceID, err
+		}
+		if a.ID > cursor {
+			cursor = a.ID
+		}
+		out = append(out, a)
+	}
+	return out, cursor, rows.Err()
+}
+
+// ActivityListForTerminalIntent is the inherited, incremental-read boundary.
+// The intent state check and activity read happen in one statement so a source
+// intent reopened between API-level checks cannot expose its new in-flight trace.
+// Model reasoning and accounting rows are never inherited.
+func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, limit int) ([]Activity, int64, error) {
+	if limit <= 0 {
+		limit = 300
+	}
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''),
+		COALESCE(a.tool,''), COALESCE(a.tool_use_id,''), a.is_error, COALESCE(a.summary,''),
+		a.created_at, a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+	WHERE a.exploration_id=$1 AND a.node_id=$2 AND a.id>$3
+	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.kind NOT IN ('thinking','usage')
+	ORDER BY a.id LIMIT $4`, s.expID, nodeID, sinceID, limit)
 	if err != nil {
 		return nil, sinceID, err
 	}
@@ -719,7 +866,7 @@ func (s *ExplorationStore) ActivityPage(f ActivitySessionFilter, before int64, l
 	if limit <= 0 {
 		limit = 200
 	}
-	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
 	args := []any{s.expID}
 	cond, cargs := f.cond(len(args) + 1)
 	args = append(args, cargs...)
@@ -731,6 +878,51 @@ func (s *ExplorationStore) ActivityPage(f ActivitySessionFilter, before int64, l
 FROM activity WHERE exploration_id=$1%s AND ($%d <= 0 OR id < $%d)
 ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
 	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	desc := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt,
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			return nil, false, err
+		}
+		desc = append(desc, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(desc) > limit
+	if hasMore {
+		desc = desc[:limit]
+	}
+	// reverse the newest-first window into ascending id order for display.
+	out := make([]Activity, len(desc))
+	for i, a := range desc {
+		out[len(desc)-1-i] = a
+	}
+	return out, hasMore, nil
+}
+
+// ActivityPageForTerminalIntent is the inherited session-history boundary. It
+// combines ownership, terminal-state and row-kind checks in one query, closing
+// the race where a previously completed source intent is reopened before paging.
+func (s *ExplorationStore) ActivityPageForTerminalIntent(nodeID, before int64, limit int) ([]Activity, bool, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''),
+		COALESCE(a.tool,''), COALESCE(a.tool_use_id,''), a.is_error, COALESCE(a.summary,''),
+		a.created_at, a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+	WHERE a.exploration_id=$1 AND a.node_id=$2
+	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.kind NOT IN ('thinking','usage')
+	  AND ($3 <= 0 OR a.id < $3)
+	ORDER BY a.id DESC LIMIT $4`, s.expID, nodeID, before, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -751,7 +943,6 @@ ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
 	if hasMore {
 		desc = desc[:limit]
 	}
-	// reverse the newest-first window into ascending id order for display.
 	out := make([]Activity, len(desc))
 	for i, a := range desc {
 		out[len(desc)-1-i] = a
@@ -817,6 +1008,26 @@ ORDER BY id LIMIT $3`, s.expID, nodeID, limit)
 	return scanTrace(rows)
 }
 
+// ActivityTraceForTerminalIntent returns one inherited work trace only while its
+// source intent is still terminal at query time.
+func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
+	  AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.kind NOT IN ('thinking','usage')
+	ORDER BY a.id LIMIT $3`, s.expID, nodeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrace(rows)
+}
+
 // ActivityTraceSearch finds steps whose summary OR detail matches q
 // (case-insensitive), returning summaries only. nodeID != nil scopes to one work;
 // nil searches across ALL works (node_id IS NOT NULL — planner/main steps have no
@@ -844,13 +1055,59 @@ AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, 
 	return scanTrace(rows)
 }
 
+// ActivityTraceSearchForTerminalIntent is the scoped inherited search variant;
+// terminal eligibility is evaluated by the same statement that reads the rows.
+func (s *ExplorationStore) ActivityTraceSearchForTerminalIntent(nodeID int64, q string, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	like := "%" + q + "%"
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
+	  AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.kind NOT IN ('thinking','usage')
+	  AND (a.summary ILIKE $3 OR a.detail ILIKE $3)
+	ORDER BY a.id LIMIT $4`, s.expID, nodeID, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrace(rows)
+}
+
+// ActivityTraceSearchTerminalIntents searches inherited worker history without
+// exposing planner/main rows or work that is still open/running in the source.
+func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	like := "%" + q + "%"
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+	WHERE a.exploration_id=$1 AND n.kind='intent'
+	  AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.kind NOT IN ('thinking','usage')
+	  AND (a.summary ILIKE $2 OR a.detail ILIKE $2)
+	ORDER BY a.id LIMIT $3`, s.expID, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTrace(rows)
+}
+
 // AssetRef is a compact exploration node (intent/fact/finding) that references an
 // asset via an anchor — for the coverage graph's node drawer.
 type AssetRef struct {
-	ID      int64  `json:"id"`
-	Kind    string `json:"kind"`
-	State   string `json:"state"`
-	Summary string `json:"summary"`
+	ID           int64  `json:"id"`
+	Kind         string `json:"kind"`
+	State        string `json:"state"`
+	Summary      string `json:"summary"`
+	SourceTaskID int64  `json:"source_task_id,omitempty"`
+	Inherited    bool   `json:"inherited,omitempty"`
 }
 
 // AssetRefs returns the intents / facts / findings in THIS exploration anchored to
@@ -928,6 +1185,42 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 	}
 	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
 FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ActivityByIDsForTerminalIntents is the inherited-detail read boundary. It
+// deliberately excludes node-less planner/main rows, non-intent activities, live
+// source work, and thinking. Local callers that need legacy behavior use
+// ActivityByIDs instead.
+func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activity, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]any, len(ids)+1)
+	args[0] = s.expID
+	for i, id := range ids {
+		ph[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = id
+	}
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.detail,'')
+	FROM activity a
+	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
+		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage') AND n.kind='intent'
+	  AND n.state IN ('done','blocked','exhausted','stopped')
+	  AND a.id IN (`+strings.Join(ph, ",")+`) ORDER BY a.id`, args...)
 	if err != nil {
 		return nil, err
 	}

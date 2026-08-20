@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Markdown } from "@/components/markdown";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { Activity } from "@/lib/types";
 
@@ -208,7 +209,7 @@ function InterceptCard({
   }, [pendingId]);
 
   async function decide(decision: "allowed" | "denied") {
-    if (!pendingId || deciding) return;
+    if (step.inherited || !pendingId || deciding) return;
     setDeciding(true);
     try {
       await api.interceptDecide(pendingId, decision);
@@ -246,7 +247,9 @@ function InterceptCard({
           </div>
         </div>
 
-        {decided ? (
+        {step.inherited ? (
+          <Badge variant="outline">历史记录 · 只读</Badge>
+        ) : decided ? (
           <span className={
             "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
             (decided === "allowed"

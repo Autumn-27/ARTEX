@@ -290,12 +290,12 @@ func TestUpsertHTTPService(t *testing.T) {
 	sc := 200
 	cl := int64(1024)
 	id1, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
-		URL:          "https://www.httptest.example.com/",
-		Technologies: []string{"nginx", "vue"},
-		StatusCode:   &sc,
+		URL:           "https://www.httptest.example.com/",
+		Technologies:  []string{"nginx", "vue"},
+		StatusCode:    &sc,
 		ContentLength: &cl,
-		PageTitle:    "Test Site",
-		TaskID:       1,
+		PageTitle:     "Test Site",
+		TaskID:        1,
 	})
 	if err != nil {
 		t.Fatal(err)

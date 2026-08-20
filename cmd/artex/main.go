@@ -73,14 +73,8 @@ func main() {
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// re-wrap with a named cause so a run cancelled by shutdown says "后端进程正在
-	// 关停" in its trace instead of a bare context.Canceled (see agent/cancelcause.go).
-	ctx, shutdown := context.WithCancelCause(sigCtx)
+	ctx, shutdown := shutdownContext(sigCtx)
 	defer shutdown(agent.AbortShutdown)
-	go func() {
-		<-sigCtx.Done()
-		shutdown(agent.AbortShutdown)
-	}()
 
 	mgr, err := server.NewManager(*dataDir, *proxy)
 	if err != nil {
@@ -112,4 +106,19 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// shutdownContext deliberately does not derive from signalCtx. If it did, the
+// parent's plain context.Canceled could win the race before AbortShutdown was
+// attached to the child, losing the diagnostic cause in every running Agent.
+func shutdownContext(signalCtx context.Context) (context.Context, context.CancelCauseFunc) {
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	go func() {
+		select {
+		case <-signalCtx.Done():
+			shutdown(agent.AbortShutdown)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, shutdown
 }

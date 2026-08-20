@@ -1,8 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { FileTextIcon, CopyIcon, CheckIcon } from "lucide-react";
+
+import { CheckIcon, CopyIcon, FileTextIcon } from "lucide-react";
 import { toast } from "sonner";
+
+import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
@@ -39,6 +42,29 @@ export function ReportTab({ taskId }: { taskId: string }) {
     setTimeout(() => setCopied(false), 1500);
   }
 
+  let content: React.ReactNode;
+  if (loading) {
+    content = (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed py-16 text-muted-foreground text-sm">
+        <FileTextIcon className="size-8 opacity-40" />
+        加载中…
+      </div>
+    );
+  } else if (report) {
+    content = (
+      <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/20 p-4">
+        <Markdown text={report} />
+      </div>
+    );
+  } else {
+    content = (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed py-16 text-muted-foreground text-sm">
+        <FileTextIcon className="size-8 opacity-40" />
+        暂无报告
+      </div>
+    );
+  }
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between">
@@ -53,23 +79,7 @@ export function ReportTab({ taskId }: { taskId: string }) {
           )}
         </div>
       </CardHeader>
-      <CardContent>
-        {loading ? (
-          <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed py-16 text-sm text-muted-foreground">
-            <FileTextIcon className="size-8 opacity-40" />
-            加载中…
-          </div>
-        ) : report ? (
-          <pre className="max-h-[60vh] overflow-auto rounded-md border bg-muted/40 p-4 font-mono text-xs whitespace-pre-wrap">
-            {report}
-          </pre>
-        ) : (
-          <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed py-16 text-sm text-muted-foreground">
-            <FileTextIcon className="size-8 opacity-40" />
-            暂无报告
-          </div>
-        )}
-      </CardContent>
+      <CardContent>{content}</CardContent>
     </Card>
   );
 }

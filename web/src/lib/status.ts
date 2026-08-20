@@ -47,6 +47,7 @@ interface StatusMeta {
 const intent: Record<string, StatusMeta> = {
   open: { label: "待领", tone: "slate" },
   running: { label: "执行中", tone: "blue" },
+  paused: { label: "已暂停", tone: "amber" },
   done: { label: "已完成", tone: "green" },
   blocked: { label: "被拦截", tone: "red" },
   exhausted: { label: "已穷尽", tone: "violet" },

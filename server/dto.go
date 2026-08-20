@@ -30,21 +30,27 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
-	ID            string        `json:"id"`
-	ExplorationID int64         `json:"exploration_id"`
-	Description   string        `json:"description"`
-	Goal          string        `json:"goal"`
-	Status        string        `json:"status"` // created | running | paused | done | failed
-	CreatedAt     string        `json:"created_at"`
-	CreatedUnix   int64         `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
-	CompletedAt   string        `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
-	CompletedUnix int64         `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
-	LastActivity  int64         `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
-	Paused        bool          `json:"paused"`
-	Tokens        TokenTotalDTO `json:"tokens"` // whole-task token consumption
-	GoalsTotal    int           `json:"goals_total"`
-	GoalsMet      int           `json:"goals_met"`
-	LLMProfileID  *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
+	ID                 string        `json:"id"`
+	ExplorationID      int64         `json:"exploration_id"`
+	Description        string        `json:"description"`
+	Goal               string        `json:"goal"`
+	Status             string        `json:"status"` // created | running | paused | done | failed
+	CreatedAt          string        `json:"created_at"`
+	CreatedUnix        int64         `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
+	CompletedAt        string        `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
+	CompletedUnix      int64         `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
+	LastActivity       int64         `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
+	Paused             bool          `json:"paused"`
+	Queued             bool          `json:"queued"`
+	Tokens             TokenTotalDTO `json:"tokens"` // whole-task token consumption
+	GoalsTotal         int           `json:"goals_total"`
+	GoalsMet           int           `json:"goals_met"`
+	LLMProfileID       *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
+	LLMProfileIDs      []int64       `json:"llm_profile_ids"`
+	ActiveLLMProfileID *int64        `json:"active_llm_profile_id,omitempty"`
+	LLMFailoverState   string        `json:"llm_failover_state"`
+	LLMFailoverReason  string        `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []string      `json:"source_task_ids"`
 }
 
 // TokenTotalDTO is a whole-task (all agents) token aggregate.
@@ -65,18 +71,30 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 }
 
 func taskDTO(t *Task, status string) TaskDTO {
+	llmState := t.llmStateSnapshot()
+	sourceIDs := make([]string, 0, len(t.SourceTaskIDs))
+	for _, id := range t.SourceTaskIDs {
+		sourceIDs = append(sourceIDs, i64s(id))
+	}
+	profileIDs := append(make([]int64, 0, len(llmState.ProfileIDs)), llmState.ProfileIDs...)
 	return TaskDTO{
-		ID:            t.ID,
-		ExplorationID: t.ExpID,
-		Description:   t.Description,
-		Goal:          t.Goal,
-		Status:        status,
-		CreatedAt:     rfc3339(time.Unix(t.CreatedAt, 0)),
-		CreatedUnix:   t.CreatedAt,
-		CompletedAt:   completedRFC(t.CompletedAt),
-		CompletedUnix: t.CompletedAt,
-		Paused:        t.Paused,
-		LLMProfileID:  t.LLMProfileID,
+		ID:                 t.ID,
+		ExplorationID:      t.ExpID,
+		Description:        t.Description,
+		Goal:               t.Goal,
+		Status:             status,
+		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
+		CreatedUnix:        t.CreatedAt,
+		CompletedAt:        completedRFC(t.CompletedAt),
+		CompletedUnix:      t.CompletedAt,
+		Paused:             t.Paused,
+		Queued:             t.Queued,
+		LLMProfileID:       llmState.ProfileID,
+		LLMProfileIDs:      profileIDs,
+		ActiveLLMProfileID: llmState.ActiveID,
+		LLMFailoverState:   llmState.FailoverState,
+		LLMFailoverReason:  llmState.FailoverReason,
+		SourceTaskIDs:      sourceIDs,
 	}
 }
 
@@ -120,17 +138,19 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 // ---- TaskNode (frontend "TaskNode") — frontier, intents, exploration graph nodes ----
 
 type TaskNodeDTO struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"` // db Node.Kind
-	Payload  string `json:"payload,omitempty"`
-	Priority int    `json:"priority"`
-	State    string `json:"state"`
-	Origin   string `json:"origin"`
-	TS       string `json:"ts"`
+	ID           string `json:"id"`
+	Type         string `json:"type"` // db Node.Kind
+	Payload      string `json:"payload,omitempty"`
+	Priority     int    `json:"priority"`
+	State        string `json:"state"`
+	Origin       string `json:"origin"`
+	TS           string `json:"ts"`
+	SourceTaskID string `json:"source_task_id,omitempty"`
+	Inherited    bool   `json:"inherited,omitempty"`
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
-	return TaskNodeDTO{
+	d := TaskNodeDTO{
 		ID:       i64s(n.ID),
 		Type:     n.Kind,
 		Payload:  rawString(n.Payload),
@@ -139,6 +159,11 @@ func taskNodeDTO(n *db.Node) TaskNodeDTO {
 		Origin:   n.Origin,
 		TS:       rfc3339(n.CreatedAt),
 	}
+	if n.SourceTaskID > 0 {
+		d.SourceTaskID = i64s(n.SourceTaskID)
+	}
+	d.Inherited = n.Inherited
+	return d
 }
 
 func taskNodeDTOs(in []*db.Node) []TaskNodeDTO {
@@ -169,6 +194,27 @@ func edgeDTOs(in []db.Edge) []EdgeDTO {
 	return out
 }
 
+// ---- Coverage asset references ----
+
+type CoverageAssetRefDTO struct {
+	ID           int64  `json:"id"`
+	Kind         string `json:"kind"`
+	State        string `json:"state"`
+	Summary      string `json:"summary"`
+	SourceTaskID string `json:"source_task_id,omitempty"`
+	Inherited    bool   `json:"inherited,omitempty"`
+}
+
+func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
+	out := CoverageAssetRefDTO{
+		ID: ref.ID, Kind: ref.Kind, State: ref.State, Summary: ref.Summary, Inherited: ref.Inherited,
+	}
+	if ref.SourceTaskID > 0 {
+		out.SourceTaskID = i64s(ref.SourceTaskID)
+	}
+	return out
+}
+
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
@@ -186,6 +232,8 @@ type FindingDTO struct {
 	ParamID         string            `json:"param_id,omitempty"`
 	TaskID          string            `json:"task_id,omitempty"`
 	TaskDescription string            `json:"task_description,omitempty"`
+	SourceTaskID    string            `json:"source_task_id,omitempty"`
+	Inherited       bool              `json:"inherited,omitempty"`
 	Assets          []FindingAssetDTO `json:"assets,omitempty"`
 	TS              string            `json:"ts"`
 }
@@ -241,7 +289,7 @@ type findingPayload struct {
 func findingDTO(n *db.Node) FindingDTO {
 	var p findingPayload
 	_ = json.Unmarshal(n.Payload, &p)
-	return FindingDTO{
+	d := FindingDTO{
 		ID:        i64s(n.ID),
 		VulnClass: p.VulnClass,
 		Name:      p.Name,
@@ -251,6 +299,11 @@ func findingDTO(n *db.Node) FindingDTO {
 		Evidence:  rawString(p.Evidence),
 		TS:        rfc3339(n.CreatedAt),
 	}
+	if n.SourceTaskID > 0 {
+		d.SourceTaskID = i64s(n.SourceTaskID)
+	}
+	d.Inherited = n.Inherited
+	return d
 }
 
 // findingDTOsForTask converts a task's finding nodes to DTOs, stamping each with
@@ -260,11 +313,15 @@ func findingDTO(n *db.Node) FindingDTO {
 // nodes with no row keep the 'pending' default and no finding_id (not editable).
 // assets pre-resolves the anchored asset rows for label rendering.
 func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
+	return findingDTOsForOwner(t.ID, t.Description, in, meta, assets)
+}
+
+func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
 	out := make([]FindingDTO, 0, len(in))
 	for _, n := range in {
 		d := findingDTO(n)
-		d.TaskID = t.ID
-		d.TaskDescription = t.Description
+		d.TaskID = taskID
+		d.TaskDescription = description
 		if m, ok := meta[n.ID]; ok {
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
@@ -320,16 +377,19 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 // ---- Activity (frontend "Activity") ----
 
 type ActivityDTO struct {
-	Seq       int64  `json:"seq"`                 // db Activity.ID
-	IntentID  string `json:"intent_id,omitempty"` // db NodeID
-	Worker    string `json:"worker"`
-	TS        string `json:"ts"` // db CreatedAt
-	Kind      string `json:"kind"`
-	Tool      string `json:"tool,omitempty"`
-	ToolUseID string `json:"tool_use_id,omitempty"`
-	IsError   bool   `json:"is_error"`
-	Summary   string `json:"summary"`
-	Detail    string `json:"detail,omitempty"`
+	Seq          int64           `json:"seq"`                 // db Activity.ID
+	IntentID     string          `json:"intent_id,omitempty"` // db NodeID
+	Worker       string          `json:"worker"`
+	TS           string          `json:"ts"` // db CreatedAt
+	Kind         string          `json:"kind"`
+	Tool         string          `json:"tool,omitempty"`
+	ToolUseID    string          `json:"tool_use_id,omitempty"`
+	IsError      bool            `json:"is_error"`
+	Summary      string          `json:"summary"`
+	Detail       string          `json:"detail,omitempty"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	SourceTaskID string          `json:"source_task_id,omitempty"`
+	Inherited    bool            `json:"inherited,omitempty"`
 	// token usage (set only on kind='result'); used for per-session token totals.
 	InputTokens      *int `json:"input_tokens,omitempty"`
 	OutputTokens     *int `json:"output_tokens,omitempty"`
@@ -342,7 +402,7 @@ func activityDTO(a db.Activity) ActivityDTO {
 	if a.NodeID != nil {
 		intent = i64s(*a.NodeID)
 	}
-	return ActivityDTO{
+	d := ActivityDTO{
 		Seq:              a.ID,
 		IntentID:         intent,
 		Worker:           a.Worker,
@@ -353,11 +413,17 @@ func activityDTO(a db.Activity) ActivityDTO {
 		IsError:          a.IsError,
 		Summary:          a.Summary,
 		Detail:           a.Detail, // list endpoint leaves this empty (lazy)
+		Metadata:         a.Metadata,
 		InputTokens:      a.InputTokens,
 		OutputTokens:     a.OutputTokens,
 		CacheReadTokens:  a.CacheReadTokens,
 		CacheWriteTokens: a.CacheWriteTokens,
 	}
+	if a.SourceTaskID > 0 {
+		d.SourceTaskID = i64s(a.SourceTaskID)
+	}
+	d.Inherited = a.Inherited
+	return d
 }
 
 func activityDTOs(in []db.Activity) []ActivityDTO {

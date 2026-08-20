@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -24,9 +25,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	_ "modernc.org/sqlite"
 )
@@ -471,26 +472,203 @@ func (t *Traffic) DeleteHost(host string) (int64, error) {
 // so picking "api.example.com" never sweeps "api.example.com.cn". Returns rows
 // deleted. Duplicate hosts are harmless (idempotent deletes, single tree pass).
 func (t *Traffic) DeleteHostsExact(hosts []string) (int64, error) {
-	t.wmu.Lock()
-	defer t.wmu.Unlock()
-	var deleted int64
-	removed := make(map[string]bool)
-	for _, h := range hosts {
-		res, err := t.db.Exec(`DELETE FROM exchanges WHERE host=?`, h)
-		if err != nil {
-			return deleted, err
-		}
-		n, _ := res.RowsAffected()
-		deleted += n
-		if !removed[h] {
-			os.RemoveAll(filepath.Join(t.dir, sanitize(h)))
-			removed[h] = true
-		}
+	stage, err := t.StageDeleteHostsExact(hosts)
+	if err != nil {
+		return 0, err
 	}
-	if deleted > 0 {
-		_ = t.gcBlobs()
+	deleted := stage.Deleted()
+	if err := stage.Commit(); err != nil {
+		return deleted, err
 	}
 	return deleted, nil
+}
+
+type stagedTrafficPath struct {
+	source string
+	staged string
+}
+
+// HostDeleteStage keeps the SQLite delete transaction open and moves matching
+// host trees to a same-filesystem staging directory. The Traffic write lock is
+// held until Commit or Rollback, so no recorder can recreate a staged tree or a
+// blob reference while a task deletion is being coordinated with PostgreSQL.
+type HostDeleteStage struct {
+	traffic  *Traffic
+	tx       *sql.Tx
+	stageDir string
+	moves    []stagedTrafficPath
+	deleted  int64
+	done     bool
+}
+
+// Deleted reports the number of exchange rows selected by this stage.
+func (s *HostDeleteStage) Deleted() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.deleted
+}
+
+// StageDeleteHostsExact prepares a reversible exact-host deletion. Callers must
+// finish every successful stage with Commit or Rollback.
+func (t *Traffic) StageDeleteHostsExact(hosts []string) (*HostDeleteStage, error) {
+	t.wmu.Lock()
+	stage := &HostDeleteStage{traffic: t}
+	fail := func(cause error) (*HostDeleteStage, error) {
+		if rollbackErr := stage.rollbackLocked(); rollbackErr != nil {
+			return nil, errors.Join(cause, fmt.Errorf("restore staged traffic: %w", rollbackErr))
+		}
+		return nil, cause
+	}
+
+	unique := make([]string, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		unique = append(unique, host)
+	}
+
+	tx, err := t.db.Begin()
+	if err != nil {
+		t.wmu.Unlock()
+		stage.done = true
+		return nil, err
+	}
+	stage.tx = tx
+	for _, h := range unique {
+		res, err := tx.Exec(`DELETE FROM exchanges WHERE host=?`, h)
+		if err != nil {
+			return fail(err)
+		}
+		n, _ := res.RowsAffected()
+		stage.deleted += n
+	}
+
+	stagedSources := make(map[string]struct{}, len(unique))
+	for _, host := range unique {
+		source := filepath.Join(t.dir, sanitize(host))
+		if _, duplicatePath := stagedSources[source]; duplicatePath {
+			continue
+		}
+		stagedSources[source] = struct{}{}
+		if _, err := os.Lstat(source); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fail(fmt.Errorf("inspect traffic tree for %q: %w", host, err))
+		}
+		if stage.stageDir == "" {
+			parent := filepath.Join(t.dir, "_delete_staging")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				return fail(fmt.Errorf("create traffic staging directory: %w", err))
+			}
+			stage.stageDir, err = os.MkdirTemp(parent, "hosts-")
+			if err != nil {
+				return fail(fmt.Errorf("create traffic stage: %w", err))
+			}
+		}
+		staged := filepath.Join(stage.stageDir, fmt.Sprintf("%d-%s", len(stage.moves), filepath.Base(source)))
+		if err := os.Rename(source, staged); err != nil {
+			return fail(fmt.Errorf("stage traffic tree for %q: %w", host, err))
+		}
+		stage.moves = append(stage.moves, stagedTrafficPath{source: source, staged: staged})
+	}
+	return stage, nil
+}
+
+// Rollback restores both the SQLite rows and every staged host tree.
+func (s *HostDeleteStage) Rollback() error {
+	if s == nil || s.done {
+		return nil
+	}
+	return s.rollbackLocked()
+}
+
+func (s *HostDeleteStage) rollbackLocked() error {
+	if s == nil || s.done {
+		return nil
+	}
+	var errs []error
+	if s.tx != nil {
+		if err := s.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			errs = append(errs, fmt.Errorf("rollback traffic index: %w", err))
+		}
+	}
+	for i := len(s.moves) - 1; i >= 0; i-- {
+		move := s.moves[i]
+		if _, err := os.Lstat(move.source); err == nil {
+			errs = append(errs, fmt.Errorf("restore destination already exists: %s", move.source))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect restore destination %s: %w", move.source, err))
+			continue
+		}
+		if err := os.Rename(move.staged, move.source); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", move.source, err))
+		}
+	}
+	if len(errs) == 0 && s.stageDir != "" {
+		if err := os.RemoveAll(s.stageDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove traffic stage: %w", err))
+		}
+	}
+	s.done = true
+	s.traffic.wmu.Unlock()
+	return errors.Join(errs...)
+}
+
+// Commit makes the staged deletion permanent. SQLite is committed only after
+// the caller has committed its PostgreSQL task deletion.
+func (s *HostDeleteStage) Commit() error {
+	if s == nil || s.done {
+		return nil
+	}
+	if err := s.tx.Commit(); err != nil {
+		// A failed SQLite commit normally rolls the transaction back. Restore the
+		// trees so the traffic store remains internally consistent and recoverable.
+		restoreErr := s.restoreTreesLocked()
+		s.done = true
+		s.traffic.wmu.Unlock()
+		return errors.Join(fmt.Errorf("commit traffic index deletion: %w", err), restoreErr)
+	}
+	var errs []error
+	if s.stageDir != "" {
+		if err := os.RemoveAll(s.stageDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove staged traffic trees: %w", err))
+		}
+	}
+	if err := s.traffic.gcBlobs(); err != nil {
+		errs = append(errs, fmt.Errorf("garbage collect traffic blobs: %w", err))
+	}
+	s.done = true
+	s.traffic.wmu.Unlock()
+	return errors.Join(errs...)
+}
+
+func (s *HostDeleteStage) restoreTreesLocked() error {
+	var errs []error
+	for i := len(s.moves) - 1; i >= 0; i-- {
+		move := s.moves[i]
+		if _, err := os.Lstat(move.source); err == nil {
+			errs = append(errs, fmt.Errorf("restore destination already exists: %s", move.source))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect restore destination %s: %w", move.source, err))
+			continue
+		}
+		if err := os.Rename(move.staged, move.source); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", move.source, err))
+		}
+	}
+	if len(errs) == 0 && s.stageDir != "" {
+		if err := os.RemoveAll(s.stageDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove traffic stage: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // gcBlobs removes content-addressed blobs in _blobs that no remaining exchange
