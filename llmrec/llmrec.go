@@ -41,16 +41,25 @@ func TaskIDFrom(ctx context.Context) string {
 type Recorder struct {
 	inner   llm.Provider
 	pg      *db.DB
-	model   string      // model name (from config, not in CompletionRequest)
-	prof    string      // LLM profile name (from llm_profiles)
-	enabled func() bool // reports whether recording is currently on; nil = always record
+	model   string // model name (from config, not in CompletionRequest)
+	prof    string // LLM profile name (from llm_profiles)
+	// thinkingType / reasoningEffort 是配置级思考参数(思考开关 / 思考强度)。它们在
+	// norma 的 buildBody() 里从 provider 配置注入真正的 HTTP body,不出现在
+	// CompletionRequest 上,故 Recorder 需在此单独带一份,序列化时写进录制。
+	thinkingType    string
+	reasoningEffort string
+	enabled         func() bool // reports whether recording is currently on; nil = always record
 }
 
 // Wrap returns a Provider that records calls to pg when enabled() reports true.
-// profName is the LLM profile name (e.g. "default"); may be empty. A nil enabled
-// predicate records unconditionally (backward-compatible default).
-func Wrap(inner llm.Provider, pg *db.DB, model, profName string, enabled func() bool) *Recorder {
-	return &Recorder{inner: inner, pg: pg, model: model, prof: profName, enabled: enabled}
+// profName is the LLM profile name (e.g. "default"); may be empty. thinkingType /
+// reasoningEffort are the config-level thinking params actually sent to the API
+// (empty = not sent). A nil enabled predicate records unconditionally.
+func Wrap(inner llm.Provider, pg *db.DB, model, profName, thinkingType, reasoningEffort string, enabled func() bool) *Recorder {
+	return &Recorder{
+		inner: inner, pg: pg, model: model, prof: profName,
+		thinkingType: thinkingType, reasoningEffort: reasoningEffort, enabled: enabled,
+	}
 }
 
 // parseSession extracts task id and worker role from session strings like
@@ -103,7 +112,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	// Serialize the request only when storing bodies (this is the expensive part).
 	reqBody := ""
 	if recordBodies {
-		reqBody = serializeRequest(req)
+		reqBody = r.serializeRequest(req)
 	}
 
 	return func(yield func(llm.StreamEvent, error) bool) {
@@ -255,11 +264,21 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 }
 
 // serializeRequest builds a JSON representation of the completion request.
-func serializeRequest(req llm.CompletionRequest) string {
+func (r *Recorder) serializeRequest(req llm.CompletionRequest) string {
 	m := map[string]any{
 		"system":     req.System,
 		"messages":   req.Messages,
 		"max_tokens": req.MaxTokens,
+	}
+	// 记录本次调用实际发出的思考参数。type 采用「有效值」：每请求覆盖 req.Thinking
+	// 优先于配置级 thinkingType(与 norma buildBody 的判定一致，如 compaction 摘要会
+	// 强制 disabled)；effort 无每请求覆盖，直接取配置值。两者皆空则不写 thinking 字段。
+	effType := r.thinkingType
+	if req.Thinking != "" {
+		effType = req.Thinking
+	}
+	if effType != "" || r.reasoningEffort != "" {
+		m["thinking"] = map[string]string{"type": effType, "effort": r.reasoningEffort}
 	}
 	if len(req.Tools) > 0 {
 		// Store tool names only (full schemas are huge).
