@@ -235,7 +235,10 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     rate_per_second  DOUBLE PRECISION NOT NULL DEFAULT 0,
     rate_per_minute  DOUBLE PRECISION NOT NULL DEFAULT 0,
     context_window_k INTEGER NOT NULL DEFAULT 0,
+    -- 思考参数拆成两个独立字段：thinking_type=思考开关(''/disabled/enabled)，
+    -- reasoning_effort=思考强度(''/low/medium/high/xhigh/max)，互不牵连。
     reasoning_effort TEXT NOT NULL DEFAULT '',
+    thinking_type    TEXT NOT NULL DEFAULT '',
     is_default       BOOLEAN NOT NULL DEFAULT false,
     -- 轮询(故障转移)参数，见 docs/LLM轮询设计.md：
     --   priority     顺位，越大越先被选中；激活配置(is_default)永远排链首，与本值无关。
@@ -252,6 +255,26 @@ CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
 -- 轮询顺位/排除标记；补旧库。默认 0 / false = 全部配置都参与轮询。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
+
+-- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
+-- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
+-- 否则每次启动都会把用户后来手动设的组合覆盖回去。旧 reasoning_effort 语义：
+--   'off'                    → 显式关闭  → thinking_type='disabled'，强度清空
+--   'low/medium/high/max'    → 开启+强度 → thinking_type='enabled'，强度保留
+--   ''                       → 不发送    → 两者皆空(默认)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'llm_profiles' AND column_name = 'thinking_type'
+    ) THEN
+        ALTER TABLE llm_profiles ADD COLUMN thinking_type TEXT NOT NULL DEFAULT '';
+        UPDATE llm_profiles SET thinking_type = 'enabled'
+            WHERE reasoning_effort IN ('low','medium','high','max');
+        UPDATE llm_profiles SET thinking_type = 'disabled', reasoning_effort = ''
+            WHERE reasoning_effort = 'off';
+    END IF;
+END $$;
 
 -- LLM 轮询熔断状态：某个配置连续失败(余额不足/key 失效/限流)后进入冷却，冷却期内
 -- 轮询直接跳过它。内存态为准，这里落库只为重启后不丢冷却窗口——加载时只取尚未

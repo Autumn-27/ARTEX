@@ -542,6 +542,7 @@ export const api = {
       rate_per_second?: number;
       rate_per_minute?: number;
       context_window_k?: number;
+      thinking_type?: string;
       reasoning_effort?: string;
     }>("/llm"),
   setLLM: (
@@ -560,6 +561,7 @@ export const api = {
     base_url: string,
     api_key: string,
     proxy = "",
+    thinking_type = "",
     reasoning_effort = "",
     profile_id?: number,
   ) =>
@@ -569,6 +571,7 @@ export const api = {
       base_url,
       proxy,
       api_key,
+      thinking_type,
       reasoning_effort,
       profile_id,
     }),
@@ -584,7 +587,8 @@ export const api = {
     rate_per_second?: number;
     rate_per_minute?: number;
     context_window_k?: number;
-    reasoning_effort?: string; // ""|"off"|"low"|"medium"|"high"|"max"
+    thinking_type?: string; // ""(不发送)|"disabled"|"enabled"
+    reasoning_effort?: string; // ""(不发送)|"low"|"medium"|"high"|"xhigh"|"max"
     priority?: number; // 轮询顺位，越大越先用
     pool_exclude?: boolean; // true=不作为故障转移目标
   }) => post<{ id: number }>("/llm/profiles", p),

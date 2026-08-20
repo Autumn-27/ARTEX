@@ -296,6 +296,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -329,7 +330,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	newID, err := s.m.pg.SaveProfile(&db.LLMProfile{
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
-		ContextWindowK: cfg.ContextWindowK, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
+		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude,
 	})
 	if err != nil {
@@ -459,6 +460,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -1175,6 +1177,7 @@ func (s *Server) getLLM(w http.ResponseWriter, r *http.Request) {
 		"rate_per_second":  s.llmCfg.RatePerSecond,
 		"rate_per_minute":  s.llmCfg.RatePerMinute,
 		"context_window_k": s.llmCfg.ContextWindowK,
+		"thinking_type":    s.llmCfg.ThinkingType,
 		"reasoning_effort": s.llmCfg.ReasoningEffort,
 	})
 }
@@ -1190,6 +1193,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		RatePerSecond   float64 `json:"rate_per_second"`
 		RatePerMinute   float64 `json:"rate_per_minute"`
 		ContextWindowK  int     `json:"context_window_k"`
+		ThinkingType    string  `json:"thinking_type"`
 		ReasoningEffort string  `json:"reasoning_effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1198,6 +1202,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
+	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
 	if k := req.ContextWindowK; k > 0 { // 0 = keep default (200K); cap at 1M
 		if k > 1000 {
@@ -1244,6 +1249,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		BaseURL         string `json:"base_url"`
 		Proxy           string `json:"proxy"`
 		APIKey          string `json:"api_key"`
+		ThinkingType    string `json:"thinking_type"`
 		ReasoningEffort string `json:"reasoning_effort"`
 		ProfileID       *int64 `json:"profile_id"` // 测已存 profile 时传入：api_key 为空则用它存的 key
 	}
@@ -1254,6 +1260,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
+	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。

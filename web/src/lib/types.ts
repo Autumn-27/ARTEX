@@ -623,7 +623,9 @@ export interface LLMProfile {
   rate_per_second: number;
   rate_per_minute: number;
   context_window_k?: number;
-  // 思考模式: ""=默认(不发送) | "off"=关闭 | "low"/"medium"/"high"/"max"=开启并设强度
+  // 思考开关(thinking.type): ""=不发送(默认) | "disabled"=关闭 | "enabled"=开启
+  thinking_type?: string;
+  // 思考强度: ""=不发送(默认) | "low"/"medium"/"high"/"xhigh"/"max"
   reasoning_effort?: string;
   is_default: boolean;
   // 轮询顺位：越大越先被选中。激活配置恒为链首，与本值无关。

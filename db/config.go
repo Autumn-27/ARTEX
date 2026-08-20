@@ -25,9 +25,11 @@ type LLMProfile struct {
 	// ContextWindowK is the model's context window in K tokens, used to size
 	// compaction thresholds. 0 = use a 200K default; capped at 1000 (1M).
 	ContextWindowK int `json:"context_window_k"`
-	// ReasoningEffort is the thinking-mode selector. "" = 默认(不发送思考参数);
-	// "off" = 显式关闭(thinking.type=disabled); "low"/"medium"/"high"/"max" =
-	// 开启思考并设强度. Mapped to the provider request in agent.Config.NewProvider.
+	// ThinkingType 独立控制思考「开关」(thinking.type):"" = 不发送(默认);
+	// "disabled" = 显式关闭; "enabled" = 开启. 与 ReasoningEffort 解耦.
+	ThinkingType string `json:"thinking_type"`
+	// ReasoningEffort 独立控制思考「强度」:"" = 不发送(默认);
+	// "low"/"medium"/"high"/"xhigh"/"max" = 对应强度. 见 agent.Config.NewProvider.
 	ReasoningEffort string `json:"reasoning_effort"`
 	IsDefault       bool   `json:"is_default"`
 	// Priority orders the failover chain: higher goes first. The ACTIVE profile
@@ -41,14 +43,14 @@ type LLMProfile struct {
 
 // profileCols is the read column list (hint variant, no api key) shared by the
 // list query; profileColsKey is the same with api_key for the single-row loads.
-const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude`
-const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude`
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,'')`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,'')`
 
 // scanProfile reads one row in the profileCols / profileColsKey column order. The
 // 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
 func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile) error {
 	return sc.Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, into,
-		&p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault, &p.Priority, &p.PoolExclude)
+		&p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault, &p.Priority, &p.PoolExclude, &p.ThinkingType)
 }
 
 func (d *DB) ListProfiles() ([]*LLMProfile, error) {
@@ -121,18 +123,18 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	}
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13) RETURNING id`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude).Scan(&id)
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType).Scan(&id)
 		return id, err
 	}
 	if p.APIKey == "" {
-		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11 WHERE id=$12`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ID)
+		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11,thinking_type=$12 WHERE id=$13`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.ID)
 		return p.ID, err
 	}
-	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13 WHERE id=$14`,
-		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ID)
+	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14 WHERE id=$15`,
+		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.ID)
 	return p.ID, err
 }
 

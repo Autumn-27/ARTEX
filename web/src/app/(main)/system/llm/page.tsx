@@ -29,26 +29,26 @@ import { api } from "@/lib/api";
 import type { LLMPoolMember, LLMPoolStatus, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-// 思考强度档位（仅在开关打开时生效）。
+// 思考开关(thinking.type)与思考强度(reasoning_effort)是两个【互相独立】的字段，
+// 各自单独设置——有些接口没有 thinking 字段、只靠强度参数就能激活思考，故需解耦。
+// 存库空字符串 = 该字段【不发送】；Radix Select 不接受空 value，故 UI 用 "none"
+// 哨兵表示不发送，存取时与 "" 互转（NONE / fromStore / toStore）。
+const NONE = "none";
+const fromStore = (v?: string) => (v ? v : NONE);
+const toStore = (v: string) => (v === NONE ? "" : v);
+const THINKING_TYPES: { value: string; label: string }[] = [
+  { value: NONE, label: "不发送（默认）" },
+  { value: "disabled", label: "关闭" },
+  { value: "enabled", label: "开启" },
+];
 const EFFORT_LEVELS: { value: string; label: string }[] = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "max", label: "最大" },
+  { value: NONE, label: "不发送（默认）" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
+  { value: "xhigh", label: "xhigh" },
+  { value: "max", label: "max" },
 ];
-// 思考模式三态 ↔ 存库字符串 reasoning_effort：
-//   none→""（thinking / reasoning_effort 两个字段都【不发送】，兼容不支持该字段的模型，如 MiniMax）
-//   off →"off"（发送 thinking:{type:disabled}，用于默认开启思考、需要显式关闭的模型）
-//   on  →强度值（发送 thinking:{enabled} + reasoning_effort）
-type ThinkMode = "none" | "off" | "on";
-const THINK_MODES: { value: ThinkMode; label: string }[] = [
-  { value: "none", label: "不发送（默认）" },
-  { value: "off", label: "显式关闭" },
-  { value: "on", label: "开启" },
-];
-const toStore = (mode: ThinkMode, effort: string) => (mode === "on" ? effort : mode === "off" ? "off" : "");
-const modeFromStore = (v?: string): ThinkMode => (!v ? "none" : v === "off" ? "off" : "on");
-const effortFromStore = (v?: string) => (v && v !== "off" ? v : "high");
 
 function cooldownText(secs: number) {
   if (secs <= 0) return "";
@@ -305,8 +305,8 @@ function ProfileSheet({
   const [rps, setRps] = React.useState("0");
   const [rpm, setRpm] = React.useState("0");
   const [cw, setCw] = React.useState("0"); // 上下文窗口(K tokens);0=默认200K
-  const [thinkMode, setThinkMode] = React.useState<ThinkMode>("none");
-  const [effort, setEffort] = React.useState("high");
+  const [thinkingType, setThinkingType] = React.useState(NONE);
+  const [effort, setEffort] = React.useState(NONE);
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
   const [poolExclude, setPoolExclude] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
@@ -327,8 +327,8 @@ function ProfileSheet({
     setRps(String(profile?.rate_per_second ?? 0));
     setRpm(String(profile?.rate_per_minute ?? 0));
     setCw(String(profile?.context_window_k ?? 0));
-    setThinkMode(modeFromStore(profile?.reasoning_effort));
-    setEffort(effortFromStore(profile?.reasoning_effort));
+    setThinkingType(fromStore(profile?.thinking_type));
+    setEffort(fromStore(profile?.reasoning_effort));
     setPriority(String(profile?.priority ?? 0));
     setPoolExclude(profile?.pool_exclude ?? false);
     setApiKey("");
@@ -365,7 +365,7 @@ function ProfileSheet({
     try {
       // 用配置实际会跑的思考参数来测，这样不支持该字段的模型在这里就失败，
       // 而不是等到跑任务时才炸。传 profile id：Key 输入框留空时用已存的 Key。
-      const r = await api.testLLM(format, model, baseUrl, apiKey, proxy, toStore(thinkMode, effort), profileId);
+      const r = await api.testLLM(format, model, baseUrl, apiKey, proxy, toStore(thinkingType), toStore(effort), profileId);
       if (r.ok) toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`);
       else toast.error(`连接失败：${r.error ?? "未知"}`);
     } catch (e) {
@@ -394,7 +394,8 @@ function ProfileSheet({
         rate_per_second: Number(rps) || 0,
         rate_per_minute: Number(rpm) || 0,
         context_window_k: Number(cw) || 0,
-        reasoning_effort: toStore(thinkMode, effort),
+        thinking_type: toStore(thinkingType),
+        reasoning_effort: toStore(effort),
         priority: Number(priority) || 0,
         pool_exclude: poolExclude,
       });
@@ -601,18 +602,18 @@ function ProfileSheet({
           <div className="grid gap-3 rounded-lg border p-3">
             <div className="flex items-center justify-between gap-4">
               <div className="grid gap-0.5">
-                <Label className="text-sm">思考模式 · Extended Thinking</Label>
+                <Label className="text-sm">思考开关 · thinking.type</Label>
                 <p className="text-muted-foreground text-xs">
-                  不发送=不带思考字段（兼容 MiniMax 等不支持该字段的模型）；显式关闭=发
-                  disabled（默认开思考的模型才需要）；开启=先推理再作答。
+                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持
+                  的模型）；关闭=发 disabled；开启=发 enabled。与下面的强度互相独立。
                 </p>
               </div>
-              <Select value={thinkMode} onValueChange={(v) => setThinkMode(v as ThinkMode)}>
+              <Select value={thinkingType} onValueChange={setThinkingType}>
                 <SelectTrigger className="w-32 shrink-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {THINK_MODES.map((o) => (
+                  {THINKING_TYPES.map((o) => (
                     <SelectItem key={o.value} value={o.value}>
                       {o.label}
                     </SelectItem>
@@ -620,28 +621,27 @@ function ProfileSheet({
                 </SelectContent>
               </Select>
             </div>
-            {thinkMode === "on" && (
-              <div className="flex items-center justify-between gap-4 border-t pt-3">
-                <div className="grid gap-0.5">
-                  <Label className="text-sm">思考强度</Label>
-                  <p className="text-muted-foreground text-xs">
-                    推理投入档位，越高越深入（OpenAI reasoning_effort / Anthropic output_config.effort）。
-                  </p>
-                </div>
-                <Select value={effort} onValueChange={setEffort}>
-                  <SelectTrigger className="w-28 shrink-0">
-                    <SelectValue placeholder="强度" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {EFFORT_LEVELS.map((o) => (
-                      <SelectItem key={o.value} value={o.value}>
-                        {o.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">思考强度 · reasoning_effort</Label>
+                <p className="text-muted-foreground text-xs">
+                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。
+                  有些接口没有 thinking 字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
+                </p>
               </div>
-            )}
+              <Select value={effort} onValueChange={setEffort}>
+                <SelectTrigger className="w-32 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {EFFORT_LEVELS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </div>
 
