@@ -467,6 +467,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── skills ──
   if (path === "/skills" && m === "GET") return { skills: D.skills };
+  if (path === "/skills/missing") return { missing: D.missingSkills };
+  if (seg[0] === "skills" && seg[2] === "usage") return { calls: D.skillCalls };
   if (path === "/skills" && m === "POST") return { name: String(b.name ?? "new-skill") };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length === 3) return { files: ["SKILL.md"] };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length >= 4)

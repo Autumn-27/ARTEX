@@ -897,6 +897,12 @@ type skillFileNode struct {
 	Compatibility string   `json:"compatibility,omitempty"`
 	MCPs          []string `json:"mcps,omitempty"`
 	Files         []string `json:"files"`
+	// Usage ledger (db/skill_usage.go). Calls is 0 and LastUsed nil for a skill that
+	// was never invoked — the ledger only has rows for skills agents actually loaded.
+	Calls    int        `json:"calls"`
+	Tasks    int        `json:"tasks"`
+	Agents   []string   `json:"usage_agents"`
+	LastUsed *time.Time `json:"last_used,omitempty"`
 }
 
 func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
@@ -915,13 +921,28 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// Usage is best-effort decoration: a ledger read failure leaves the counts at
+	// zero rather than failing the skill list itself.
+	statBySkill := map[string]db.SkillStat{}
+	if s.m.pg != nil {
+		stats, err := s.m.pg.SkillStats()
+		if err != nil {
+			log.Printf("[skills] 读取调用统计失败: %v", err)
+		}
+		for _, st := range stats {
+			statBySkill[st.Skill] = st
+		}
+	}
 	nodes := []skillFileNode{}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		dirName := e.Name()
-		node := skillFileNode{Name: dirName}
+		node := skillFileNode{Name: dirName, Agents: []string{}}
+		if st, ok := statBySkill[dirName]; ok {
+			node.Calls, node.Tasks, node.Agents, node.LastUsed = st.Calls, st.Tasks, st.Agents, st.LastUsed
+		}
 		if meta, ok := metaByDir[dirName]; ok {
 			node.Description = meta.Description
 			node.License = meta.License
@@ -935,6 +956,42 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 		nodes = append(nodes, node)
 	}
 	writeJSON(w, 200, map[string]any{"skills": nodes})
+}
+
+// fsSkillUsage returns one skill's recent invocations, newest first (detail panel).
+func (s *Server) fsSkillUsage(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	name := r.PathValue("name")
+	if !validSkillName(name) {
+		writeErr(w, 400, "非法 skill 名")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	calls, err := pg.RecentSkillCalls(name, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"calls": calls})
+}
+
+// fsMissingSkills lists skill names agents asked for that do not exist — the gap
+// list, i.e. which procedures are worth writing next.
+func (s *Server) fsMissingSkills(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	missing, err := pg.MissingSkillStats(limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"missing": missing})
 }
 
 // cleanStrs trims each string and drops empties.

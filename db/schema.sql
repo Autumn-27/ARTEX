@@ -501,6 +501,26 @@ CREATE TABLE IF NOT EXISTS agent_skill_visibility (
 );
 CREATE INDEX IF NOT EXISTS idx_askv_skill ON agent_skill_visibility(skill_name);
 
+-- Skill 调用账本（见 db/skill_usage.go）。一次 Skill() 调用一行，只记维度不记正文。
+-- 刻意不设外键：任务/会话删除后统计仍要保留（与 llm_usage 同理），skill 本身也只是
+-- 文件系统上的目录名，没有对应的表。
+CREATE TABLE IF NOT EXISTS skill_usage (
+    id             BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    skill          TEXT NOT NULL,
+    agent_key      TEXT,
+    task_id        BIGINT,
+    exploration_id BIGINT,
+    intent_id      BIGINT,
+    session_id     TEXT,
+    args_len       INTEGER NOT NULL DEFAULT 0,
+    -- false = 模型点名了一个不存在的 skill(未命中)。这类行同样保留：它反映"想用但没有"
+    -- 的缺口，是补 skill 的依据。
+    found          BOOLEAN NOT NULL DEFAULT true
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_skill ON skill_usage(skill, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_task  ON skill_usage(task_id);
+
 -- =====================================================================
 -- H. 内置工具目录
 -- =====================================================================

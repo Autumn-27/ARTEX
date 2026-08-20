@@ -745,6 +745,28 @@ export interface SkillItem {
   compatibility?: string; // optional: environment requirements
   mcps?: string[]; // MCP server names this skill unlocks on load
   files: string[]; // files in the skill directory
+  // 调用统计（skill_usage 账本）。从未被调用过的 skill：calls=0、last_used 缺省。
+  calls: number;
+  tasks: number; // 加载过它的任务数（chat 会话不计入）
+  usage_agents: string[]; // 加载过它的 agent key
+  last_used?: string;
+}
+
+// SkillCall 是一次 Skill() 调用（单个 skill 的最近调用列表）。
+export interface SkillCall {
+  ts: string;
+  agent_key: string;
+  task_id: number; // 0 = 非任务场景（对话会话）
+  session_id: string;
+  args_len: number;
+}
+
+// MissingSkill 是被点名但不存在的 skill —— "想用但没有"的缺口。
+export interface MissingSkill {
+  skill: string;
+  calls: number;
+  agents: string[];
+  last_used?: string;
 }
 
 // ---- Tools (内置工具目录) ----

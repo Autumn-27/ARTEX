@@ -44,7 +44,9 @@ import type {
   PromptVersion,
   Settings,
   Severity,
+  SkillCall,
   SkillItem,
+  MissingSkill,
   SSProject,
   SSTask,
   Stats,
@@ -776,6 +778,10 @@ export const api = {
   writeSkillFile: (name: string, file: string, content: string) =>
     put<{ ok: boolean }>(`/skills/${name}/files/${file}`, { content }),
   deleteSkillPath: (skill: string, path: string) => del<{ deleted: string }>(`/skills/${skill}/files/${path}`),
+  skillUsage: (name: string, limit = 50) =>
+    get<{ calls: SkillCall[] }>(`/skills/${name}/usage?limit=${limit}`).then((r) => arr(r.calls)),
+  missingSkills: (limit = 20) =>
+    get<{ missing: MissingSkill[] }>(`/skills/missing?limit=${limit}`).then((r) => arr(r.missing)),
 
   // ---- visibility (MCP resource side) ---- (agent ids are strings per spec)
   resourceVisibility: (kind: string, id: number) =>

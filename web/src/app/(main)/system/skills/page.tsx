@@ -12,6 +12,7 @@ import {
   PlusIcon,
   Trash2Icon,
   UploadIcon,
+  AlertTriangleIcon,
 } from "lucide-react";
 
 import {
@@ -29,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -41,7 +43,17 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
-import type { Agent, SkillItem, MCPServer } from "@/lib/types";
+import type { Agent, SkillItem, MCPServer, SkillCall, MissingSkill } from "@/lib/types";
+
+function fmtTime(ts?: string) {
+  if (!ts) return "从未调用";
+  return new Date(ts).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 // ── Tree node ──────────────────────────────────────────────────────────────
 interface TreeNode {
@@ -95,7 +107,20 @@ function buildTree(entries: string[]): TreeNode[] {
       if (fname) nodes.push({ name: fname, path: entry, type: "file", children: [] });
     }
   }
+  sortNodes(root);
   return root;
+}
+
+// sortNodes orders every level like a file explorer: directories before files,
+// then case-insensitive by name. Recurses into children.
+function sortNodes(nodes: TreeNode[]): void {
+  nodes.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
+  for (const n of nodes) {
+    if (n.children.length > 0) sortNodes(n.children);
+  }
 }
 
 // ── State types ───────────────────────────────────────────────────────────
@@ -114,6 +139,158 @@ type PendingDelete =
   | { kind: "file"; skill: string; path: string }
   | { kind: "dir"; skill: string; path: string }
   | null;
+
+// ── Overview (empty-state) ──────────────────────────────────────────────────
+// Shown when nothing is selected: a library-wide snapshot from data already loaded
+// (the skill list carries per-skill usage; missing is fetched alongside). No extra
+// requests — this is pure aggregation over props.
+function SkillsOverview({
+  skills,
+  missing,
+  onSelect,
+}: {
+  skills: SkillItem[];
+  missing: MissingSkill[];
+  onSelect: (name: string) => void;
+}) {
+  const agg = React.useMemo(() => {
+    const totalCalls = skills.reduce((n, s) => n + s.calls, 0);
+    const used = skills.filter((s) => s.calls > 0);
+    const ranked = [...used].sort((a, b) => b.calls - a.calls);
+    const neverUsed = skills.filter((s) => s.calls === 0);
+    const recent = skills
+      .filter((s) => s.last_used)
+      .sort((a, b) => (a.last_used! < b.last_used! ? 1 : -1))
+      .slice(0, 6);
+    const missingCalls = missing.reduce((n, m) => n + m.calls, 0);
+    return {
+      totalCalls,
+      usedCount: used.length,
+      ranked,
+      topCalls: ranked[0]?.calls ?? 0,
+      neverUsed,
+      recent,
+      missingCalls,
+    };
+  }, [skills, missing]);
+
+  if (skills.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <p className="text-sm text-muted-foreground">暂无 Skill，点击左侧「新建」或「上传压缩包」开始</p>
+      </div>
+    );
+  }
+
+  const stats: { label: string; value: React.ReactNode; hint?: string }[] = [
+    { label: "Skill 总数", value: skills.length, hint: `${agg.usedCount} 个被调用过` },
+    { label: "累计调用", value: agg.totalCalls },
+    { label: "未使用", value: agg.neverUsed.length, hint: agg.neverUsed.length > 0 ? "从未被任何 agent 加载" : "全部用过" },
+    { label: "未命中调用", value: agg.missingCalls, hint: missing.length > 0 ? `${missing.length} 个不存在的 skill` : "无" },
+  ];
+
+  return (
+    <div className="mx-auto w-full max-w-3xl space-y-6">
+      <div>
+        <h2 className="text-base font-semibold">技能库总览</h2>
+        <p className="text-muted-foreground text-sm">选择左侧的 Skill 查看详情与调用记录，或从这里快速了解整体使用情况。</p>
+      </div>
+
+      {/* 指标卡 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {stats.map((s) => (
+          <div key={s.label} className="rounded-lg border p-3">
+            <p className="text-2xl font-semibold tabular-nums">{s.value}</p>
+            <p className="text-xs font-medium">{s.label}</p>
+            {s.hint && <p className="text-muted-foreground mt-0.5 text-[11px]">{s.hint}</p>}
+          </div>
+        ))}
+      </div>
+
+      {/* 调用排行 */}
+      <div className="space-y-2">
+        <Label className="text-xs text-muted-foreground">调用排行</Label>
+        {agg.ranked.length === 0 ? (
+          <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-xs">
+            还没有任何 Skill 调用记录。
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {agg.ranked.slice(0, 8).map((s) => (
+              <button
+                key={s.name}
+                type="button"
+                onClick={() => onSelect(s.name)}
+                className="group flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-muted"
+              >
+                <span className="w-40 shrink-0 truncate font-mono text-xs" title={s.name}>{s.name}</span>
+                <span className="relative h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                  <span
+                    className="absolute inset-y-0 left-0 rounded-full bg-primary/70"
+                    style={{ width: `${agg.topCalls > 0 ? (s.calls / agg.topCalls) * 100 : 0}%` }}
+                  />
+                </span>
+                <span className="w-16 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                  {s.calls} 次
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-6 sm:grid-cols-2">
+        {/* 最近调用 */}
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">最近调用</Label>
+          {agg.recent.length === 0 ? (
+            <p className="text-muted-foreground text-xs">暂无记录。</p>
+          ) : (
+            <div className="space-y-1">
+              {agg.recent.map((s) => (
+                <button
+                  key={s.name}
+                  type="button"
+                  onClick={() => onSelect(s.name)}
+                  className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-muted"
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs" title={s.name}>{s.name}</span>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{fmtTime(s.last_used)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 未使用（可清理 / 需曝光） */}
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">
+            未使用的 Skill
+            {agg.neverUsed.length > 0 && <span className="ml-1 font-normal">（{agg.neverUsed.length}）</span>}
+          </Label>
+          {agg.neverUsed.length === 0 ? (
+            <p className="text-muted-foreground text-xs">所有 Skill 都被调用过。</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {agg.neverUsed.map((s) => (
+                <button
+                  key={s.name}
+                  type="button"
+                  onClick={() => onSelect(s.name)}
+                  title={s.name}
+                >
+                  <Badge variant="outline" className="max-w-[12rem] cursor-pointer truncate font-mono text-xs font-normal hover:bg-muted">
+                    {s.name}
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Page ──────────────────────────────────────────────────────────────────
 export default function SkillsPage() {
@@ -157,10 +334,17 @@ export default function SkillsPage() {
   const [pendingDelete, setPendingDelete] = React.useState<PendingDelete>(null);
   const [deleting, setDeleting] = React.useState(false);
 
+  // 调用统计：列表页的次数/最近调用随 api.skills() 一起回来；选中某个 skill 时再拉它的
+  // 最近调用明细。missing = 被点名但不存在的 skill（想用但没有）。
+  const [usageCalls, setUsageCalls] = React.useState<SkillCall[]>([]);
+  const [usageLoading, setUsageLoading] = React.useState(false);
+  const [missing, setMissing] = React.useState<MissingSkill[]>([]);
+
   // ── Data ──────────────────────────────────────────────────────────────────
   const load = React.useCallback(() => {
     api.agents().then(setAgents).catch(() => {});
     api.mcpServers().then(setMcpOptions).catch(() => {});
+    api.missingSkills().then(setMissing).catch(() => {});
     api.skills().then((ss) => {
       setSkills(ss);
       ss.forEach((s) =>
@@ -214,6 +398,17 @@ export default function SkillsPage() {
     const sk = skills.find((s) => s.name === selected.skill);
     setDetailMcps(sk?.mcps ?? []);
   }, [selected, skills]);
+
+  // Recent calls for the selected skill (detail panel only).
+  React.useEffect(() => {
+    if (!selected || selected.path !== null) { setUsageCalls([]); return; }
+    const name = selected.skill;
+    setUsageLoading(true);
+    api.skillUsage(name, 20)
+      .then((calls) => setUsageCalls(calls))
+      .catch(() => setUsageCalls([]))
+      .finally(() => setUsageLoading(false));
+  }, [selected]);
 
   React.useEffect(() => {
     if (!selected || selected.path === null) { setFileContent(""); setDirty(false); return; }
@@ -425,7 +620,9 @@ export default function SkillsPage() {
 
   // ── Recursive tree renderer ───────────────────────────────────────────────
   function renderTree(nodes: TreeNode[], skill: string, depth: number): React.ReactNode {
-    const baseIndent = 8 + depth * 14;
+    // depth+1: the skill root sits at 8px (px-2); its children indent one step
+    // further in so the tree reads as nested under the skill folder.
+    const baseIndent = 8 + (depth + 1) * 14;
     return nodes.map((node) => {
       if (node.type === "dir") {
         const key = `${skill}:${node.path}`;
@@ -505,9 +702,36 @@ export default function SkillsPage() {
 
   return (
     <div data-content-padding="false" className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex flex-col gap-0.5 border-b px-4 py-2.5 lg:px-6">
-        <h1 className="text-sm font-semibold leading-tight">Skill</h1>
-        <p className="text-muted-foreground text-xs">技能库 · agentskills.io 规范 · 按 Agent 授权可见</p>
+      <div className="flex items-center gap-3 border-b px-4 py-2.5 lg:px-6">
+        <div className="flex flex-col gap-0.5">
+          <h1 className="text-sm font-semibold leading-tight">Skill</h1>
+          <p className="text-muted-foreground text-xs">技能库 · agentskills.io 规范 · 按 Agent 授权可见</p>
+        </div>
+        {/* 缺口清单：agent 点名调用、但库里没有的 skill —— 直接是该补什么的依据。 */}
+        {missing.length > 0 && (
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button size="sm" variant="outline" className="ml-auto">
+                <AlertTriangleIcon className="size-3.5 text-amber-500" />
+                {missing.length} 个未命中调用
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80">
+              <p className="mb-2 text-xs text-muted-foreground">
+                Agent 点名调用、但技能库里不存在的 skill。按被点名次数排序。
+              </p>
+              <div className="space-y-1">
+                {missing.map((m) => (
+                  <div key={m.skill} className="flex items-center gap-2 text-sm">
+                    <code className="min-w-0 flex-1 truncate font-mono text-xs" title={m.skill}>{m.skill}</code>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{m.calls} 次</span>
+                    <span className="shrink-0 text-xs text-muted-foreground">{fmtTime(m.last_used)}</span>
+                  </div>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+        )}
       </div>
       <div className="flex flex-1 overflow-hidden">
         {/* ── 左侧文件树 ── */}
@@ -563,6 +787,14 @@ export default function SkillsPage() {
                         : <FolderIcon className="size-3.5 shrink-0 text-blue-500" />
                       }
                       <span className="min-w-0 flex-1 truncate font-semibold" title={s.name}>{s.name}</span>
+                      {s.calls > 0 && (
+                        <span
+                          className="shrink-0 rounded bg-muted px-1 text-[10px] tabular-nums text-muted-foreground"
+                          title={`被调用 ${s.calls} 次 · 最近 ${fmtTime(s.last_used)}`}
+                        >
+                          {s.calls}
+                        </span>
+                      )}
                       <span className={cn(
                         "absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded pl-1 group-hover:flex",
                         isSkillSelected ? "bg-accent" : "bg-muted",
@@ -604,13 +836,15 @@ export default function SkillsPage() {
         {/* ── 右侧面板 ── */}
         <div className="flex flex-1 flex-col overflow-auto p-4">
           {!selected && (
-            <div className="flex h-full items-center justify-center">
-              <p className="text-sm text-muted-foreground">选择左侧 Skill 或文件</p>
-            </div>
+            <SkillsOverview
+              skills={skills}
+              missing={missing}
+              onSelect={(name) => setSelected({ skill: name, path: null })}
+            />
           )}
 
           {selected && selected.path === null && selectedSkill && (
-            <div className="max-w-xl space-y-5">
+            <div className="max-w-5xl space-y-5">
               <div>
                 <h2 className="font-mono text-base font-semibold">{selectedSkill.name}</h2>
                 {selectedSkill.description && (
@@ -626,45 +860,100 @@ export default function SkillsPage() {
                 </div>
               </div>
 
-              {/* ── 关联 MCP ── */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground">
-                  关联 MCP
-                  <span className="ml-1 font-normal">（加载 Skill 时才披露/解锁其工具）</span>
-                </Label>
-                {mcpOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无 MCP，可在「MCP」页添加。</p>
-                ) : (
-                  <div className="flex flex-wrap gap-x-4 gap-y-2">
-                    {mcpOptions.map((m) => (
-                      <label key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                        <Checkbox
-                          checked={detailMcps.includes(m.name)}
-                          onCheckedChange={(on) => toggleSkillMcp(selectedSkill.name, m.name, !!on)}
-                        />
-                        {m.name}
-                      </label>
-                    ))}
+              {/* 左右分栏：配置（MCP/可见性）在左为主，调用统计在右为辅。
+                  lg 以下放不下时用 flex-row-reverse 回落到单列——统计因 DOM 顺序在前，
+                  窄屏时自然落到配置上方（与改版前的上下顺序一致）。 */}
+              <div className="flex flex-col gap-6 lg:flex-row-reverse lg:items-start">
+                {/* ── 右侧：调用统计 ── */}
+                <div className="space-y-2 lg:w-80 lg:shrink-0">
+                  <Label className="text-xs text-muted-foreground">调用统计</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-md border p-2">
+                      <p className="text-lg font-semibold tabular-nums">{selectedSkill.calls}</p>
+                      <p className="text-xs text-muted-foreground">总调用次数</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="text-lg font-semibold tabular-nums">{selectedSkill.tasks}</p>
+                      <p className="text-xs text-muted-foreground">覆盖任务数</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="truncate text-sm font-medium" title={fmtTime(selectedSkill.last_used)}>
+                        {fmtTime(selectedSkill.last_used)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">最近调用</p>
+                    </div>
                   </div>
-                )}
-              </div>
-
-              {/* ── 可见性 ── */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground">可见性（按 Agent 授权）</Label>
-                <div className="space-y-2">
-                  {agents.map((a) => (
-                    <label key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox
-                        checked={(visibility[selectedSkill.name] ?? []).includes(a.id)}
-                        onCheckedChange={() => toggleVisibility(selectedSkill.name, a.id, a.name)}
-                      />
-                      {a.name}
-                    </label>
-                  ))}
-                  {agents.length === 0 && (
-                    <span className="text-xs text-muted-foreground">（暂无 Agent）</span>
+                  {selectedSkill.usage_agents.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="text-xs text-muted-foreground">调用方：</span>
+                      {selectedSkill.usage_agents.map((k) => (
+                        <Badge key={k} variant="secondary" className="text-xs font-normal">{k}</Badge>
+                      ))}
+                    </div>
                   )}
+                  {usageLoading ? (
+                    <p className="text-xs text-muted-foreground">加载调用明细…</p>
+                  ) : usageCalls.length > 0 ? (
+                    <div className="rounded-md border">
+                      <div className="border-b px-2 py-1 text-xs text-muted-foreground">最近 {usageCalls.length} 次调用</div>
+                      <div className="max-h-56 overflow-y-auto">
+                        {usageCalls.map((c, i) => (
+                          <div key={`${c.ts}-${i}`} className="flex items-center gap-2 border-b px-2 py-1 text-xs last:border-b-0">
+                            <span className="tabular-nums text-muted-foreground">{fmtTime(c.ts)}</span>
+                            <Badge variant="outline" className="font-normal">{c.agent_key || "—"}</Badge>
+                            <span className="ml-auto text-muted-foreground">
+                              {c.task_id > 0 ? `任务 #${c.task_id}` : c.session_id ? "对话会话" : "—"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">还没有调用记录。</p>
+                  )}
+                </div>
+
+                {/* ── 左侧：关联 MCP + 可见性 ── */}
+                <div className="space-y-5 lg:min-w-0 lg:flex-1">
+                  <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">
+                      关联 MCP
+                      <span className="ml-1 font-normal">（加载 Skill 时才披露/解锁其工具）</span>
+                    </Label>
+                    {mcpOptions.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">暂无 MCP，可在「MCP」页添加。</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        {mcpOptions.map((m) => (
+                          <label key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                            <Checkbox
+                              checked={detailMcps.includes(m.name)}
+                              onCheckedChange={(on) => toggleSkillMcp(selectedSkill.name, m.name, !!on)}
+                            />
+                            {m.name}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">可见性（按 Agent 授权）</Label>
+                    <div className="space-y-2">
+                      {agents.map((a) => (
+                        <label key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
+                          <Checkbox
+                            checked={(visibility[selectedSkill.name] ?? []).includes(a.id)}
+                            onCheckedChange={() => toggleVisibility(selectedSkill.name, a.id, a.name)}
+                          />
+                          {a.name}
+                        </label>
+                      ))}
+                      {agents.length === 0 && (
+                        <span className="text-xs text-muted-foreground">（暂无 Agent）</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
