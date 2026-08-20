@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 
@@ -677,6 +678,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
+	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
@@ -1893,6 +1895,110 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		dto.Inherited = inherited
 	}
 	writeJSON(w, 200, dto)
+}
+
+// findingsExport 导出发现页的漏洞。
+//
+//	scope   = filtered（沿用页面筛选）| all（全部）| selected（勾选的 ids）
+//	format  = md-single（整合一份 .md）| md-zip（一漏洞一 .md,打包 zip）
+//	          | csv | json
+//	ids     = 逗号分隔的 finding id（scope=selected 时必填）
+//	筛选参数 severity/status/vulnclass/task_id/sort 与列表接口一致（scope=filtered 用）。
+func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	scope := q.Get("scope")
+	format := q.Get("format")
+
+	var ids []int64
+	var filter db.FindingFilter
+	switch scope {
+	case "selected":
+		for _, part := range strings.Split(q.Get("ids"), ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || id <= 0 {
+				writeErr(w, 400, "bad finding id: "+part)
+				return
+			}
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			writeErr(w, 400, "no findings selected")
+			return
+		}
+	case "all":
+		// 空 filter = 不加任何条件。
+	case "filtered", "":
+		filter = db.FindingFilter{
+			Severity:  normFilter(q.Get("severity")),
+			Status:    normFilter(q.Get("status")),
+			VulnClass: normFilter(q.Get("vulnclass")),
+			TaskID:    normFilter(q.Get("task_id")),
+			Sort:      q.Get("sort"),
+		}
+	default:
+		writeErr(w, 400, "bad scope: "+scope)
+		return
+	}
+
+	fs, err := s.m.pg.ListFindingsForExport(filter, ids)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	now := time.Now()
+	stamp := now.Format("20060102-150405")
+	setDownload := func(contentType, filename string) {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	}
+
+	switch format {
+	case "md-single":
+		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
+		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
+	case "md-zip":
+		setDownload("application/zip", "findings-"+stamp+".zip")
+		zw := zip.NewWriter(w)
+		used := map[string]int{}
+		for _, f := range fs {
+			base := report.FindingFilename(f)
+			name := base
+			// 去重:同名文件追加 -2、-3……
+			if n := used[base]; n > 0 {
+				name = fmt.Sprintf("%s-%d.md", strings.TrimSuffix(base, ".md"), n+1)
+			}
+			used[base]++
+			fw, werr := zw.Create(name)
+			if werr != nil {
+				log.Printf("[findings-export] zip create %s: %v", name, werr)
+				continue
+			}
+			_, _ = fw.Write([]byte(report.SingleFindingMarkdown(f, now)))
+		}
+		if cerr := zw.Close(); cerr != nil {
+			log.Printf("[findings-export] zip close: %v", cerr)
+		}
+	case "csv":
+		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
+		_, _ = w.Write(report.FindingsCSV(fs))
+	case "json":
+		assets := s.resolveFindingAssets(fs)
+		out := make([]FindingDTO, 0, len(fs))
+		for _, f := range fs {
+			out = append(out, findingFromDB(f, assets))
+		}
+		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(out)
+	default:
+		writeErr(w, 400, "bad format: "+format)
+	}
 }
 
 func findingProvenanceInTask(contextTask *Task, findingTaskID *int64) (sourceTaskID string, inherited, allowed bool) {

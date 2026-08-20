@@ -20,6 +20,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
+import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
 import { FindingLineageView } from "./lineage";
 import { statusMeta } from "@/lib/status";
@@ -208,8 +209,11 @@ function FindingDetailInner() {
               </Card>
               {/* 证据下方：详细报告(Markdown 渲染) */}
               <Card>
-                <CardHeader>
+                <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm">详细报告</CardTitle>
+                  {finding.report && (
+                    <CopyButton text={finding.report} successMessage="已复制详细报告" />
+                  )}
                 </CardHeader>
                 <CardContent>
                   {finding.report ? (

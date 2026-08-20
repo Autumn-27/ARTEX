@@ -360,6 +360,44 @@ export const api = {
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
+  // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
+  exportFindings: async (opts: {
+    format: "md-single" | "md-zip" | "csv" | "json";
+    scope: "filtered" | "all" | "selected";
+    filters?: Omit<FindingQuery, "page" | "pageSize">;
+    ids?: string[];
+  }) => {
+    const p = new URLSearchParams({ format: opts.format, scope: opts.scope });
+    if (opts.scope === "selected") {
+      p.set("ids", (opts.ids ?? []).join(","));
+    } else if (opts.scope === "filtered" && opts.filters) {
+      const f = opts.filters;
+      if (f.severity && f.severity !== "all") p.set("severity", f.severity);
+      if (f.status && f.status !== "all") p.set("status", f.status);
+      if (f.vulnclass && f.vulnclass !== "all") p.set("vulnclass", f.vulnclass);
+      if (f.task && f.task !== "all") p.set("task_id", f.task);
+      if (f.sort) p.set("sort", f.sort);
+    }
+    const token = getToken();
+    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) throw new Error(`export: ${r.status}`);
+    const blob = await r.blob();
+    // 文件名优先取后端 Content-Disposition,取不到则用默认名。
+    const disp = r.headers.get("Content-Disposition") ?? "";
+    const m = disp.match(/filename="?([^"]+)"?/);
+    const filename = m?.[1] ?? `findings-export`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   getFinding: (id: string, contextTaskId?: string) =>
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
