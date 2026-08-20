@@ -41,7 +41,7 @@
 ### 贡献者
 
 - [@Autumn-27](https://github.com/Autumn-27)
-- pphua
+- [@neouks](https://github.com/neouks)
 
 [Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.2...HEAD
 [0.3.2]: https://github.com/Autumn-27/ARTEX/compare/v0.3.1...v0.3.2
