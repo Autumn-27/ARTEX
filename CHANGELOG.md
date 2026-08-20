@@ -2,7 +2,7 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased] - 2026-08-20
+## [0.3.2] - 2026-08-20
 
 ### Added
 
@@ -23,9 +23,13 @@
 - 任务详情页按真实 LLM 调用状态展示运行、空闲和暂停状态；来源任务的事实、漏洞、意图、资产引用和图谱节点统一标记来源并保持只读。
 - Agent 预览、任务报告和相关详情视图统一使用共享 Markdown 渲染组件。
 - LLM 模型配置采用卡片和抽屉交互，模型列表在抽屉内支持独立滚动。
+- 任务暂停不再拦截主 Agent 对话：主 Agent 编排会话独立于任务暂停，暂停中仍可继续发送新消息（暂停只终止当前进行中的那一轮）。
+- Worker 单次 run 的墙钟默认时长由 600 秒调整为 1200 秒。
 
 ### Fixed
 
+- 移除主 Agent 控制台的乐观回显，改为纯服务端数据渲染，修复暂停或发送失败等场景下消息错乱、串入其他会话内容的问题。
+- 打开主 Agent 会话默认滚动到底并完整显示最后一条回复：最后一条回复的完整内容懒加载展开后自动贴底，不再被顶出屏幕。
 - 修复暂停任务后主 Agent 会话仍继续运行，以及编排 Agent 暂停任务时未同步停止主 Agent 的问题。
 - 修复任务完成、Planner、Worker 或主 Agent 实际运行时，任务状态徽标与操作按钮状态不同步的问题。
 - 修复 Worker 取消、任务删除和并发写入之间可能产生迟到黑板写入或残留文件的问题。
@@ -34,4 +38,10 @@
 - 修复后端关闭时父 context 可能抢先覆盖具名 `shutdown` 原因的竞态，以及中文活动摘要按字节截断导致乱码的问题。
 - 修复带部分流式输出的取消事件丢失真实终止原因的问题，同时保留取消前已生成的内容。
 
-[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.1...HEAD
+### 贡献者
+
+- [@Autumn-27](https://github.com/Autumn-27)
+- pphua
+
+[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Autumn-27/ARTEX/compare/v0.3.1...v0.3.2
