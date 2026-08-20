@@ -6,10 +6,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/artex/db"
 )
 
 // captureRun drives one agent turn-to-completion over Session.Prompt and emits a
@@ -65,9 +65,6 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		tkind = kind
 		tbuf.WriteString(text)
 	}
-
-	// breadcrumbs for the terminal message: when a run is aborted or times out,
-	// "which tool was still running, for how long" is the whole diagnosis.
 	lastTool := &runTrace{startedAt: time.Now()}
 
 	var finalText string
@@ -75,7 +72,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	for ev, err := range s.Prompt(ctx, input) {
 		if err != nil {
 			flush()
-			if ctx.Err() != nil { // ctx cancelled = stopped by the engine, not a failure
+			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
 				rec(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail})
 				return finalText, reason, ctx.Err()
@@ -130,7 +127,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				}
 				flush() // flush any trailing thinking / non-final text
 				sum, detail := ev.Terminal.Text, ev.Terminal.Text
-				if sum == "" {
+				if sum == "" || ev.Terminal.Reason == harness.ReasonAbortedTools || ev.Terminal.Reason == harness.ReasonAbortedStreaming {
 					sum, detail = terminalText(ctx, ev.Terminal, lastTool)
 				}
 				u := ev.Terminal.Usage // cumulative token usage for this session
@@ -162,9 +159,7 @@ func blocksText(blocks []llm.ContentBlock) string {
 	return b.String()
 }
 
-// firstLine returns a single-line, length-capped preview for the summary column.
-// max counts RUNES, not bytes: these previews are mostly 中文, and byte-slicing
-// used to cut a multi-byte rune in half and render as "恢�…".
+// firstLine returns a single-line, rune-capped preview for the summary column.
 func firstLine(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if before, _, found := strings.Cut(s, "\n"); found {

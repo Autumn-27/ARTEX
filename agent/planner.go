@@ -24,6 +24,7 @@ type Planner struct {
 	model       string
 	tx          *transcript.Store                      // raw LLM conversation persistence (nil = off)
 	window      int                                    // context window in tokens (for compaction)
+	windowFn    func() int                             // optional dynamic task-chain minimum
 	maxTurns    int                                    // max agent turns per run (0 = unlimited)
 	killWork    func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork   func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
@@ -42,6 +43,15 @@ type Planner struct {
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
 	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
+}
+
+func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+func (p *Planner) compactionWindow() int {
+	if p.windowFn != nil {
+		return p.windowFn()
+	}
+	return p.window
 }
 
 // SetProxy points the planner's WebFetch at the recording proxy plus the CA cert
@@ -94,10 +104,11 @@ func renderPlannerTodos(items []actool.Todo) string {
 // TriggerEvent describes what concretely caused this planning round to fire, so
 // the planner looks first at the actual change instead of re-scanning the whole
 // overview. Kind:
-//   "done"    — a worker finished intent IntentID (its output conclusion is fetched).
-//   "finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
-//   "goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
-//               single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
+//
+//	"done"    — a worker finished intent IntentID (its output conclusion is fetched).
+//	"finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
+//	"goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
+//	            single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
 type TriggerEvent struct {
 	Kind     string
 	IntentID int64
@@ -308,7 +319,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		ToolOutputDir:      cmdOutDir(taskDir),
 		MaxTurns:           p.maxTurns, // 0 = unlimited (configurable in agent management)
 		MaxDuration:        maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
-		Compaction:         compactionConfig(p.window),
+		Compaction:         compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、

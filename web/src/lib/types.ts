@@ -15,6 +15,7 @@ export interface Task {
   completed_unix?: number; // completed_at as unix seconds (0/undef if unfinished)
   last_activity_unix?: number; // unix seconds of the last activity (0/undef if none)
   paused?: boolean;
+  queued?: boolean;
   active?: boolean;
   in_flight?: number;
   last_activity?: string;
@@ -24,6 +25,30 @@ export interface Task {
   engine_mode?: EngineMode;
   tokens?: TokenTotal; // whole-task token consumption
   llm_profile_id?: number; // LLM profile used; absent = default profile
+  llm_profile_ids?: number[]; // ordered task-level failover chain
+  active_llm_profile_id?: number; // profile used by the next LLM call
+  llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
+  llm_failover_reason?: string;
+  source_task_ids?: string[]; // directly related tasks inherited as read-only context
+}
+
+export interface DeleteTaskOptions {
+  delete_assets: boolean;
+  delete_traffic: boolean;
+  delete_files: boolean;
+  delete_findings: boolean;
+  delete_llm_records: boolean;
+}
+
+export interface DeleteTaskResult {
+  deleted: string;
+  assets_deleted: number;
+  assets_detached: number;
+  traffic_deleted: number;
+  files_deleted: boolean;
+  findings_deleted: number;
+  llm_records_deleted: number;
+  cleanup_warning?: string;
 }
 
 // ---- Asset graph (global, shared across tasks) ----
@@ -171,6 +196,8 @@ export interface CoverageAssetRef {
   kind: string;
   state: string;
   summary: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 export interface CoverageAssetRefs {
   intents: CoverageAssetRef[];
@@ -234,6 +261,8 @@ export interface TaskNode {
   state: string; // GoalState | IntentState | FindingState | HintState
   origin: string;
   ts: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 
 // ---- Findings ----
@@ -271,6 +300,8 @@ export interface Finding {
   param_id?: string;
   task_id?: string;
   task_description?: string;
+  source_task_id?: string;
+  inherited?: boolean;
   assets?: FindingAsset[];
   ts: string;
 }
@@ -325,6 +356,8 @@ export type ActivityKind =
   | "intent"            // LLM-generated exploration objective leading a worker session (UI-synthesized)
   | "round"             // planner round boundary marker (engine-emitted)
   | "usage"             // live cumulative token usage (per model turn); not rendered
+  | "llm_switch"        // automatic/manual task-level LLM switch
+  | "llm_failover"      // task-level provider switch / chain exhaustion audit event
   | "intercept_request"; // user-approval request from the intercept layer
 
 // ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
@@ -346,11 +379,30 @@ export interface Activity {
   is_error?: boolean;
   summary: string;
   detail?: string;
+  metadata?: {
+    llm_transition?: LLMTransition;
+  };
+  source_task_id?: string;
+  inherited?: boolean;
   // token usage (present only on kind='result')
   input_tokens?: number;
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+}
+
+export interface LLMAuditProfile {
+  id: number;
+  name: string;
+  format: string;
+  model: string;
+}
+
+export interface LLMTransition {
+  mode: "automatic" | "manual" | "exhausted";
+  reason: string;
+  previous?: LLMAuditProfile;
+  next?: LLMAuditProfile;
 }
 
 // ---- Agent triggers (P3 调度，仅自定义 agent) ----
@@ -394,8 +446,8 @@ export interface LogLine {
   text: string;
 }
 
-export type SessionRole = "mainagent" | "planner" | "worker";
-export type SessionStatus = "running" | "done" | "blocked" | "exhausted" | "pending" | "stopped";
+export type SessionRole = "mainagent" | "planner" | "worker" | "system";
+export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped";
 
 // Daily token aggregate bucket (GET /api/tokens/daily).
 export interface DailyTokenBucket {
@@ -431,6 +483,8 @@ export interface Session {
   live: boolean;
   last_activity: string;
   intent_id?: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 
 // ---- Security ----
@@ -669,6 +723,7 @@ export interface Stats {
   llm_configured: boolean;
   roe_enabled: boolean;
   findings_confirmed: number;
+  active_task?: Partial<Task>;
 }
 
 // ---- Intercept Rules ----

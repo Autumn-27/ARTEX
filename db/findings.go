@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// DBFinding is a row in the standalone findings table (persists across task deletion).
+// DBFinding is a row in the standalone findings table. It persists across task
+// deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
 	ID              int64
 	TaskID          *int64

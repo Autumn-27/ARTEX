@@ -16,6 +16,27 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
+type taskIDContextKey struct{}
+
+// WithTaskID attaches the owning task registry id to an LLM call. Session ids
+// are based on exploration ids, which are not interchangeable with task ids.
+func WithTaskID(ctx context.Context, taskID string) context.Context {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, taskIDContextKey{}, taskID)
+}
+
+// TaskIDFrom returns the explicit task registry id attached by the task runtime.
+func TaskIDFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	taskID, _ := ctx.Value(taskIDContextKey{}).(string)
+	return strings.TrimSpace(taskID)
+}
+
 // Recorder wraps an llm.Provider and records every completion call.
 type Recorder struct {
 	inner   llm.Provider
@@ -70,7 +91,13 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
-	taskID, worker := parseSession(session)
+	parsedID, worker := parseSession(session)
+	taskID := TaskIDFrom(ctx)
+	if taskID == "" {
+		// Backward compatibility for non-task callers. For task calls, the task
+		// runtime always supplies the registry id explicitly.
+		taskID = parsedID
+	}
 
 	// Serialize the request for storage.
 	reqBody := serializeRequest(req)
@@ -120,7 +147,9 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 }
 
-// record persists one LLM call to PostgreSQL (async, best-effort).
+// record persists one LLM call to PostgreSQL before the provider stream returns.
+// Keeping the write inside the owning task operation means task deletion can
+// drain calls and then remove records without a late async insert recreating one.
 func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, reqBody string, start time.Time, text, thinking string, usage llm.Usage, stopReason string, streamErr error) {
 	latency := int(time.Since(start).Milliseconds())
 	status := "ok"
@@ -169,11 +198,9 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 		ResponseBody: string(respBody),
 	}
 
-	go func() {
-		if err := r.pg.InsertLLMRecord(rec); err != nil {
-			log.Printf("[llmrec] insert: %v", err)
-		}
-	}()
+	if err := r.pg.InsertLLMRecord(rec); err != nil {
+		log.Printf("[llmrec] insert: %v", err)
+	}
 }
 
 // serializeRequest builds a JSON representation of the completion request.

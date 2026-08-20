@@ -217,7 +217,6 @@ func (s *Server) reattribute(w http.ResponseWriter, r *http.Request) {
 // GET /api/assets
 // =====================================================================
 
-// defaultAssetPageSize is the page size used when the caller omits ?limit.
 const defaultAssetPageSize = 50
 
 func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
@@ -230,8 +229,6 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	typ := q.Get("type")
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	// limit/offset are page controls, not a cap: `total` always reports the full
-	// match count so callers can page through everything.
 	if limit <= 0 {
 		limit = defaultAssetPageSize
 	}
@@ -351,8 +348,8 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 		Assets []struct {
 			Type string `json:"type"`
 			// root_domain / subdomain
-			Domain      string `json:"domain"`
-			ICP         string `json:"icp"`
+			Domain      string   `json:"domain"`
+			ICP         string   `json:"icp"`
 			RecordType  string   `json:"record_type"`
 			RecordValue []string `json:"record_value"`
 			// ip

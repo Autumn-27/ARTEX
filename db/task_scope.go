@@ -347,23 +347,23 @@ func hostPortOf(n *CoverageGraphNode) (string, int) {
 	return host, port
 }
 
-// BuildCoverageGraph assembles the full coverage graph for a task: every in-scope
-// asset (all types) plus the connector root domains / companies needed to link
-// them, with a tested flag on each in-scope asset. The frontend does the folding
-// and highlighting; this only returns nodes + derived containment edges.
-func (s *AssetStore) BuildCoverageGraph(taskID, expID int64) (*CoverageGraphData, error) {
+// BuildCoverageGraph assembles the full coverage graph for a task and its direct
+// read-only sources: every in-scope asset plus connector root domains/companies,
+// with current-or-source fact anchors reflected in Tested. The legacy expID
+// argument is retained for API compatibility; the task registry is authoritative.
+func (s *AssetStore) BuildCoverageGraph(taskID, _ int64) (*CoverageGraphData, error) {
 	g := &CoverageGraphData{Nodes: []CoverageGraphNode{}, Edges: []CoverageGraphEdge{}}
 	if taskID <= 0 {
 		return g, nil
 	}
-	rows, err := s.db.Query(`WITH `+covTargetCTE+`
+	rows, err := s.db.Query(`WITH `+contextCoverageCTE+`
 SELECT a.id, a.type, COALESCE(a.company_id,0),
        COALESCE(a.domain,''), COALESCE(a.root_domain,''), COALESCE(a.ip,''),
        COALESCE(a.url,''), COALESCE(a.port,0), COALESCE(a.service_type,''),
        COALESCE(a.app_name,''), COALESCE(a.page_title,''), COALESCE(a.status_code,0),
        (a.id IN (SELECT asset_id FROM tested)) AS tested
 FROM assets a JOIN target t ON t.id = a.id
-ORDER BY a.id`, taskID, expID)
+ORDER BY a.id`, taskID)
 	if err != nil {
 		return nil, err
 	}

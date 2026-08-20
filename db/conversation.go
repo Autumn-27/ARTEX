@@ -69,10 +69,32 @@ func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 // CreateConversation opens a new chat thread for agentKey with an initial title.
 // llmProfileID may be nil to use the globally active profile.
 func (d *DB) CreateConversation(agentKey, title string, llmProfileID *int64) (*Conversation, error) {
-	c, err := scanConv(d.QueryRow(`
-INSERT INTO conversations(agent_key, title, llm_profile_id) VALUES ($1, $2, $3)
-RETURNING `+convCols, agentKey, title, llmProfileID))
+	tx, err := d.Begin()
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Insert the child without a profile first. The new row is exclusively owned
+	// by this transaction before it takes a profile lock, matching DeleteProfile's
+	// child-row -> profile-row protocol.
+	c, err := scanConv(tx.QueryRow(`
+INSERT INTO conversations(agent_key, title, llm_profile_id) VALUES ($1, $2, NULL)
+RETURNING `+convCols, agentKey, title))
+	if err != nil {
+		return nil, err
+	}
+	if err := lockLLMProfileForReference(tx, llmProfileID); err != nil {
+		return nil, err
+	}
+	if llmProfileID != nil {
+		c, err = scanConv(tx.QueryRow(`UPDATE conversations SET llm_profile_id=$2
+WHERE id=$1 RETURNING `+convCols, c.ID, llmProfileID))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &c, nil
@@ -80,8 +102,27 @@ RETURNING `+convCols, agentKey, title, llmProfileID))
 
 // UpdateConversationProfile sets (or clears) the LLM profile override for a conversation.
 func (d *DB) UpdateConversationProfile(id int64, llmProfileID *int64) error {
-	_, err := d.Exec(`UPDATE conversations SET llm_profile_id=$2 WHERE id=$1`, id, llmProfileID)
-	return err
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var lockedID int64
+	if err := tx.QueryRow(`SELECT id FROM conversations WHERE id=$1 FOR UPDATE`, id).Scan(&lockedID); err != nil {
+		if err == sql.ErrNoRows {
+			// Preserve the previous UPDATE semantics: an unknown id is a no-op.
+			return tx.Commit()
+		}
+		return err
+	}
+	if err := lockLLMProfileForReference(tx, llmProfileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET llm_profile_id=$2 WHERE id=$1`, id, llmProfileID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ListConversations returns all threads, most-recently-updated first.

@@ -199,12 +199,13 @@ func (s *Server) toolListTasks() actool.CoreTool {
 				if t.ParentRef != "" {
 					row["parent_ref"] = t.ParentRef
 				}
-				if t.LLMProfileID == nil {
+				llmState := t.llmStateSnapshot()
+				if llmState.ProfileID == nil {
 					row["llm_profile"] = "(激活配置)"
-				} else if n, ok := profName[*t.LLMProfileID]; ok {
+				} else if n, ok := profName[*llmState.ProfileID]; ok {
 					row["llm_profile"] = n
 				} else {
-					row["llm_profile"] = fmt.Sprintf("#%d(已删除)", *t.LLMProfileID)
+					row["llm_profile"] = fmt.Sprintf("#%d(已删除)", *llmState.ProfileID)
 				}
 				out = append(out, row)
 			}
@@ -305,6 +306,7 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 				return actool.Errorf("task 不存在: " + a.TaskID), nil
 			}
 			s.engine.Pause(a.TaskID, agent.AbortPausedByOrchestrator)
+			s.cancelTaskChat(a.TaskID, agent.AbortChatPausedWithTask)
 			return actool.Text("task paused: " + a.TaskID), nil
 		})
 }
@@ -419,7 +421,7 @@ func (s *Server) deriveTaskStatus(t *Task) string {
 		return t.Status
 	case t.Paused || s.engine.IsPaused(t.ID):
 		return "paused"
-	case s.engine.Ready() && s.engine.Started(t.ID):
+	case s.engine.ReadyFor(t) && s.engine.Started(t.ID):
 		return "running"
 	}
 	return "created"

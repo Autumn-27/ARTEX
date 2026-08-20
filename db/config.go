@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -133,9 +136,236 @@ VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$
 	return p.ID, err
 }
 
+var (
+	ErrActiveLLMProfileDelete      = errors.New("cannot delete the active LLM profile; activate another profile first")
+	ErrLLMProfileReferencesChanged = errors.New("LLM profile references changed while deleting; retry the request")
+	ErrLLMProfileNotFound          = errors.New("LLM profile not found")
+)
+
 func (d *DB) DeleteProfile(id int64) error {
-	_, err := d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, id)
-	return err
+	return d.DeleteProfileContext(context.Background(), id)
+}
+
+// DeleteProfileContext removes a non-default profile while preserving the task
+// failover cursor. Reference changes are retried because a task, agent, or
+// conversation may start pointing at the profile between the initial scan and
+// the profile row lock. A bound prevents a continuously changing workload from
+// keeping an HTTP request alive forever.
+func (d *DB) DeleteProfileContext(ctx context.Context, id int64) error {
+	const (
+		maxAttempts = 8
+		maxDuration = 15 * time.Second
+	)
+	ctx, cancel := context.WithTimeout(ctx, maxDuration)
+	defer cancel()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		retry, err := d.deleteProfile(ctx, id)
+		if err != nil || !retry {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: profile %d", ErrLLMProfileReferencesChanged, id)
+}
+
+func (d *DB) deleteProfile(ctx context.Context, id int64) (bool, error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	// Reference setters lock their task/agent/conversation row before an
+	// llm_profiles row can be locked by a foreign-key check. Keep deletion in the
+	// same order: the old profile -> child order deadlocked with a setter's child
+	// -> profile order. Sorting also gives concurrent profile deletions a stable
+	// order when their chains overlap multiple tasks.
+	lockedTasks, err := lockProfileReferenceRows(ctx, tx, `SELECT t.id
+FROM tasks t
+WHERE t.llm_profile_id=$1
+   OR t.active_llm_profile_id=$1
+   OR EXISTS (
+       SELECT 1 FROM task_llm_profiles x
+       WHERE x.task_id=t.id AND x.profile_id=$1
+   )
+ORDER BY t.id
+FOR UPDATE OF t`, id)
+	if err != nil {
+		return false, err
+	}
+	lockedAgents, err := lockProfileReferenceRows(ctx, tx, `SELECT id FROM agents
+WHERE llm_profile_id=$1
+ORDER BY id
+FOR UPDATE`, id)
+	if err != nil {
+		return false, err
+	}
+	lockedConversations, err := lockProfileReferenceRows(ctx, tx, `SELECT id FROM conversations
+WHERE llm_profile_id=$1
+ORDER BY id
+FOR UPDATE`, id)
+	if err != nil {
+		return false, err
+	}
+
+	var isDefault bool
+	if err := tx.QueryRowContext(ctx, `SELECT is_default FROM llm_profiles WHERE id=$1 FOR UPDATE`, id).Scan(&isDefault); err != nil {
+		if err == sql.ErrNoRows {
+			return false, ErrLLMProfileNotFound
+		}
+		return false, err
+	}
+	if isDefault {
+		return false, ErrActiveLLMProfileDelete
+	}
+
+	type affectedTask struct {
+		id        int64
+		position  int
+		wasActive bool
+	}
+	// A task may have committed a new reference after the first statement took
+	// its snapshot but before this transaction acquired the profile lock. The
+	// profile lock now prevents further references; retry if that committed task
+	// was not part of the task-first lock set. Never acquire a new task lock while
+	// holding the profile lock, because that would recreate the inversion.
+	rows, err := tx.QueryContext(ctx, `SELECT ref_kind, ref_id FROM (
+	SELECT 'task'::text AS ref_kind, t.id AS ref_id
+FROM tasks t
+WHERE t.llm_profile_id=$1
+   OR t.active_llm_profile_id=$1
+   OR EXISTS (
+       SELECT 1 FROM task_llm_profiles x
+       WHERE x.task_id=t.id AND x.profile_id=$1
+   )
+	UNION ALL
+	SELECT 'agent', a.id FROM agents a WHERE a.llm_profile_id=$1
+	UNION ALL
+	SELECT 'conversation', c.id FROM conversations c WHERE c.llm_profile_id=$1
+) refs
+ORDER BY ref_kind, ref_id`, id)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var (
+			kind  string
+			rowID int64
+		)
+		if err := rows.Scan(&kind, &rowID); err != nil {
+			rows.Close()
+			return false, err
+		}
+		locked := false
+		switch kind {
+		case "task":
+			_, locked = lockedTasks[rowID]
+		case "agent":
+			_, locked = lockedAgents[rowID]
+		case "conversation":
+			_, locked = lockedConversations[rowID]
+		}
+		if !locked {
+			rows.Close()
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT x.task_id, x.position, COALESCE(t.active_llm_profile_id=$1, false)
+FROM task_llm_profiles x
+JOIN tasks t ON t.id=x.task_id
+WHERE x.profile_id=$1
+ORDER BY x.task_id`, id)
+	if err != nil {
+		return false, err
+	}
+	var affected []affectedTask
+	for rows.Next() {
+		var task affectedTask
+		if err := rows.Scan(&task.id, &task.position, &task.wasActive); err != nil {
+			rows.Close()
+			return false, err
+		}
+		affected = append(affected, task)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM llm_profiles WHERE id=$1`, id); err != nil {
+		return false, err
+	}
+	// Only a successor after the deleted cursor is eligible. If there is none,
+	// clear the explicit chain so the task falls back to its Agent/global provider;
+	// profiles before a manually selected cursor must never be revived.
+	for _, task := range affected {
+		if !task.wasActive {
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET llm_chain_revision=llm_chain_revision+1 WHERE id=$1`, task.id); err != nil {
+				return false, err
+			}
+			continue
+		}
+		var next int64
+		err := tx.QueryRowContext(ctx, `SELECT profile_id FROM task_llm_profiles
+WHERE task_id=$1 AND position>$2 AND status='ready'
+ORDER BY position
+LIMIT 1`, task.id, task.position).Scan(&next)
+		if err != nil && err != sql.ErrNoRows {
+			return false, err
+		}
+		if err == sql.ErrNoRows {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM task_llm_profiles WHERE task_id=$1`, task.id); err != nil {
+				return false, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks
+SET active_llm_profile_id=NULL, llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
+WHERE id=$1`, task.id); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks
+SET active_llm_profile_id=$2, llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
+WHERE id=$1`, task.id, next); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func lockProfileReferenceRows(ctx context.Context, tx *sql.Tx, query string, profileID int64) (map[int64]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, query, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	locked := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		locked[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return locked, nil
 }
 
 // SetActiveProfile makes one profile the global default (single-default invariant).
@@ -148,8 +378,12 @@ func (d *DB) SetActiveProfile(id int64) error {
 	if _, err := tx.Exec(`UPDATE llm_profiles SET is_default=false WHERE is_default`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE llm_profiles SET is_default=true WHERE id=$1`, id); err != nil {
+	res, err := tx.Exec(`UPDATE llm_profiles SET is_default=true WHERE id=$1`, id)
+	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrLLMProfileNotFound
 	}
 	return tx.Commit()
 }
@@ -313,8 +547,45 @@ func (d *DB) SetAgentMaxTurns(key string, maxTurns int) error {
 // the binding (id == nil) so the agent follows the task/conversation pin, else the
 // global active profile. Precedence at runtime: agent binding → task/conv pin → active.
 func (d *DB) SetAgentLLMProfile(key string, id *int64) error {
-	_, err := d.Exec(`UPDATE agents SET llm_profile_id=$1 WHERE key=$2`, id, key)
-	return err
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// DeleteProfile locks reference rows before the profile row. Keep the same
+	// order here so a concurrent rebind cannot form a child/profile deadlock.
+	var agentID int64
+	if err := tx.QueryRow(`SELECT id FROM agents WHERE key=$1 FOR UPDATE`, key).Scan(&agentID); err != nil {
+		if err == sql.ErrNoRows {
+			// Preserve the previous UPDATE semantics: an unknown key is a no-op.
+			return tx.Commit()
+		}
+		return err
+	}
+	if err := lockLLMProfileForReference(tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE agents SET llm_profile_id=$1 WHERE id=$2`, id, agentID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// lockLLMProfileForReference makes the profile side of the shared lock-order
+// protocol explicit. Callers must already own the referencing child row.
+func lockLLMProfileForReference(tx *sql.Tx, profileID *int64) error {
+	if profileID == nil {
+		return nil
+	}
+	var lockedID int64
+	if err := tx.QueryRow(`SELECT id FROM llm_profiles WHERE id=$1 FOR KEY SHARE`, *profileID).Scan(&lockedID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrLLMProfileNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // SetAgentWebSearch toggles whether an agent uses network search (still gated by

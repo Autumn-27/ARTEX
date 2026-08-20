@@ -6,7 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
-  Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, Severity, FindingStatus,
+  Task, DeleteTaskOptions, DeleteTaskResult, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, Severity, FindingStatus,
   FindingsPage, FindingStats, FindingQuery, Activity,
   Audit, TrafficResp, TrafficDetail, TrafficHost, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
   PromptVersion, MCPServer, MCPTool, SkillItem, TokenUsage, TokenTotal, DailyTokenBucket,
@@ -41,7 +41,19 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error("未授权");
   }
-  if (!r.ok) throw new Error(`${init?.method ?? "GET"} ${path}: ${r.status}`);
+  if (!r.ok) {
+    const fallback = `${init?.method ?? "GET"} ${path}: ${r.status}`;
+    let message = fallback;
+    try {
+      const payload = (await r.json()) as { error?: unknown };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        message = payload.error.trim();
+      }
+    } catch {
+      // Keep the status-based fallback for empty or non-JSON error responses.
+    }
+    throw new Error(message);
+  }
   if (r.status === 204) return undefined as T;
   return r.json();
 }
@@ -113,26 +125,45 @@ export const api = {
 
   // ---- tasks ----
   tasks: () => get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
-  createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number, seedFirstIntent?: boolean, planHeartbeatSeconds?: number) =>
+  createTask: (input: {
+    description: string;
+    goal: string;
+    llmProfileIds?: number[];
+    sourceTaskIds?: string[];
+    timeoutSeconds?: number;
+    seedFirstIntent?: boolean;
+    planHeartbeatSeconds?: number;
+  }) =>
     post<Task>("/tasks", {
-      description,
-      goal,
-      llm_profile_id: llmProfileId ?? null,
-      timeout_seconds: timeoutSeconds ?? 0,
-      seed_first_intent: seedFirstIntent ?? false,
-      plan_heartbeat_seconds: planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
+      description: input.description,
+      goal: input.goal,
+      llm_profile_ids: input.llmProfileIds ?? [],
+      source_task_ids: input.sourceTaskIds ?? [],
+      timeout_seconds: input.timeoutSeconds ?? 0,
+      seed_first_intent: input.seedFirstIntent ?? false,
+      plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
     }),
-  // 删除任务;opts 里的四个可选项默认不删:assets 关联资产、findings 发现漏洞、
-  // traffic 测试流量(按任务 host 清)、files 测试过程写的文件(tasks/<id> 目录)。
-  deleteTask: (
-    id: string,
-    opts?: { assets?: boolean; findings?: boolean; traffic?: boolean; files?: boolean },
-  ) =>
-    del<{ deleted: string; assets_deleted?: number; findings_deleted?: number; traffic_deleted?: number; files_deleted?: boolean }>(
-      `/tasks/${id}`,
-      opts,
-    ),
+  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
+    put<{
+      id: string;
+      llm_profile_ids: number[];
+      active_llm_profile_id?: number;
+      llm_failover_state: string;
+      reopened_intents: number;
+      switch_event?: Activity;
+    }>(`/tasks/${id}/llm`, {
+      llm_profile_ids: llmProfileIds,
+      active_llm_profile_id: activeLLMProfileId ?? null,
+    }),
+  deleteTask: (id: string, options: DeleteTaskOptions) =>
+    del<DeleteTaskResult>(`/tasks/${id}`, options),
   controlTask: (id: string, action: "pause" | "resume") => post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),
+  controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel") =>
+    post<{
+      id: number;
+      state: "paused" | "open" | "cancelled";
+      deleted?: { intents: number; facts: number; findings: number; activities: number };
+    }>(`/tasks/${taskId}/intents/${intentId}/control`, { action }),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),
   // 批量重跑本任务全部 blocked 意图（一次网络/LLM 断连导致多条 blocked 时一键全部重试）。
@@ -257,7 +288,10 @@ export const api = {
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
-  getFinding: (id: string) => get<Finding>(`/exploration/findings/${id}`),
+  getFinding: (id: string, contextTaskId?: string) =>
+    get<Finding>(
+      `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
+    ),
   // 漏洞链路:该漏洞节点回溯到任务初始节点的子图(节点 + 关系)。
   findingLineage: (id: string) =>
     get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/findings/${id}/lineage`),

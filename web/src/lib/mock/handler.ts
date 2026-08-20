@@ -2,9 +2,17 @@
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
 
+import type { Task } from "../types";
 import * as D from "./data";
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
+
+// Requests mutate a runtime copy, never the exported fixtures. This keeps module
+// initialization deterministic for tests/HMR while preserving state across mock calls.
+const mockTasks = structuredClone(D.tasks);
+const mockFindings = structuredClone(D.findings);
+const mockLLMRecords = structuredClone(D.llmRecords);
+let mockActiveTask = D.ACTIVE_TASK;
 
 function parseBody(body?: BodyInit | null): Record<string, unknown> {
   if (typeof body !== "string") return {};
@@ -34,13 +42,107 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/auth/change-password") return { ok: true };
 
   // ── tasks ──
-  if (path === "/tasks" && m === "GET") return { tasks: D.tasks, active: D.ACTIVE_TASK };
-  if (path === "/tasks" && m === "POST")
-    return { ...D.tasks[0], id: "t-new", description: String(b.description ?? "新任务"), goal: String(b.goal ?? ""), status: "created" };
-  if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") return { deleted: 1 };
+  if (path === "/tasks" && m === "GET") return { tasks: mockTasks, active: mockActiveTask };
+  if (path === "/tasks" && m === "POST") {
+    let suffix = 1;
+    while (mockTasks.some((item) => item.id === `t-new-${suffix}`)) suffix++;
+    const id = `t-new-${suffix}`;
+    const now = new Date();
+    const profileIDs = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
+    const sourceTaskIDs = [...((b.source_task_ids as string[] | undefined) ?? [])];
+    const created: Task = {
+      id,
+      description: String(b.description ?? "新任务"),
+      goal: String(b.goal ?? ""),
+      status: "created",
+      created_at: now.toISOString(),
+      created_unix: Math.floor(now.getTime() / 1000),
+      paused: false,
+      active: true,
+      in_flight: 0,
+      stalled: false,
+      goals_total: 0,
+      goals_met: 0,
+      engine_mode: "idle",
+      tokens: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
+      llm_profile_id: profileIDs[0],
+      llm_profile_ids: profileIDs,
+      active_llm_profile_id: profileIDs[0],
+      llm_failover_state: profileIDs.length ? "ready" : "default",
+      source_task_ids: sourceTaskIDs,
+    };
+    for (const item of mockTasks) item.active = false;
+    mockTasks.unshift(created);
+    mockActiveTask = id;
+    return created;
+  }
+  if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") {
+    const id = seg[1];
+    const index = mockTasks.findIndex((item) => item.id === id);
+    if (index >= 0) mockTasks.splice(index, 1);
+
+    let findingsDeleted = 0;
+    if (b.delete_findings) {
+      for (let i = mockFindings.length - 1; i >= 0; i--) {
+        if (mockFindings[i].task_id !== id) continue;
+        mockFindings.splice(i, 1);
+        findingsDeleted++;
+      }
+    }
+
+    let llmRecordsDeleted = 0;
+    if (b.delete_llm_records) {
+      for (let i = mockLLMRecords.length - 1; i >= 0; i--) {
+        if (mockLLMRecords[i].task_id !== id) continue;
+        mockLLMRecords.splice(i, 1);
+        llmRecordsDeleted++;
+      }
+    }
+
+    if (mockActiveTask === id) {
+      const nextActive = mockTasks[0]?.id ?? "";
+      mockActiveTask = nextActive;
+      for (const item of mockTasks) item.active = item.id === nextActive;
+    }
+    return {
+      deleted: id,
+      assets_deleted: b.delete_assets ? 1 : 0,
+      assets_detached: 0,
+      traffic_deleted: b.delete_traffic ? 1 : 0,
+      files_deleted: Boolean(b.delete_files),
+      findings_deleted: findingsDeleted,
+      llm_records_deleted: llmRecordsDeleted,
+    };
+  }
+  if (seg[0] === "tasks" && seg[2] === "llm" && m === "PUT") {
+    const ids = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
+    const activeID = typeof b.active_llm_profile_id === "number" ? b.active_llm_profile_id : ids[0];
+    const target = mockTasks.find((item) => item.id === seg[1]);
+    if (target) {
+      target.llm_profile_ids = ids;
+      target.llm_profile_id = ids[0];
+      target.active_llm_profile_id = activeID;
+      target.llm_failover_state = ids.length ? "ready" : "default";
+      target.llm_failover_reason = undefined;
+    }
+    return {
+      id: seg[1],
+      llm_profile_ids: ids,
+      active_llm_profile_id: activeID,
+      llm_failover_state: ids.length ? "ready" : "default",
+      reopened_intents: 0,
+    };
+  }
   if (seg[0] === "tasks" && seg[2] === "control") return { id: seg[1], paused: b.action === "pause" };
   if (seg[0] === "tasks" && seg[2] === "chat" && seg[3] === "stop") return { status: "stopped" };
-  if (path === "/active") return { active: String(b.id ?? D.ACTIVE_TASK) };
+  if (path === "/active") {
+    const id = String(b.id ?? mockActiveTask);
+    if (mockTasks.some((item) => item.id === id)) {
+      mockActiveTask = id;
+      for (const item of mockTasks) item.active = item.id === id;
+    }
+    return { active: mockActiveTask };
+  }
 
   // ── 覆盖度 / 覆盖图 / 资产关联（任务维度）──
   if (seg[0] === "tasks" && seg[2] === "coverage" && seg.length === 3) return D.coverage;
@@ -52,7 +154,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/workspace/read") return D.workspaceRead(q.get("path") ?? "");
 
   // ── stats ──
-  if (path === "/stats") return D.stats(task);
+  if (path === "/stats") {
+    return D.stats(task, { tasks: mockTasks, findings: mockFindings, activeTask: mockActiveTask });
+  }
 
   // ── assets ──
   if (path === "/assets/counts") return D.assetCounts;
@@ -74,10 +178,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── exploration ──
   if (path === "/exploration/frontier") return D.frontier;
   if (path === "/exploration/findings/stats") {
-    const vulnclasses = Array.from(new Set(D.findings.map((f) => f.vulnclass))).sort();
+    const vulnclasses = Array.from(new Set(mockFindings.map((f) => f.vulnclass))).sort();
     // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
     const taskMap = new Map<string, { description: string; count: number }>();
-    for (const f of D.findings) {
+    for (const f of mockFindings) {
       if (!f.task_id) continue;
       const cur = taskMap.get(f.task_id) ?? { description: f.task_description ?? "", count: 0 };
       cur.count++;
@@ -85,12 +189,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     const tasks = Array.from(taskMap, ([id, v]) => ({ id, description: v.description, count: v.count }));
     return {
-      total: D.findings.length,
-      pending: D.findings.filter((f) => f.status === "pending").length,
-      critical: D.findings.filter((f) => f.severity === "critical").length,
-      high: D.findings.filter((f) => f.severity === "high").length,
-      medium: D.findings.filter((f) => f.severity === "medium").length,
-      low: D.findings.filter((f) => f.severity === "low").length,
+      total: mockFindings.length,
+      pending: mockFindings.filter((f) => f.status === "pending").length,
+      critical: mockFindings.filter((f) => f.severity === "critical").length,
+      high: mockFindings.filter((f) => f.severity === "high").length,
+      medium: mockFindings.filter((f) => f.severity === "medium").length,
+      low: mockFindings.filter((f) => f.severity === "low").length,
       vulnclasses,
       tasks,
     };
@@ -102,7 +206,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     seg.length === 3 &&
     seg[2] !== "stats"
   ) {
-    const f = D.findings.find((x) => x.id === seg[2]);
+    const f = mockFindings.find((x) => x.id === seg[2]);
     if (!f) return {};
     if (m === "PATCH") {
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
@@ -111,21 +215,42 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       if (typeof b.name === "string") f.name = b.name;
       if (typeof b.vulnclass === "string") f.vulnclass = b.vulnclass;
     }
-    return { ...f, finding_id: f.id };
+    const contextTaskId = q.get("context_task");
+    const contextTask = contextTaskId ? mockTasks.find((item) => item.id === contextTaskId) : undefined;
+    const inherited = !!(
+      contextTask &&
+      f.task_id &&
+      f.task_id !== contextTask.id &&
+      contextTask.source_task_ids?.includes(f.task_id)
+    );
+    return {
+      ...f,
+      finding_id: f.id,
+      ...(inherited ? { inherited: true, source_task_id: f.task_id } : {}),
+    };
   }
   if (path === "/exploration/findings") {
     // finding_id=id：真后端用独立表行 id 作为状态/详情句柄,mock 里用自身 id 顶上。
     // report 仅详情接口返回,列表剥掉(与后端一致)。
-    const withFid = (f: (typeof D.findings)[number]) => ({
+    const withFid = (f: (typeof mockFindings)[number]) => ({
       ...f,
       report: undefined,
       finding_id: f.id,
     });
-    if (task) return D.findings.filter((f) => f.task_id === task).map(withFid);
+    if (task) {
+      const owner = mockTasks.find((item) => item.id === task);
+      const sources = new Set(owner?.source_task_ids ?? []);
+      return mockFindings
+        .filter((f) => f.task_id === task || (!!f.task_id && sources.has(f.task_id)))
+        .map((f) => ({
+          ...withFid(f),
+          ...(f.task_id !== task ? { inherited: true, source_task_id: f.task_id } : {}),
+        }));
+    }
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
-    if (!q.has("page") && !q.has("limit")) return D.findings.map(withFid);
+    if (!q.has("page") && !q.has("limit")) return mockFindings.map(withFid);
     const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
-    let list = D.findings.slice();
+    let list = mockFindings.slice();
     const fSev = q.get("severity");
     const fStatus = q.get("status");
     const fVuln = q.get("vulnclass");
@@ -151,9 +276,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/intents") {
     if (q.has("page")) {
       const before = Number(q.get("before") ?? 0);
-      const limit = Number(q.get("limit") ?? 300);
+      const limit = Math.max(1, Number(q.get("limit") ?? 300));
       let list = D.intents;
-      if (before > 0) list = list.filter((n) => Number(n.id.replace(/\D/g, "") || n.id) < before);
+      if (before > 0) list = list.filter((intent) => Number(intent.id.replace(/\D/g, "") || intent.id) < before);
       return { items: list.slice(0, limit), has_more: list.length > limit };
     }
     return D.intents;
@@ -161,8 +286,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/tokens") return { workers: D.tokenWorkers, total: D.tokenTotal };
   if (path === "/exploration/graph") return D.explorationGraph;
   if (path === "/exploration/activity" && seg.length === 2) {
-    const items = D.activityForTask();
-    return { items, cursor: items.length ? items[items.length - 1].seq : 0 };
+    const since = Number(q.get("since") ?? 0);
+    const limit = Math.max(1, Number(q.get("limit") ?? 300));
+    const items = D.activityForTask().filter((item) => item.seq > since).slice(0, limit);
+    return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
   if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
     const a = D.activity.find((x) => x.seq === Number(seg[2]));
@@ -189,10 +316,18 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/commands" && m === "GET") return { commands: D.commandRecords, total: D.commandRecords.length };
 
   // ── LLM ──
-  if (path === "/llm/records" && m === "GET") return { records: D.llmRecords, total: D.llmRecords.length };
+  if (path === "/llm/records" && m === "GET") return { records: mockLLMRecords, total: mockLLMRecords.length };
   if (path === "/llm/records" && m === "DELETE") return { deleted: 0 };
-  if (path === "/llm/records/tasks") return { tasks: D.llmTasks };
-  if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") return D.llmRecordDetail(Number(seg[2]));
+  if (path === "/llm/records/tasks") {
+    const counts = new Map<string, number>();
+    for (const record of mockLLMRecords) {
+      if (record.task_id) counts.set(record.task_id, (counts.get(record.task_id) ?? 0) + 1);
+    }
+    return { tasks: [...counts].map(([task_id, count]) => ({ task_id, count })) };
+  }
+  if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") {
+    return D.llmRecordDetail(Number(seg[2]), mockLLMRecords);
+  }
   if (path === "/llm" && m === "GET") return D.llmConfig;
   if (path === "/llm" && m === "POST") return { ok: true };
   if (path === "/llm/test") return { ok: true, latency_ms: 128, model: String(b.model ?? "claude-opus-4-8") };

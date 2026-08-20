@@ -43,7 +43,20 @@ func (e *Engine) inflightCounter(taskID string) *int64 {
 	v, _ := e.inflight.LoadOrStore(taskID, new(int64))
 	return v.(*int64)
 }
-func (e *Engine) incInflight(taskID string) { atomic.AddInt64(e.inflightCounter(taskID), 1) }
+
+// beginTaskOperation atomically registers a task-owned operation unless deletion
+// has already installed its barrier. The delete handler can therefore wait for
+// inflight==0 without a check-then-start race recreating files after cleanup.
+func (e *Engine) beginTaskOperation(taskID string) bool {
+	e.deleteMu.RLock()
+	defer e.deleteMu.RUnlock()
+	if e.IsDeleting(taskID) {
+		return false
+	}
+	atomic.AddInt64(e.inflightCounter(taskID), 1)
+	return true
+}
+
 func (e *Engine) decInflight(taskID string) { atomic.AddInt64(e.inflightCounter(taskID), -1) }
 func (e *Engine) inflightCount(taskID string) int64 {
 	return atomic.LoadInt64(e.inflightCounter(taskID))
@@ -106,10 +119,18 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 	if t == nil || t.TimeoutSeconds <= 0 {
 		return
 	}
-	if _, loaded := e.coordStarted.LoadOrStore(t.ID, true); loaded {
+	e.deleteMu.RLock()
+	if e.IsDeleting(t.ID) {
+		e.deleteMu.RUnlock()
 		return
 	}
-	go e.deadlineCoordinator(ctx, t)
+	if _, loaded := e.coordStarted.LoadOrStore(t.ID, true); loaded {
+		e.deleteMu.RUnlock()
+		return
+	}
+	rt := e.registerTaskRoutines(ctx, t.ID, 1)
+	e.deleteMu.RUnlock()
+	runTaskRoutine(rt, func(loopCtx context.Context) { e.deadlineCoordinator(loopCtx, t) })
 }
 
 // deadlineCoordinator waits until the task's absolute deadline, then runs the settle
@@ -170,6 +191,10 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
 	met := e.runFinalPlannerRound(ctx, t)
+	if !e.beginTaskOperation(t.ID) {
+		return
+	}
+	defer e.decInflight(t.ID)
 
 	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
@@ -192,6 +217,9 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 // task-timeout planner words (final goal judgment; no new intents). Waits for the
 // LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
+	if e.IsDeleting(t.ID) {
+		return false
+	}
 	planner, _ := e.snapshotFor(t)
 	for planner == nil {
 		if sleepCtx(ctx, deadlinePollInterval) {
@@ -200,17 +228,24 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
 			return false
 		}
+		if e.IsDeleting(t.ID) {
+			return false
+		}
 		planner, _ = e.snapshotFor(t)
 	}
+	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
+	fctx := e.clockCtx(ctx, t, true)
+	if !e.beginTaskOperation(t.ID) {
+		return false
+	}
+	defer e.decInflight(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
 	e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 		Summary: fmt.Sprintf("任务超时收尾·终局判定(第 %d 轮)", e.nextPlannerRound(t.ID))})
-	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
-	fctx := e.clockCtx(ctx, t, true)
-	e.incInflight(t.ID)
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	e.BeginLLMCall(t.ID)
 	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
-	e.decInflight(t.ID)
+	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)
 	} else if met {
