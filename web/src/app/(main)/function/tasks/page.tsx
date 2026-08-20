@@ -872,7 +872,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
   return (
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>
-          <Button size="sm" className="ml-auto">
+          <Button size="sm">
             <PlusIcon /> 新建任务
           </Button>
         </SheetTrigger>
