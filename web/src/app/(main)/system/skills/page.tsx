@@ -14,6 +14,16 @@ import {
   UploadIcon,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -99,6 +109,12 @@ type Creating = {
   kind: "file" | "dir";
 } | null;
 
+type PendingDelete =
+  | { kind: "skill"; skill: string }
+  | { kind: "file"; skill: string; path: string }
+  | { kind: "dir"; skill: string; path: string }
+  | null;
+
 // ── Page ──────────────────────────────────────────────────────────────────
 export default function SkillsPage() {
   const [skills, setSkills] = React.useState<SkillItem[]>([]);
@@ -136,6 +152,10 @@ export default function SkillsPage() {
 
   // skill detail — MCP edit state (optimistic, rolls back on error)
   const [detailMcps, setDetailMcps] = React.useState<string[]>([]);
+
+  // delete confirmation
+  const [pendingDelete, setPendingDelete] = React.useState<PendingDelete>(null);
+  const [deleting, setDeleting] = React.useState(false);
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const load = React.useCallback(() => {
@@ -296,6 +316,19 @@ export default function SkillsPage() {
     }
   }
 
+  async function runPendingDelete() {
+    const p = pendingDelete;
+    if (!p) return;
+    setDeleting(true);
+    try {
+      if (p.kind === "skill") await deleteSkill(p.skill);
+      else await deletePath(p.skill, p.path);
+    } finally {
+      setDeleting(false);
+      setPendingDelete(null);
+    }
+  }
+
   async function saveFile() {
     if (!selected || selected.path === null) return;
     setSaving(true);
@@ -400,7 +433,7 @@ export default function SkillsPage() {
         return (
           <div key={node.path}>
             <div
-              className="group flex cursor-pointer select-none items-center gap-1 rounded py-0.5 pr-1 text-sm hover:bg-muted"
+              className="group relative flex cursor-pointer select-none items-center gap-1 rounded py-0.5 pr-1 text-sm hover:bg-muted"
               style={{ paddingLeft: baseIndent }}
               onClick={() => toggleExpanded(key)}
             >
@@ -409,8 +442,9 @@ export default function SkillsPage() {
                 ? <FolderOpenIcon className="size-3.5 shrink-0 text-amber-500" />
                 : <FolderIcon className="size-3.5 shrink-0 text-amber-500" />
               }
-              <span className="flex-1 truncate">{node.name}</span>
-              <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
+              <span className="min-w-0 flex-1 truncate" title={node.path}>{node.name}</span>
+              {/* Absolute so a long name can never push the actions out of view */}
+              <span className="absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded bg-muted pl-1 group-hover:flex">
                 <Button size="icon" variant="ghost" className="size-5" title="新建文件"
                   onClick={(e) => { e.stopPropagation(); startCreate(skill, node.path, "file"); }}>
                   <FilePlusIcon className="size-3 text-muted-foreground" />
@@ -420,7 +454,7 @@ export default function SkillsPage() {
                   <FolderPlusIcon className="size-3 text-muted-foreground" />
                 </Button>
                 <Button size="icon" variant="ghost" className="size-5" title="删除文件夹"
-                  onClick={(e) => { e.stopPropagation(); deletePath(skill, node.path); }}>
+                  onClick={(e) => { e.stopPropagation(); setPendingDelete({ kind: "dir", skill, path: node.path }); }}>
                   <Trash2Icon className="size-3 text-destructive" />
                 </Button>
               </span>
@@ -442,19 +476,24 @@ export default function SkillsPage() {
         <div
           key={node.path}
           className={cn(
-            "group flex cursor-pointer select-none items-center gap-1 rounded py-0.5 pr-1 text-sm",
+            "group relative flex cursor-pointer select-none items-center gap-1 rounded py-0.5 pr-1 text-sm",
             isSelected ? "bg-accent text-accent-foreground" : "hover:bg-muted",
           )}
           style={{ paddingLeft: baseIndent + 16 }}
           onClick={() => setSelected({ skill, path: node.path })}
         >
           <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="flex-1 truncate font-mono text-xs">{node.name}</span>
-          <Button size="icon" variant="ghost" className="ml-auto hidden size-5 group-hover:flex"
-            title="删除文件"
-            onClick={(e) => { e.stopPropagation(); deletePath(skill, node.path); }}>
-            <Trash2Icon className="size-3 text-destructive" />
-          </Button>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs" title={node.path}>{node.name}</span>
+          <span className={cn(
+            "absolute inset-y-0 right-1 hidden items-center rounded pl-1 group-hover:flex",
+            isSelected ? "bg-accent" : "bg-muted",
+          )}>
+            <Button size="icon" variant="ghost" className="size-5"
+              title="删除文件"
+              onClick={(e) => { e.stopPropagation(); setPendingDelete({ kind: "file", skill, path: node.path }); }}>
+              <Trash2Icon className="size-3 text-destructive" />
+            </Button>
+          </span>
         </div>
       );
     });
@@ -496,7 +535,10 @@ export default function SkillsPage() {
               {uploading ? "上传中…" : "上传压缩包"}
             </Button>
           </div>
-          <ScrollArea className="flex-1">
+          {/* Radix viewport wraps children in a display:table div that grows with
+              content — force it to block so long names truncate instead of
+              widening the rows past the sidebar. */}
+          <ScrollArea className="flex-1 [&>[data-slot=scroll-area-viewport]>div]:!block">
             <div className="p-1">
               {skills.map((s) => {
                 const isOpen = expanded.has(s.name);
@@ -507,7 +549,7 @@ export default function SkillsPage() {
                     {/* skill 根节点 */}
                     <div
                       className={cn(
-                        "group flex cursor-pointer select-none items-center gap-1 rounded px-2 py-1 text-sm",
+                        "group relative flex cursor-pointer select-none items-center gap-1 rounded px-2 py-1 text-sm",
                         isSkillSelected ? "bg-accent text-accent-foreground" : "hover:bg-muted",
                       )}
                       onClick={() => {
@@ -520,8 +562,11 @@ export default function SkillsPage() {
                         ? <FolderOpenIcon className="size-3.5 shrink-0 text-blue-500" />
                         : <FolderIcon className="size-3.5 shrink-0 text-blue-500" />
                       }
-                      <span className="flex-1 truncate font-semibold">{s.name}</span>
-                      <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                      <span className="min-w-0 flex-1 truncate font-semibold" title={s.name}>{s.name}</span>
+                      <span className={cn(
+                        "absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded pl-1 group-hover:flex",
+                        isSkillSelected ? "bg-accent" : "bg-muted",
+                      )}>
                         <Button size="icon" variant="ghost" className="size-5" title="新建文件"
                           onClick={(e) => { e.stopPropagation(); startCreate(s.name, "", "file"); }}>
                           <FilePlusIcon className="size-3 text-muted-foreground" />
@@ -531,7 +576,7 @@ export default function SkillsPage() {
                           <FolderPlusIcon className="size-3 text-muted-foreground" />
                         </Button>
                         <Button size="icon" variant="ghost" className="size-5" title="删除 Skill"
-                          onClick={(e) => { e.stopPropagation(); deleteSkill(s.name); }}>
+                          onClick={(e) => { e.stopPropagation(); setPendingDelete({ kind: "skill", skill: s.name }); }}>
                           <Trash2Icon className="size-3 text-destructive" />
                         </Button>
                       </span>
@@ -648,6 +693,35 @@ export default function SkillsPage() {
           )}
         </div>
       </div>
+
+      {/* ── 删除二次确认 ── */}
+      <AlertDialog open={!!pendingDelete} onOpenChange={(o) => { if (!o) setPendingDelete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingDelete?.kind === "skill" && `删除 Skill「${pendingDelete.skill}」？`}
+              {pendingDelete?.kind === "dir" && `删除文件夹「${pendingDelete.path}」？`}
+              {pendingDelete?.kind === "file" && `删除文件「${pendingDelete.path}」？`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.kind === "skill"
+                ? "将删除该 Skill 的全部文件、MCP 关联与可见性配置。此操作不可撤销。"
+                : pendingDelete?.kind === "dir"
+                  ? "将一并删除该文件夹下的所有文件。此操作不可撤销。"
+                  : "此操作不可撤销。"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleting}
+              onClick={(e) => { e.preventDefault(); void runPendingDelete(); }}
+            >
+              {deleting ? "删除中…" : "删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* ── 新建 Skill 对话框 ── */}
       <Sheet open={newOpen} onOpenChange={setNewOpen}>

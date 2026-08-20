@@ -172,7 +172,11 @@ function taskDuration(task: Task, nowSec: number): number {
   return end > start ? end - start : 0;
 }
 
-function deleteSummary(result: DeleteTaskResult): string {
+// deleteDetails takes only the countable part of the result so callers can pass an
+// aggregate accumulated over a bulk delete.
+type DeleteCounts = Omit<DeleteTaskResult, "deleted" | "cleanup_warning">;
+
+function deleteDetails(result: DeleteCounts): string[] {
   const details: string[] = [];
   if (result.assets_deleted > 0) details.push(`删除资产 ${result.assets_deleted} 条`);
   if (result.assets_detached > 0) details.push(`解除共享资产关联 ${result.assets_detached} 条`);
@@ -180,6 +184,11 @@ function deleteSummary(result: DeleteTaskResult): string {
   if (result.files_deleted) details.push("删除任务文件");
   if (result.findings_deleted > 0) details.push(`删除漏洞 ${result.findings_deleted} 条`);
   if (result.llm_records_deleted > 0) details.push(`删除 LLM 请求/响应记录 ${result.llm_records_deleted} 条`);
+  return details;
+}
+
+function deleteSummary(result: DeleteTaskResult): string {
+  const details = deleteDetails(result);
   return details.length > 0 ? `任务已删除（${details.join("，")}）` : "任务已删除";
 }
 
@@ -231,6 +240,48 @@ export default function TasksPage() {
     () => filtered.slice((page - 1) * pageSize, page * pageSize),
     [filtered, page, pageSize],
   );
+
+  // 多选删除:选择跨翻页/筛选保留,只在任务真的消失(被删或后端不再返回)时收敛。
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(() => new Set());
+
+  React.useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(tasks.map((t) => t.id));
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tasks]);
+
+  const toggleSelected = React.useCallback((id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id); else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const pageIds = React.useMemo(() => paginated.map((t) => t.id), [paginated]);
+  const pageSelectedCount = React.useMemo(
+    () => pageIds.filter((id) => selectedIds.has(id)).length,
+    [pageIds, selectedIds],
+  );
+  let headerChecked: boolean | "indeterminate" = false;
+  if (pageIds.length > 0 && pageSelectedCount === pageIds.length) {
+    headerChecked = true;
+  } else if (pageSelectedCount > 0) {
+    headerChecked = "indeterminate";
+  }
+
+  const toggleSelectedPage = React.useCallback((checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of pageIds) {
+        if (checked) next.add(id); else next.delete(id);
+      }
+      return next;
+    });
+  }, [pageIds]);
 
   // lastRef holds the previous poll's serialized payload: the list is re-fetched every
   // POLL_MS but usually comes back unchanged, and setTasks on an identical payload would
@@ -284,6 +335,63 @@ export default function TasksPage() {
     }
   }, [load]);
 
+  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
+  // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
+  const deleteTasks = React.useCallback(async (
+    ids: string[],
+    options: DeleteTaskOptions,
+    onProgress: (done: number) => void,
+  ) => {
+    const total: DeleteCounts = {
+      assets_deleted: 0,
+      assets_detached: 0,
+      traffic_deleted: 0,
+      files_deleted: false,
+      findings_deleted: 0,
+      llm_records_deleted: 0,
+    };
+    const deleted: string[] = [];
+    const failed: { id: string; message: string }[] = [];
+    const warnings: string[] = [];
+
+    for (const id of ids) {
+      try {
+        const r = await api.deleteTask(id, options);
+        total.assets_deleted += r.assets_deleted;
+        total.assets_detached += r.assets_detached;
+        total.traffic_deleted += r.traffic_deleted;
+        total.files_deleted = total.files_deleted || r.files_deleted;
+        total.findings_deleted += r.findings_deleted;
+        total.llm_records_deleted += r.llm_records_deleted;
+        if (r.cleanup_warning) warnings.push(`#${id}：${r.cleanup_warning}`);
+        deleted.push(id);
+      } catch (e) {
+        failed.push({ id, message: (e as Error).message });
+      }
+      onProgress(deleted.length + failed.length);
+    }
+
+    if (deleted.length > 0) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of deleted) next.delete(id);
+        return next;
+      });
+      const details = deleteDetails(total);
+      const summary = `已删除 ${deleted.length} 个任务` + (details.length > 0 ? `（${details.join("，")}）` : "");
+      if (warnings.length > 0) {
+        toast.warning(`${summary}；部分外部数据清理未完成：${warnings.join("；")}`);
+      } else {
+        toast.success(summary);
+      }
+    }
+    if (failed.length > 0) {
+      const head = failed.slice(0, 3).map((f) => `#${f.id}（${f.message}）`).join("；");
+      toast.error(`${failed.length} 个任务删除失败：${head}${failed.length > 3 ? " 等" : ""}`);
+    }
+    load();
+  }, [load]);
+
   return (
     <Card>
       <CardContent className="flex flex-col gap-4 px-0 pt-6">
@@ -325,6 +433,15 @@ export default function TasksPage() {
           <span className="text-muted-foreground text-xs tabular-nums">
             {filtered.length}/{tasks.length} 条
           </span>
+          {selectedIds.size > 0 && (
+            <>
+              <span className="text-xs tabular-nums">已选 {selectedIds.size} 个</span>
+              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                取消选择
+              </Button>
+              <BulkDeleteTasksDialog ids={[...selectedIds]} onDelete={deleteTasks} />
+            </>
+          )}
           <ConcurrencySettingsDialog />
           <CreateTaskSheet tasks={tasks} onCreated={load} />
         </div>
@@ -341,6 +458,13 @@ export default function TasksPage() {
           <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
             <TableHeader className="[&_tr]:border-t">
               <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={headerChecked}
+                    onCheckedChange={(checked) => toggleSelectedPage(checked === true)}
+                    aria-label="选择本页全部任务"
+                  />
+                </TableHead>
                 <TableHead className="font-mono">ID</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>目标</TableHead>
@@ -361,6 +485,8 @@ export default function TasksPage() {
                   // 带来的整表重渲染,只让在跑的那几行走时长。
                   nowSec={task.status === "running" ? nowSec : 0}
                   onDelete={deleteTask}
+                  selected={selectedIds.has(task.id)}
+                  onSelectedChange={toggleSelected}
                 />
               ))}
             </TableBody>
@@ -461,13 +587,24 @@ const TaskRow = React.memo(function TaskRow({
   task,
   nowSec,
   onDelete,
+  selected,
+  onSelectedChange,
 }: {
   task: Task;
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
+  selected: boolean;
+  onSelectedChange: (id: string, checked: boolean) => void;
 }) {
   return (
-    <TableRow className="group border-border/60">
+    <TableRow className="group border-border/60" data-state={selected ? "selected" : undefined}>
+      <TableCell>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={(checked) => onSelectedChange(task.id, checked === true)}
+          aria-label={`选择任务 ${task.id}`}
+        />
+      </TableCell>
       <TableCell>
         <code className="bg-muted rounded px-1.5 py-0.5 font-mono text-xs">{task.id}</code>
       </TableCell>
@@ -554,6 +691,117 @@ const deleteOptionKeys: (keyof DeleteTaskOptions)[] = [
   "delete_llm_records",
 ];
 
+// DeleteOptionFields renders the「同时清理关联数据」checkbox block shared by the
+// single-task and bulk delete dialogs. idPrefix keeps the label/input ids unique when
+// several dialogs live in the same table.
+function DeleteOptionFields({
+  idPrefix,
+  options,
+  onOptionsChange,
+  disabled,
+}: {
+  idPrefix: string;
+  options: DeleteTaskOptions;
+  onOptionsChange: React.Dispatch<React.SetStateAction<DeleteTaskOptions>>;
+  disabled: boolean;
+}) {
+  const selectedCount = deleteOptionKeys.filter((key) => options[key]).length;
+  let allChecked: boolean | "indeterminate" = false;
+  if (selectedCount === deleteOptionKeys.length) {
+    allChecked = true;
+  } else if (selectedCount > 0) {
+    allChecked = "indeterminate";
+  }
+
+  const updateOption = (key: keyof DeleteTaskOptions, checked: boolean) => {
+    onOptionsChange((current) => ({ ...current, [key]: checked }));
+  };
+
+  const updateAllOptions = (checked: boolean) => {
+    onOptionsChange({
+      delete_assets: checked,
+      delete_traffic: checked,
+      delete_files: checked,
+      delete_findings: checked,
+      delete_llm_records: checked,
+    });
+  };
+
+  return (
+    <FieldSet disabled={disabled}>
+      <FieldLegend variant="label">同时清理关联数据</FieldLegend>
+      <FieldGroup className="gap-3">
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-all-${idPrefix}`}
+            checked={allChecked}
+            onCheckedChange={(checked) => updateAllOptions(checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-all-${idPrefix}`}>全部删除</FieldLabel>
+            <FieldDescription>选中下方全部关联数据，包括资产、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-assets-${idPrefix}`}
+            checked={options.delete_assets}
+            onCheckedChange={(checked) => updateOption("delete_assets", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-assets-${idPrefix}`}>关联资产</FieldLabel>
+            <FieldDescription>删除仅属于该任务的资产；共享资产只解除当前任务关联。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-traffic-${idPrefix}`}
+            checked={options.delete_traffic}
+            onCheckedChange={(checked) => updateOption("delete_traffic", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-traffic-${idPrefix}`}>关联流量</FieldLabel>
+            <FieldDescription>按关联资产的精确主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-files-${idPrefix}`}
+            checked={options.delete_files}
+            onCheckedChange={(checked) => updateOption("delete_files", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-files-${idPrefix}`}>任务文件</FieldLabel>
+            <FieldDescription>删除该任务工作目录中的上传文件、命令输出和其他产物。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-findings-${idPrefix}`}
+            checked={options.delete_findings}
+            onCheckedChange={(checked) => updateOption("delete_findings", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-findings-${idPrefix}`}>关联漏洞</FieldLabel>
+            <FieldDescription>永久删除该任务产生的独立漏洞记录与漏洞报告。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-llm-records-${idPrefix}`}
+            checked={options.delete_llm_records}
+            onCheckedChange={(checked) => updateOption("delete_llm_records", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-llm-records-${idPrefix}`}>LLM 请求/响应记录</FieldLabel>
+            <FieldDescription>永久删除该任务录制的 LLM 请求、响应、Token 与错误详情。</FieldDescription>
+          </FieldContent>
+        </Field>
+      </FieldGroup>
+    </FieldSet>
+  );
+}
+
 function DeleteTaskDialog({
   task,
   onDelete,
@@ -564,29 +812,6 @@ function DeleteTaskDialog({
   const [open, setOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [options, setOptions] = React.useState<DeleteTaskOptions>(emptyDeleteOptions);
-
-  const selectedCount = deleteOptionKeys.filter((key) => options[key]).length;
-  const allSelected = selectedCount === deleteOptionKeys.length;
-  let allChecked: boolean | "indeterminate" = false;
-  if (allSelected) {
-    allChecked = true;
-  } else if (selectedCount > 0) {
-    allChecked = "indeterminate";
-  }
-
-  const updateOption = (key: keyof DeleteTaskOptions, checked: boolean) => {
-    setOptions((current) => ({ ...current, [key]: checked }));
-  };
-
-  const updateAllOptions = (checked: boolean) => {
-    setOptions({
-      delete_assets: checked,
-      delete_traffic: checked,
-      delete_files: checked,
-      delete_findings: checked,
-      delete_llm_records: checked,
-    });
-  };
 
   const handleOpenChange = (next: boolean) => {
     if (deleting) return;
@@ -621,77 +846,12 @@ function DeleteTaskDialog({
             的执行记录与探索链路将被永久删除。
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <FieldSet disabled={deleting}>
-          <FieldLegend variant="label">同时清理关联数据</FieldLegend>
-          <FieldGroup className="gap-3">
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-all-${task.id}`}
-                checked={allChecked}
-                onCheckedChange={(checked) => updateAllOptions(checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-all-${task.id}`}>全部删除</FieldLabel>
-                <FieldDescription>选中下方全部关联数据，包括资产、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
-              </FieldContent>
-            </Field>
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-assets-${task.id}`}
-                checked={options.delete_assets}
-                onCheckedChange={(checked) => updateOption("delete_assets", checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-assets-${task.id}`}>关联资产</FieldLabel>
-                <FieldDescription>删除仅属于该任务的资产；共享资产只解除当前任务关联。</FieldDescription>
-              </FieldContent>
-            </Field>
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-traffic-${task.id}`}
-                checked={options.delete_traffic}
-                onCheckedChange={(checked) => updateOption("delete_traffic", checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-traffic-${task.id}`}>关联流量</FieldLabel>
-                <FieldDescription>按关联资产的精确主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
-              </FieldContent>
-            </Field>
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-files-${task.id}`}
-                checked={options.delete_files}
-                onCheckedChange={(checked) => updateOption("delete_files", checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-files-${task.id}`}>任务文件</FieldLabel>
-                <FieldDescription>删除该任务工作目录中的上传文件、命令输出和其他产物。</FieldDescription>
-              </FieldContent>
-            </Field>
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-findings-${task.id}`}
-                checked={options.delete_findings}
-                onCheckedChange={(checked) => updateOption("delete_findings", checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-findings-${task.id}`}>关联漏洞</FieldLabel>
-                <FieldDescription>永久删除该任务产生的独立漏洞记录与漏洞报告。</FieldDescription>
-              </FieldContent>
-            </Field>
-            <Field orientation="horizontal">
-              <Checkbox
-                id={`delete-llm-records-${task.id}`}
-                checked={options.delete_llm_records}
-                onCheckedChange={(checked) => updateOption("delete_llm_records", checked === true)}
-              />
-              <FieldContent>
-                <FieldLabel htmlFor={`delete-llm-records-${task.id}`}>LLM 请求/响应记录</FieldLabel>
-                <FieldDescription>永久删除该任务录制的 LLM 请求、响应、Token 与错误详情。</FieldDescription>
-              </FieldContent>
-            </Field>
-          </FieldGroup>
-        </FieldSet>
+        <DeleteOptionFields
+          idPrefix={task.id}
+          options={options}
+          onOptionsChange={setOptions}
+          disabled={deleting}
+        />
         <AlertDialogFooter>
           <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
           <AlertDialogAction
@@ -704,6 +864,90 @@ function DeleteTaskDialog({
           >
             {deleting && <Spinner data-icon="inline-start" />}
             {deleting ? "删除中" : "删除"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+// BulkDeleteTasksDialog deletes every checked task with one shared set of cleanup options.
+// The backend has no batch endpoint, so deletion runs one task at a time (see deleteTasks)
+// and the button shows live progress.
+function BulkDeleteTasksDialog({
+  ids,
+  onDelete,
+}: {
+  ids: string[];
+  onDelete: (
+    ids: string[],
+    options: DeleteTaskOptions,
+    onProgress: (done: number) => void,
+  ) => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [done, setDone] = React.useState(0);
+  const [options, setOptions] = React.useState<DeleteTaskOptions>(emptyDeleteOptions);
+
+  const handleOpenChange = (next: boolean) => {
+    if (deleting) return;
+    setOpen(next);
+    if (next) {
+      setOptions(emptyDeleteOptions());
+      setDone(0);
+    }
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    setDone(0);
+    try {
+      await onDelete(ids, options, setDone);
+      setOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <Trash2Icon className="text-destructive" /> 删除所选 {ids.length}
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认删除所选 {ids.length} 个任务？</AlertDialogTitle>
+          <AlertDialogDescription>
+            这些任务的执行记录与探索链路将被永久删除，下方清理选项对所选任务统一生效。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="text-muted-foreground flex flex-wrap gap-1 text-xs">
+          {ids.slice(0, 30).map((id) => (
+            <code key={id} className="bg-muted rounded px-1.5 py-0.5 font-mono">#{id}</code>
+          ))}
+          {ids.length > 30 && <span className="self-center">…等 {ids.length} 个</span>}
+        </div>
+        <DeleteOptionFields
+          idPrefix="bulk"
+          options={options}
+          onOptionsChange={setOptions}
+          disabled={deleting}
+        />
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={deleting}
+            onClick={(event) => {
+              event.preventDefault();
+              void handleDelete();
+            }}
+          >
+            {deleting && <Spinner data-icon="inline-start" />}
+            {deleting ? `删除中 ${done}/${ids.length}` : `删除 ${ids.length} 个任务`}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
