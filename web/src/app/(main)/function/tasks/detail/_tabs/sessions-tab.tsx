@@ -359,8 +359,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [olderIntents, setOlderIntents] = React.useState<TaskNode[]>([]);
   const [intentsHasMore, setIntentsHasMore] = React.useState(false);
   const [loadingOlderIntents, setLoadingOlderIntents] = React.useState(false);
-  // Local-only chat messages overlaid onto the main-agent transcript.
-  const [chatExtra, setChatExtra] = React.useState<Activity[]>([]);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
@@ -613,7 +611,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // ID) resumes from the DB, so a dropped realtime link self-heals; seq-merge dedups.
   React.useEffect(() => {
     setStore({});
-    setChatExtra([]);
     setSseLive(false);
     setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
     snapshotRef.current = 0;
@@ -892,13 +889,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // worker session shows only its intent's activity, led by the intent objective.
   const activity = React.useMemo(() => {
     const items = activeState?.items ?? [];
-    if (isMain) {
-      // chatExtra is an optimistic local echo — drop any entry the persisted (SSE)
-      // copy already covers so messages don't show twice after the backend round-trips.
-      const seen = new Set(items.map((a) => `${a.kind} ${a.summary}`));
-      const pending = chatExtra.filter((a) => !seen.has(`${a.kind} ${a.summary}`));
-      return [...items, ...pending].sort((a, b) => a.seq - b.seq);
-    }
+    // The main-agent console renders purely from server data: the human turn is
+    // persisted+broadcast by the backend BEFORE it returns, so it arrives over the
+    // same SSE stream (worker="mainagent") as every agent step — no client-side
+    // optimistic echo, hence no fabricated seq that could collide with real DB ids.
+    if (isMain) return items;
     if (isPlanner || isSystem) return items;
     // Worker session: the intent leads the transcript as a right-aligned "user"-style
     // message (the task handed to this worker), followed by its execution steps.
@@ -918,7 +913,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     isPlanner,
     isSystem,
     activeState,
-    chatExtra,
     active.id,
     active.title,
     active.last_activity,
@@ -1021,36 +1015,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const text = input.trim();
     const atts = attachments;
     if ((!text && atts.length === 0) || sending) return;
-    const base = [...(store.main?.items ?? []), ...chatExtra];
-    const nextSeq = Math.max(0, ...base.map((a) => a.seq)) + 1;
-    const userMsg: Activity = {
-      seq: nextSeq,
-      worker: "mainagent",
-      ts: new Date().toISOString(),
-      kind: "user",
-      summary: text,
-      // 有附件时把 {text, attachments} 塞进 detail,乐观气泡直接渲染卡片,无需再拉取。
-      detail: atts.length > 0 ? JSON.stringify({ text, attachments: atts }) : undefined,
-    };
-    // optimistic echo of the human turn only; the agent's steps + final answer
-    // stream back live via SSE (worker="mainagent"), so we don't append the reply.
-    setChatExtra((prev) => [...prev, userMsg]);
+    // No optimistic echo: the backend persists+broadcasts the human turn before it
+    // returns, so it streams back over SSE (worker="mainagent") with its real DB
+    // seq — the transcript renders it from server data like every other step. Clear
+    // the composer eagerly for responsiveness; restore it if the send fails.
     setInput("");
     setAttachments([]);
     setSending(true);
     api
       .chat(text, taskId, atts.length > 0 ? atts : undefined)
-      .catch(() => {
-        setChatExtra((prev) => [
-          ...prev,
-          {
-            seq: nextSeq + 1,
-            worker: "mainagent",
-            ts: new Date().toISOString(),
-            kind: "text",
-            summary: "（发送失败，请稍后重试）",
-          },
-        ]);
+      .catch((e) => {
+        setInput(text); // restore so the user doesn't lose their text / attachments
+        setAttachments(atts);
+        toast.error("发送失败：" + ((e as Error).message || "请稍后重试"));
       })
       .finally(() => setSending(false));
   }

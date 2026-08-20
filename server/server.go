@@ -1004,7 +1004,9 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	case "pause":
 		s.engine.Pause(t.ID, agent.AbortPausedByUser)
 		// Main Agent turns run outside Engine's planner/worker context so they need
-		// their own cancellation. New turns are rejected while the task is paused.
+		// their own cancellation: pausing terminates the CURRENTLY running turn. New
+		// turns are still allowed while paused — the main-agent console is independent
+		// of task pause (the chat handler no longer rejects on IsPaused).
 		s.cancelTaskChat(t.ID, agent.AbortChatPausedWithTask)
 	case "resume":
 		s.engine.Run(s.ctx, t) // ensure loops are alive, then un-pause + nudge
@@ -3117,10 +3119,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
-	if s.engine.IsPaused(t.ID) {
-		writeErr(w, 409, "任务已暂停，无法发送新消息")
-		return
-	}
+	// 注意:任务暂停(paused)不拦截主 Agent 对话。主 Agent 编排会话独立于 planner/
+	// worker 的暂停,暂停中仍可继续对话(暂停只终止其正在进行的那一轮,见 control())。
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
@@ -3133,9 +3133,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// turn busy before its first activity/file write, including rule-mode turns.
 	// If deletion wins the race, the second barrier check rejects this request.
 	s.chatMu.Lock()
-	if s.engine.IsDeleting(t.ID) || s.engine.IsPaused(t.ID) {
+	if s.engine.IsDeleting(t.ID) {
 		s.chatMu.Unlock()
-		writeErr(w, 409, "任务正在删除或已暂停，无法发送新消息")
+		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
 	if s.chatBusy[t.ID] {
