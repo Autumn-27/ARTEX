@@ -1004,6 +1004,26 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
   }, [activity, viewport]);
+  // Lazy detail loads (AnswerBlock / ToolBlock / Markdown) grow the content AFTER the
+  // activity array settles, WITHOUT changing its reference — so the layout effects
+  // above never re-fire and a freshly opened session would leave its last message
+  // scrolled partly off-screen (the final answer expands from a one-line summary to
+  // full markdown below the fold). A ResizeObserver re-pins to the bottom on any
+  // height change while the user is still at the bottom, so opening the main agent
+  // lands on the last message fully shown. contentRef's div is always mounted, so the
+  // observer catches the transcript mounting + each detail expanding.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: activeId intentionally rebinds the observer to the new session's content.
+  React.useEffect(() => {
+    const el = contentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!atBottomRef.current) return;
+      const vp = viewport();
+      if (vp) vp.scrollTop = vp.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [activeId, viewport]);
 
   function stop() {
     if (stopping) return;
