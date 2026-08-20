@@ -113,11 +113,15 @@ func (s *AssetStore) AddAutoScope(taskID int64, assetType, domain, rawURL, ip st
 	return nil
 }
 
-// AddAgentScope parses an agent-provided (kind,value) and records it (source='agent').
+// AddAgentScope parses a (kind,value) pair and records it as task scope.
+// source is "agent" when called from an LLM tool, "manual" from the UI.
 // company: value = company name or id (must already exist). root_domain/subdomain:
 // value = a domain. ip/cidr: value = an IP or CIDR (bare IP → /32,/128).
-func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason string) (TaskScope, error) {
-	ts := TaskScope{TaskID: taskID, Kind: kind, Source: "agent", Reason: reason}
+func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source string) (TaskScope, error) {
+	if source == "" {
+		source = "agent"
+	}
+	ts := TaskScope{TaskID: taskID, Kind: kind, Source: source, Reason: reason}
 	if taskID <= 0 {
 		return ts, fmt.Errorf("需要 task_id")
 	}
@@ -182,6 +186,17 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason string) (Ta
 		return ts, err
 	}
 	return ts, nil
+}
+
+// DeleteTaskScope removes a single scope row by id, scoped to the given task.
+// Returns whether a row was actually deleted.
+func (s *AssetStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM task_scope WHERE id=$1 AND task_id=$2`, scopeID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ListTaskScope returns all scope rows for a task.

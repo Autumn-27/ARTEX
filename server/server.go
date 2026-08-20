@@ -647,6 +647,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
+	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
+	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
@@ -1632,6 +1634,64 @@ func (s *Server) taskScopeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"scope": rows})
+}
+
+func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	var body struct {
+		Kind   string `json:"kind"`
+		Value  string `json:"value"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "invalid JSON")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	ts, err := as.AddAgentScope(taskID, body.Kind, body.Value, body.Reason, "manual")
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, ts)
+}
+
+func (s *Server) taskScopeDelete(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	scopeID, err := strconv.ParseInt(r.PathValue("sid"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "invalid scope id")
+		return
+	}
+	deleted, err := as.DeleteTaskScope(taskID, scopeID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !deleted {
+		writeErr(w, 404, "scope row not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {

@@ -149,6 +149,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
   if (seg[0] === "tasks" && seg[2] === "asset-refs") return D.assetRefsFor(Number(q.get("asset_id") ?? 0));
 
+  // ── 任务测试范围（增删查）──
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") return { scope: [] };
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "POST")
+    return { id: Date.now(), task_id: Number(seg[1]), kind: b.kind, domain: b.value, source: "manual" };
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 4 && m === "DELETE") return { ok: true };
+
   // ── 工作空间文件管理器（demo：静态示例树；写/建/删走下方写兜底 {ok:true}）──
   if (path === "/workspace/list") return D.workspaceList(q.get("path") ?? "");
   if (path === "/workspace/read") return D.workspaceRead(q.get("path") ?? "");

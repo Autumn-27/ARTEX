@@ -225,6 +225,18 @@ export interface WorkspaceFile {
   content?: string;
 }
 
+// 任务测试范围的一条（覆盖度分母 + 授权边界）。
+export interface TaskScopeRow {
+  id: number;
+  task_id: number;
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr";
+  company_id?: number;
+  domain?: string;
+  net?: string;
+  source: "auto" | "agent" | "manual";
+  reason?: string;
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;
