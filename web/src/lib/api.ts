@@ -39,6 +39,7 @@ import type {
   LLMTask,
   MCPServer,
   MCPTool,
+  ModelTokenStat,
   PromptVar,
   PromptVersion,
   Settings,
@@ -57,6 +58,7 @@ import type {
   TrafficDetail,
   TrafficHost,
   TrafficResp,
+  UsageStats,
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
@@ -228,6 +230,8 @@ export const api = {
     }>(`/tasks/${id}/coverage`),
   // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
+  usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // 本任务测试范围列表（含继承自来源任务的范围）。
   taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
   // 手动新增一条测试范围（kind=company/root_domain/subdomain/ip/cidr）。
@@ -812,4 +816,8 @@ export const api = {
   llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
   llmTasks: () => get<{ tasks: LLMTask[] }>(`/llm/records/tasks`),
   llmRecordsDeleteTask: (task: string) => del<{ deleted: number }>(`/llm/records?task=${encodeURIComponent(task)}`),
+  // 按模型聚合本任务的 token 用量（来自常开的 llm_usage 计量账本，逐次调用精确，
+  // per-agent 绑定 / 轮询 / 中断消耗都覆盖）。
+  tokensByModel: (task: string) =>
+    get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
 };

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/artex/db"
 )
 
 type taskIDContextKey struct{}
@@ -84,14 +84,15 @@ func parseSession(s string) (taskID, worker string) {
 // harness via transcript.WithSessionID; reading it per-call is race-free even when
 // planner and multiple workers share one Recorder instance.
 func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
-	// Recording off → passthrough with zero overhead: no request serialization,
-	// no response accumulation, no DB insert.
-	if r.enabled != nil && !r.enabled() {
-		return r.inner.Stream(ctx, req)
-	}
+	// Body recording (the heavy debug trace: full request/response) is gated by the
+	// llm_record setting. Lightweight usage metering always runs — it powers token
+	// stats and must be complete even for interrupted/failed runs, so it is NOT
+	// gated. Only body serialization + response accumulation are skipped when off.
+	recordBodies := r.enabled == nil || r.enabled()
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	parsedID, worker := parseSession(session)
+	expID := db.ParseExpID(parsedID)
 	taskID := TaskIDFrom(ctx)
 	if taskID == "" {
 		// Backward compatibility for non-task callers. For task calls, the task
@@ -99,51 +100,101 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 		taskID = parsedID
 	}
 
-	// Serialize the request for storage.
-	reqBody := serializeRequest(req)
+	// Serialize the request only when storing bodies (this is the expensive part).
+	reqBody := ""
+	if recordBodies {
+		reqBody = serializeRequest(req)
+	}
 
 	return func(yield func(llm.StreamEvent, error) bool) {
 		var (
-			textBuf    strings.Builder
+			textBuf     strings.Builder
 			thinkingBuf strings.Builder
-			usage      llm.Usage
-			stopReason string
-			streamErr  error
+			usage       llm.Usage
+			stopReason  string
+			streamErr   error
 		)
+
+		finish := func(err error) {
+			status := "ok"
+			if err != nil {
+				status = "error"
+			}
+			// Lightweight metering row — always written.
+			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+			// Heavy trace row — only when body recording is on.
+			if recordBodies {
+				r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
+			}
+		}
 
 		for ev, err := range r.inner.Stream(ctx, req) {
 			if err != nil {
 				streamErr = err
-				// Record the failed call, then propagate.
-				r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, "", err)
+				finish(streamErr)
 				if !yield(ev, err) {
 					return
 				}
 				return
 			}
-			// Accumulate response content.
+			// Always track usage (cheap); accumulate text/thinking only for bodies.
+			// Anthropic (and the other providers) split token usage across events:
+			// message_start carries ONLY the input side (input + cache), message_delta
+			// ONLY the output. They must be FOLDED with Add — overwriting on delta
+			// would zero out the input already counted at start (mirrors the SDK's own
+			// llm.Accumulator; see norma/llm/accumulate.go).
 			switch ev.Type {
 			case llm.SETextDelta:
-				textBuf.WriteString(ev.Text)
+				if recordBodies {
+					textBuf.WriteString(ev.Text)
+				}
 			case llm.SEThinkingDelta:
-				thinkingBuf.WriteString(ev.Text)
+				if recordBodies {
+					thinkingBuf.WriteString(ev.Text)
+				}
+			case llm.SEMessageStart:
+				usage.Add(ev.Usage)
 			case llm.SEMessageDelta:
 				if ev.StopReason != "" {
 					stopReason = ev.StopReason
 				}
-				usage = ev.Usage
-			case llm.SEMessageStart:
-				if ev.Usage.InputTokens > 0 {
-					usage = ev.Usage
-				}
+				usage.Add(ev.Usage)
 			}
 			if !yield(ev, err) {
 				return
 			}
 		}
 
-		// Stream completed normally — record it.
-		r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, streamErr)
+		// Stream completed normally.
+		finish(streamErr)
+	}
+}
+
+// recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips
+// zero-token calls with no model, which carry nothing worth metering.
+func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage llm.Usage, latencyMs int, status string) {
+	if r.pg == nil {
+		return
+	}
+	if r.model == "" && usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 {
+		return
+	}
+	err := r.pg.InsertLLMUsage(&db.LLMUsage{
+		TaskID:        taskID,
+		ExplorationID: expID,
+		Worker:        worker,
+		Model:         r.model,
+		ProfileName:   r.prof,
+		LatencyMs:     latencyMs,
+		InputTokens:   usage.InputTokens,
+		OutputTokens:  usage.OutputTokens,
+		CacheRead:     usage.CacheReadTokens,
+		CacheWrite:    usage.CacheWriteTokens,
+		Status:        status,
+	})
+	if err != nil {
+		log.Printf("[llmusage] insert: %v", err)
 	}
 }
 

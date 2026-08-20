@@ -242,9 +242,9 @@ export interface ScopeRow {
   id: number;
   company_id: number;
   kind: "domain" | "ip" | "cidr";
-  domain?: string;  // kind=domain 时有值
-  net?: string;     // kind=ip|cidr 时有值
-  raw: string;      // 原始用户输入，用于显示和回填
+  domain?: string; // kind=domain 时有值
+  net?: string; // kind=ip|cidr 时有值
+  raw: string; // 原始用户输入，用于显示和回填
   reason?: string;
 }
 
@@ -365,11 +365,11 @@ export type ActivityKind =
   | "thinking"
   | "result"
   | "user"
-  | "intent"            // LLM-generated exploration objective leading a worker session (UI-synthesized)
-  | "round"             // planner round boundary marker (engine-emitted)
-  | "usage"             // live cumulative token usage (per model turn); not rendered
-  | "llm_switch"        // automatic/manual task-level LLM switch
-  | "llm_failover"      // task-level provider switch / chain exhaustion audit event
+  | "intent" // LLM-generated exploration objective leading a worker session (UI-synthesized)
+  | "round" // planner round boundary marker (engine-emitted)
+  | "usage" // live cumulative token usage (per model turn); not rendered
+  | "llm_switch" // automatic/manual task-level LLM switch
+  | "llm_failover" // task-level provider switch / chain exhaustion audit event
   | "intercept_request"; // user-approval request from the intercept layer
 
 // ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
@@ -481,6 +481,43 @@ export interface TokenUsage {
 
 // Whole-task (all agents) token aggregate.
 export interface TokenTotal {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+// Global per-profile token spend from the llm_usage ledger (GET /api/tokens/usage).
+export interface ProfileUsage {
+  profile_name: string;
+  calls: number;
+  tasks: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+// One (profile, UTC day) token bucket for the dashboard's daily chart (new source).
+export interface ProfileDayUsage {
+  profile_name: string;
+  date: string; // YYYY-MM-DD
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+}
+
+// Response of GET /api/tokens/usage — the dashboard's "new" (llm_usage) token view.
+export interface UsageStats {
+  by_profile: ProfileUsage[];
+  daily: ProfileDayUsage[];
+}
+
+// Per-model token usage for one task (GET /api/llm/records/by-model), from the
+// always-on llm_usage metering ledger. calls = number of LLM calls on this model.
+export interface ModelTokenStat {
+  model: string;
+  calls: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
@@ -702,12 +739,12 @@ export interface MCPTool {
 // Fields align with the agentskills.io open specification.
 // description covers both "what the skill does" and "when to use it".
 export interface SkillItem {
-  name: string;           // unique key = directory name
-  description?: string;   // required per spec; covers what + when to use
-  license?: string;       // optional: SPDX identifier or free text
+  name: string; // unique key = directory name
+  description?: string; // required per spec; covers what + when to use
+  license?: string; // optional: SPDX identifier or free text
   compatibility?: string; // optional: environment requirements
-  mcps?: string[];        // MCP server names this skill unlocks on load
-  files: string[];        // files in the skill directory
+  mcps?: string[]; // MCP server names this skill unlocks on load
+  files: string[]; // files in the skill directory
 }
 
 // ---- Tools (内置工具目录) ----
@@ -720,12 +757,12 @@ export interface Tool {
   description: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   schema: Record<string, any>; // full JSON-Schema (object with properties)
-  agents: string[];            // bound agent keys
+  agents: string[]; // bound agent keys
   enabled: boolean;
   kind?: "builtin" | "shell" | "command" | "script" | "http"; // 自定义工具类型
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  exec?: Record<string, any>;  // 自定义工具执行规格(kind!=builtin)
-  deferred?: boolean;          // schema 延迟(SearchExtraTools/ExecuteExtraTool)
+  exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
+  deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
 }
 
 // ---- Stats ----
@@ -776,14 +813,14 @@ export interface InterceptPending {
 
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.
 export interface InterceptApprovalRow extends InterceptPending {
-  conv_title: string;      // "" if no linked conversation
-  conv_agent_key: string;  // "" if no linked conversation
-  rule_name: string;       // "" if rule was deleted
+  conv_title: string; // "" if no linked conversation
+  conv_agent_key: string; // "" if no linked conversation
+  rule_name: string; // "" if rule was deleted
 }
 
 // ── 资产同步 (ScopeSentry 数据源) ──────────────────────────────────────────────
 export interface SSProject {
-  id: string;        // MongoDB ObjectID — used as filter.project
+  id: string; // MongoDB ObjectID — used as filter.project
   name: string;
   logo?: string;
   AssetCount?: number;
@@ -792,7 +829,7 @@ export interface SSProject {
 
 export interface SSTask {
   id: string;
-  name: string;      // used as filter.task
+  name: string; // used as filter.task
   status?: number;
   progress?: number;
   creatTime?: string;

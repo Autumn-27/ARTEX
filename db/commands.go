@@ -209,6 +209,18 @@ func (d *DB) ListLLMRecords(model, session, task string, page, size int) ([]LLMR
 	return out, total, rows.Err()
 }
 
+// ModelTokenStat is one model's aggregated token usage for a task, summed from the
+// llm_usage metering ledger (see db/llm_usage.go). Calls is the number of LLM calls
+// that hit this model.
+type ModelTokenStat struct {
+	Model            string `json:"model"`
+	Calls            int    `json:"calls"`
+	InputTokens      int    `json:"input_tokens"`
+	OutputTokens     int    `json:"output_tokens"`
+	CacheReadTokens  int    `json:"cache_read_tokens"`
+	CacheWriteTokens int    `json:"cache_write_tokens"`
+}
+
 // LLMTask is one distinct task with its LLM-record count.
 type LLMTask struct {
 	TaskID string `json:"task_id"`

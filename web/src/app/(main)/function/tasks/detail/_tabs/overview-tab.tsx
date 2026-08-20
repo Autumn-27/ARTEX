@@ -7,6 +7,7 @@ import {
   AlertTriangleIcon,
   BugIcon,
   ClockIcon,
+  CoinsIcon,
   PlusIcon,
   RefreshCwIcon,
   ShieldCheckIcon,
@@ -21,7 +22,20 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
-import type { Finding, Stats, Task, TaskNode, TaskScopeRow } from "@/lib/types";
+import type { Finding, ModelTokenStat, Stats, Task, TaskNode, TaskScopeRow } from "@/lib/types";
+
+// 紧凑格式化 token 数（12345 → 12.3k，2000000 → 2M）。
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+  return String(n);
+}
+
+// 缓存命中率 = 缓存读 / 输入（InputTokens 已含 cache_read 子集，故比值在 0–100%）。
+function cacheHitRate(cacheRead: number, input: number): string {
+  if (input <= 0) return "—";
+  return Math.round((cacheRead / input) * 100) + "%";
+}
 
 // 测试范围一条的显示值：域名 / 网段 / 公司。
 function scopeValue(row: TaskScopeRow): string {
@@ -89,6 +103,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [scopeValueInput, setScopeValueInput] = React.useState("");
   const [scopeBusy, setScopeBusy] = React.useState(false);
   const [scopeErr, setScopeErr] = React.useState("");
+  // 按模型的 token 用量（来自常开的 llm_usage 计量账本，逐次精确）。
+  const [modelTokens, setModelTokens] = React.useState<ModelTokenStat[]>([]);
+
+  const loadTokens = React.useCallback(async () => {
+    try {
+      const resp = await api.tokensByModel(taskId);
+      setModelTokens(resp.models);
+    } catch {
+      // 忽略：无 PG 时接口报错，卡片自然为空
+    }
+  }, [taskId]);
 
   const loadScope = React.useCallback(async () => {
     try {
@@ -189,18 +214,34 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
     load();
     void loadScope();
-    const timer = setInterval(load, 3000);
+    void loadTokens();
+    const timer = setInterval(() => {
+      void load();
+      void loadTokens();
+    }, 3000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [taskId, loadScope]);
+  }, [taskId, loadScope, loadTokens]);
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
   const blocked = intents.filter((i) => i.state === "blocked");
   const taskFindings = findings.filter((f) => f.task_id === taskId);
   const goalsPct = task?.goals_total ? Math.round(((task.goals_met ?? 0) / task.goals_total) * 100) : 0;
+  // token 合计（跨全部模型），用于卡片头部总览。
+  const tokenTotals = modelTokens.reduce(
+    (acc, m) => {
+      acc.input += m.input_tokens;
+      acc.output += m.output_tokens;
+      acc.cacheRead += m.cache_read_tokens;
+      acc.cacheWrite += m.cache_write_tokens;
+      acc.calls += m.calls;
+      return acc;
+    },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 },
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -255,6 +296,77 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </CardContent>
         </Card>
       )}
+      {/* LLM Token 用量：按模型分组，数据来自 llm_records（需开启 LLM 录制）。 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <CoinsIcon className="size-4 text-amber-500" /> LLM Token 用量
+            <span className="text-muted-foreground text-xs font-normal">
+              （按模型统计{tokenTotals.calls > 0 ? `，共 ${tokenTotals.calls} 次调用` : ""}）
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {modelTokens.length > 0 ? (
+            <>
+              {/* 合计总览 */}
+              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+                <span className="tabular-nums">
+                  <span className="text-muted-foreground">输入 </span>
+                  <span className="font-semibold">{fmtTokens(tokenTotals.input)}</span>
+                </span>
+                <span className="tabular-nums">
+                  <span className="text-muted-foreground">输出 </span>
+                  <span className="font-semibold">{fmtTokens(tokenTotals.output)}</span>
+                </span>
+                <span className="tabular-nums">
+                  <span className="text-muted-foreground">缓存读 </span>
+                  <span className="font-semibold">{fmtTokens(tokenTotals.cacheRead)}</span>
+                </span>
+                <span className="tabular-nums">
+                  <span className="text-muted-foreground">缓存命中率 </span>
+                  <span className="font-semibold text-emerald-500">
+                    {cacheHitRate(tokenTotals.cacheRead, tokenTotals.input)}
+                  </span>
+                </span>
+              </div>
+              {/* 按模型明细表 */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-muted-foreground border-b text-left text-xs">
+                      <th className="py-1.5 pr-3 font-medium">模型</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">调用</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">输入</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">输出</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">缓存读</th>
+                      <th className="py-1.5 text-right font-medium">命中率</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {modelTokens.map((m) => (
+                      <tr key={m.model} className="border-b last:border-0">
+                        <td className="max-w-[16rem] truncate py-1.5 pr-3 font-mono text-xs" title={m.model}>
+                          {m.model}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{m.calls}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{fmtTokens(m.input_tokens)}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{fmtTokens(m.output_tokens)}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{fmtTokens(m.cache_read_tokens)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-emerald-500">
+                          {cacheHitRate(m.cache_read_tokens, m.input_tokens)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <p className="text-muted-foreground text-sm">暂无 LLM 用量（任务尚未产生调用，或记录仍在写入）。</p>
+          )}
+        </CardContent>
+      </Card>
       {/* 测试范围：覆盖度分母 + 授权边界，可手动增删。 */}
       <Card>
         <CardHeader>
