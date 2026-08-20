@@ -215,7 +215,7 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 // ResetRunningIntents returns any intent left in 'running' back to 'open' so it
 // is re-claimed. Called on startup: a 'running' intent with no live worker (a
 // backend restart or crashed worker goroutine left it stuck) would otherwise spin
-// forever in the UI. Workers re-run an intent from scratch, so reopening is safe.
+// forever in the UI. Workers resume from their transcript, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
@@ -227,9 +227,9 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 }
 
 // ReopenIntent flips ONE not-successfully-finished intent (blocked/exhausted/stopped)
-// back to 'open' so a worker re-claims and re-runs it from scratch (graph writes it
-// already produced stay). done/open/running are left untouched. Returns whether a row
-// changed (false = intent absent or not in a rerunnable state). Used by the "重跑" button.
+// back to 'open' so a worker re-claims it (graph writes it already produced stay).
+// The worker resumes from its prior LLM transcript instead of restarting from scratch.
+// done/open/running are left untouched. Returns whether a row changed. Used by "重跑".
 func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
@@ -244,7 +244,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 
 // ReopenBlockedIntents flips EVERY 'blocked' intent in this exploration back to 'open'
 // (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
-// number reopened. Workers re-run each from scratch; kept graph writes remain.
+// number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
