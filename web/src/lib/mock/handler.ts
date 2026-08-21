@@ -149,6 +149,74 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
   if (seg[0] === "tasks" && seg[2] === "asset-refs") return D.assetRefsFor(Number(q.get("asset_id") ?? 0));
 
+  // ── 任务测试范围（增删查）──
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") return { scope: [] };
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "POST")
+    return { id: Date.now(), task_id: Number(seg[1]), kind: b.kind, domain: b.value, source: "manual" };
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 4 && m === "DELETE") return { ok: true };
+
+  // ── 全局 llm_usage 聚合（仪表盘新版视图，demo）──
+  if (path === "/tokens/usage")
+    return {
+      by_profile: [
+        {
+          profile_name: "default",
+          calls: 60,
+          tasks: 4,
+          input_tokens: 1570000,
+          output_tokens: 110000,
+          cache_read_tokens: 1120000,
+          cache_write_tokens: 140000,
+        },
+      ],
+      daily: [
+        {
+          profile_name: "default",
+          date: "2026-08-18",
+          input_tokens: 520000,
+          output_tokens: 38000,
+          cache_read_tokens: 370000,
+        },
+        {
+          profile_name: "default",
+          date: "2026-08-19",
+          input_tokens: 640000,
+          output_tokens: 45000,
+          cache_read_tokens: 460000,
+        },
+        {
+          profile_name: "default",
+          date: "2026-08-20",
+          input_tokens: 410000,
+          output_tokens: 27000,
+          cache_read_tokens: 290000,
+        },
+      ],
+    };
+
+  // ── 按模型 token 用量（demo：一条示例）──
+  if (path === "/llm/records/by-model")
+    return {
+      models: [
+        {
+          model: "claude-opus-4-6",
+          calls: 42,
+          input_tokens: 1250000,
+          output_tokens: 86000,
+          cache_read_tokens: 940000,
+          cache_write_tokens: 120000,
+        },
+        {
+          model: "claude-haiku-4-5",
+          calls: 18,
+          input_tokens: 320000,
+          output_tokens: 24000,
+          cache_read_tokens: 180000,
+          cache_write_tokens: 20000,
+        },
+      ],
+    };
+
   // ── 工作空间文件管理器（demo：静态示例树；写/建/删走下方写兜底 {ok:true}）──
   if (path === "/workspace/list") return D.workspaceList(q.get("path") ?? "");
   if (path === "/workspace/read") return D.workspaceRead(q.get("path") ?? "");
@@ -200,18 +268,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     };
   }
   // 单条 finding:GET 详情 / PATCH 改状态/严重度/名称/类别(demo 直接改内存对象)。
-  if (
-    seg[0] === "exploration" &&
-    seg[1] === "findings" &&
-    seg.length === 3 &&
-    seg[2] !== "stats"
-  ) {
+  if (seg[0] === "exploration" && seg[1] === "findings" && seg.length === 3 && seg[2] !== "stats") {
     const f = mockFindings.find((x) => x.id === seg[2]);
     if (!f) return {};
     if (m === "PATCH") {
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
-      if (typeof b.severity === "string")
-        f.severity = b.severity as typeof f.severity;
+      if (typeof b.severity === "string") f.severity = b.severity as typeof f.severity;
       if (typeof b.name === "string") f.name = b.name;
       if (typeof b.vulnclass === "string") f.vulnclass = b.vulnclass;
     }
@@ -288,7 +350,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
     const limit = Math.max(1, Number(q.get("limit") ?? 300));
-    const items = D.activityForTask().filter((item) => item.seq > since).slice(0, limit);
+    const items = D.activityForTask()
+      .filter((item) => item.seq > since)
+      .slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
   if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
@@ -309,7 +373,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings" && m === "PUT") return { ...D.settings, ...b };
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
   if (path === "/settings/python/detect") return { python_interpreter: "/usr/bin/python3" };
-  if (path === "/chat") return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
+  if (path === "/chat")
+    return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
   if (path === "/gc") return { removed: 0 };
 
   // ── 工具执行历史 ──
@@ -337,11 +402,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/llm/pool" && m === "GET") return D.llmPool;
   if (path === "/llm/pool/reset")
     return { ...D.llmPool, chain: D.llmPool.chain.map((c) => ({ ...c, state: "ok", fails: 0, cooldown_secs: 0 })) };
-  if (seg[0] === "llm" && seg[1] === "profiles" && seg.length === 3 && m === "DELETE") return { deleted: Number(seg[2]) };
+  if (seg[0] === "llm" && seg[1] === "profiles" && seg.length === 3 && m === "DELETE")
+    return { deleted: Number(seg[2]) };
 
   // ── agents ──
   if (path === "/agents" && m === "GET") return { agents: D.agents };
-  if (path === "/agents" && m === "POST") return { id: "9", key: String(b.key ?? "custom"), name: String(b.name ?? ""), role: "custom", builtin: false, enabled: true };
+  if (path === "/agents" && m === "POST")
+    return {
+      id: "9",
+      key: String(b.key ?? "custom"),
+      name: String(b.name ?? ""),
+      role: "custom",
+      builtin: false,
+      enabled: true,
+    };
   if (seg[0] === "agents" && seg.length === 2 && m === "GET") return D.agentDetail(seg[1]);
   if (seg[0] === "agents" && seg[2] === "triggers" && m === "GET") return { triggers: [] };
   if (seg[0] === "agents" && seg[2] === "prompts") return { versions: D.agentDetail(seg[1]).versions };
@@ -352,7 +426,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── conversations ──
   if (path === "/conversations" && m === "GET") return { conversations: D.conversations };
-  if (path === "/conversations" && m === "POST") return { id: 3, agent_key: String(b.agent_key ?? "mainagent"), title: String(b.title ?? "新会话"), created_at: "2026-07-26T04:00:00Z", updated_at: "2026-07-26T04:00:00Z" };
+  if (path === "/conversations" && m === "POST")
+    return {
+      id: 3,
+      agent_key: String(b.agent_key ?? "mainagent"),
+      title: String(b.title ?? "新会话"),
+      created_at: "2026-07-26T04:00:00Z",
+      updated_at: "2026-07-26T04:00:00Z",
+    };
   if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 3 && m === "GET") {
     const items = D.conversationMessages[Number(seg[1])] ?? [];
     return { items, cursor: items.length ? items[items.length - 1].seq : 0, running: false };
@@ -378,13 +459,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "mcp" && seg.length === 2 && m === "DELETE") return { deleted: Number(seg[1]) };
 
   // ── scopesentry（demo：未配置）──
-  if (path === "/sync/scopesentry/status") return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
+  if (path === "/sync/scopesentry/status")
+    return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
   if (path === "/sync/scopesentry/projects") return { projects: [], tag: {} };
   if (path === "/sync/scopesentry/tasks") return { tasks: [] };
   if (path === "/sync/scopesentry/sync") return { synced: {}, companies: null, warnings: null, errors: null };
 
   // ── skills ──
   if (path === "/skills" && m === "GET") return { skills: D.skills };
+  if (path === "/skills/missing") return { missing: D.missingSkills };
+  if (seg[0] === "skills" && seg[2] === "usage") return { calls: D.skillCalls };
   if (path === "/skills" && m === "POST") return { name: String(b.name ?? "new-skill") };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length === 3) return { files: ["SKILL.md"] };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length >= 4)
@@ -395,7 +479,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── intercept ──
   if (path === "/intercept/rules" && m === "GET") return { rules: D.interceptRules };
-  if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle") return { ok: true, enabled: b.enabled ?? true };
+  if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle")
+    return { ok: true, enabled: b.enabled ?? true };
   if (path === "/intercept/pending" && m === "GET") return { pending: D.interceptPending };
   if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") return { ok: true };
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
@@ -409,5 +494,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (["POST", "PUT", "PATCH", "DELETE"].includes(m)) return { ok: true };
 
   // ── 读兜底：集合类给 []，其余 {} ──
-  return /(\/(tasks|profiles|conversations|rules|history|projects|tokens|agents|servers|skills|tools|findings|intents)s?$)|s$/.test(path) ? [] : {};
+  return /(\/(tasks|profiles|conversations|rules|history|projects|tokens|agents|servers|skills|tools|findings|intents)s?$)|s$/.test(
+    path,
+  )
+    ? []
+    : {};
 }

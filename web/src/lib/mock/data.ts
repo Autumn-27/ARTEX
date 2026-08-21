@@ -7,7 +7,7 @@ import type {
   Activity, Agent, AgentDetail, Asset, Audit, Company, Conversation,
   ConvTokenSummary, DailyTokenBucket, Edge, Finding, InterceptApprovalRow,
   InterceptPending, InterceptRule, LLMPoolStatus, LLMProfile, MCPServer, MCPTool, PromptVar,
-  PromptVersion, Settings, SkillItem, Stats, TaskNode, Task, TokenTotal,
+  PromptVersion, Settings, SkillCall, SkillItem, MissingSkill, Stats, TaskNode, Task, TokenTotal,
   TokenUsage, Tool, TrafficResp, TrafficDetail, TrafficHost, LLMTask,
 } from "@/lib/types";
 
@@ -617,14 +617,14 @@ export const audit: Audit = {
 
 // ── LLM profiles ─────────────────────────────────────────────────────────────
 export const llmProfiles: LLMProfile[] = [
-  { id: "1", name: "Claude Opus 4.8", format: "anthropic", model: "claude-opus-4-8", api_key_hint: "…a3f2", rate_per_second: 0, rate_per_minute: 0, context_window_k: 1000, reasoning_effort: "high", is_default: true, priority: 0, pool_exclude: false },
-  { id: "2", name: "DeepSeek V4", format: "openai", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash", api_key_hint: "…9c11", rate_per_second: 0, rate_per_minute: 60, context_window_k: 128, reasoning_effort: "", is_default: false, priority: 10, pool_exclude: false },
+  { id: "1", name: "Claude Opus 4.8", format: "anthropic", model: "claude-opus-4-8", api_key_hint: "…a3f2", rate_per_second: 0, rate_per_minute: 0, context_window_k: 1000, thinking_type: "enabled", reasoning_effort: "high", is_default: true, priority: 0, pool_exclude: false },
+  { id: "2", name: "DeepSeek V4", format: "openai", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash", api_key_hint: "…9c11", rate_per_second: 0, rate_per_minute: 60, context_window_k: 128, thinking_type: "", reasoning_effort: "", is_default: false, priority: 10, pool_exclude: false },
 ];
 
 export const llmConfig = {
   configured: true, provider: "anthropic", model: "claude-opus-4-8",
   base_url: "", proxy: "", key_set: true,
-  rate_per_second: 0, rate_per_minute: 0, context_window_k: 1000, reasoning_effort: "high",
+  rate_per_second: 0, rate_per_minute: 0, context_window_k: 1000, thinking_type: "enabled", reasoning_effort: "high",
 };
 
 // ── Agents ───────────────────────────────────────────────────────────────────
@@ -686,9 +686,19 @@ export const mcpToolsById: Record<number, MCPTool[]> = {
 
 // ── Skills ───────────────────────────────────────────────────────────────────
 export const skills: SkillItem[] = [
-  { name: "api-recon", description: "对 REST/GraphQL API 做侦察与越权面枚举；发现新 API 端点时使用。", license: "MIT", mcps: [], files: ["SKILL.md", "scripts/enum.py"] },
-  { name: "playwright-cli", description: "用 Playwright 驱动浏览器做动态爬取与截图；需要渲染 JS 站点时使用。", mcps: ["playwright"], files: ["SKILL.md"] },
-  { name: "scopesentry", description: "从 ScopeSentry 拉取资产并归并到公司范围；批量导入资产时使用。", files: ["SKILL.md", "assets/mapping.md"] },
+  { name: "api-recon", description: "对 REST/GraphQL API 做侦察与越权面枚举；发现新 API 端点时使用。", license: "MIT", mcps: [], files: ["SKILL.md", "scripts/enum.py"], calls: 24, tasks: 6, usage_agents: ["worker", "planner"], last_used: "2026-08-20T09:12:00Z" },
+  { name: "playwright-cli", description: "用 Playwright 驱动浏览器做动态爬取与截图；需要渲染 JS 站点时使用。", mcps: ["playwright"], files: ["SKILL.md"], calls: 7, tasks: 3, usage_agents: ["worker"], last_used: "2026-08-19T21:40:00Z" },
+  { name: "scopesentry", description: "从 ScopeSentry 拉取资产并归并到公司范围；批量导入资产时使用。", files: ["SKILL.md", "assets/mapping.md"], calls: 0, tasks: 0, usage_agents: [] },
+];
+
+export const skillCalls: SkillCall[] = [
+  { ts: "2026-08-20T09:12:00Z", agent_key: "worker", task_id: 42, session_id: "", args_len: 128 },
+  { ts: "2026-08-20T08:03:00Z", agent_key: "planner", task_id: 42, session_id: "", args_len: 0 },
+  { ts: "2026-08-19T17:55:00Z", agent_key: "worker", task_id: 37, session_id: "", args_len: 64 },
+];
+
+export const missingSkills: MissingSkill[] = [
+  { skill: "jwt-forge", calls: 3, agents: ["worker"], last_used: "2026-08-20T07:20:00Z" },
 ];
 
 // ── Tools ────────────────────────────────────────────────────────────────────

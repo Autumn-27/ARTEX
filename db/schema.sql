@@ -235,7 +235,10 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     rate_per_second  DOUBLE PRECISION NOT NULL DEFAULT 0,
     rate_per_minute  DOUBLE PRECISION NOT NULL DEFAULT 0,
     context_window_k INTEGER NOT NULL DEFAULT 0,
+    -- 思考参数拆成两个独立字段：thinking_type=思考开关(''/disabled/enabled)，
+    -- reasoning_effort=思考强度(''/low/medium/high/xhigh/max)，互不牵连。
     reasoning_effort TEXT NOT NULL DEFAULT '',
+    thinking_type    TEXT NOT NULL DEFAULT '',
     is_default       BOOLEAN NOT NULL DEFAULT false,
     -- 轮询(故障转移)参数，见 docs/LLM轮询设计.md：
     --   priority     顺位，越大越先被选中；激活配置(is_default)永远排链首，与本值无关。
@@ -252,6 +255,26 @@ CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
 -- 轮询顺位/排除标记；补旧库。默认 0 / false = 全部配置都参与轮询。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
+
+-- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
+-- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
+-- 否则每次启动都会把用户后来手动设的组合覆盖回去。旧 reasoning_effort 语义：
+--   'off'                    → 显式关闭  → thinking_type='disabled'，强度清空
+--   'low/medium/high/max'    → 开启+强度 → thinking_type='enabled'，强度保留
+--   ''                       → 不发送    → 两者皆空(默认)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'llm_profiles' AND column_name = 'thinking_type'
+    ) THEN
+        ALTER TABLE llm_profiles ADD COLUMN thinking_type TEXT NOT NULL DEFAULT '';
+        UPDATE llm_profiles SET thinking_type = 'enabled'
+            WHERE reasoning_effort IN ('low','medium','high','max');
+        UPDATE llm_profiles SET thinking_type = 'disabled', reasoning_effort = ''
+            WHERE reasoning_effort = 'off';
+    END IF;
+END $$;
 
 -- LLM 轮询熔断状态：某个配置连续失败(余额不足/key 失效/限流)后进入冷却，冷却期内
 -- 轮询直接跳过它。内存态为准，这里落库只为重启后不丢冷却窗口——加载时只取尚未
@@ -391,7 +414,7 @@ CREATE TABLE IF NOT EXISTS agents (
     llm_profile_id    BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
     current_prompt_id BIGINT,
     max_turns         INTEGER NOT NULL DEFAULT 0,
-    run_seconds       INTEGER NOT NULL DEFAULT 600,
+    run_seconds       INTEGER NOT NULL DEFAULT 1200,
     web_search        BOOLEAN NOT NULL DEFAULT false,
     interactive_shell BOOLEAN NOT NULL DEFAULT false,
     wrapup_prompt     TEXT NOT NULL DEFAULT '',
@@ -411,6 +434,8 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NUL
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
 -- per-agent LLM 绑定(agent 级默认模型):列自初版即在上方 CREATE 中,此 ALTER 仅为极旧库兜底(幂等)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+-- run_seconds 单次 run 墙钟默认 600→1200:只改列默认(影响将来新插入的行),不动旧库存量行。
+ALTER TABLE agents ALTER COLUMN run_seconds SET DEFAULT 1200;
 CREATE INDEX IF NOT EXISTS idx_agents_llm_profile ON agents(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
@@ -500,6 +525,26 @@ CREATE TABLE IF NOT EXISTS agent_skill_visibility (
     PRIMARY KEY (agent_id, skill_name)
 );
 CREATE INDEX IF NOT EXISTS idx_askv_skill ON agent_skill_visibility(skill_name);
+
+-- Skill 调用账本（见 db/skill_usage.go）。一次 Skill() 调用一行，只记维度不记正文。
+-- 刻意不设外键：任务/会话删除后统计仍要保留（与 llm_usage 同理），skill 本身也只是
+-- 文件系统上的目录名，没有对应的表。
+CREATE TABLE IF NOT EXISTS skill_usage (
+    id             BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    skill          TEXT NOT NULL,
+    agent_key      TEXT,
+    task_id        BIGINT,
+    exploration_id BIGINT,
+    intent_id      BIGINT,
+    session_id     TEXT,
+    args_len       INTEGER NOT NULL DEFAULT 0,
+    -- false = 模型点名了一个不存在的 skill(未命中)。这类行同样保留：它反映"想用但没有"
+    -- 的缺口，是补 skill 的依据。
+    found          BOOLEAN NOT NULL DEFAULT true
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_skill ON skill_usage(skill, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_task  ON skill_usage(task_id);
 
 -- =====================================================================
 -- H. 内置工具目录

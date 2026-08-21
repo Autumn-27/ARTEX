@@ -926,7 +926,8 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 		return true
 	}
 	// if a pause cancelled this run mid-flight, return the intent to the frontier
-	// so it is re-claimed (and re-run from scratch) on resume — not marked done.
+	// so it is re-claimed on resume — the worker will resume the prior LLM
+	// conversation from its transcript instead of restarting from scratch.
 	if ectx.Err() != nil && e.IsPaused(t.ID) {
 		_ = t.Store.SetIntentState(intent.ID, "open")
 		return true

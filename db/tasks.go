@@ -437,6 +437,8 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 		}
 		result.LLMRecordsDeleted, _ = res.RowsAffected()
 	}
+	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
+	// task — it is kept as historical accounting even after the task is gone.
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id=$1`, id); err != nil {
 		return result, err
 	}

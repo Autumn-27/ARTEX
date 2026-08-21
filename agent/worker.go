@@ -265,6 +265,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	base = append(base, actool.DefaultTools()...)
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
@@ -359,6 +360,18 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
+
+	// Resume prior conversation if this intent was paused/blocked/exhausted and is
+	// being re-run. The transcript ID is deterministic per intent, so if a prior
+	// session exists the worker continues from where it left off instead of
+	// restarting from scratch.
+	if w.tx != nil {
+		_ = s.Resume(opts.SessionID)
+		if len(s.Messages()) > 0 {
+			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
+			input = "继续执行。"
+		}
+	}
 
 	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.

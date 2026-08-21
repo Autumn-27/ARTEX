@@ -8,10 +8,22 @@ import {
   ArrowUpRightIcon,
   FileTextIcon,
   Trash2Icon,
+  DownloadIcon,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -100,6 +112,73 @@ export default function FindingsPage() {
   const [stats, setStats] = React.useState<FindingStats>(EMPTY_STATS);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
+
+  // 勾选导出:按 finding_id(独立表 id)记选中项,跨页保留。
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(() => new Set());
+  // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
+  const [exportOpen, setExportOpen] = React.useState(false);
+  const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
+  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  const [exporting, setExporting] = React.useState(false);
+
+  const toggleSelected = React.useCallback((id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  // 当前页可勾选的 finding_id(排除无 finding_id 的继承行)。
+  const pageSelectableIds = React.useMemo(
+    () => findings.map((f) => f.finding_id).filter((id): id is string => !!id),
+    [findings],
+  );
+  const pageSelectedCount = pageSelectableIds.filter((id) => selectedIds.has(id)).length;
+  let headerChecked: boolean | "indeterminate" = false;
+  if (pageSelectableIds.length > 0 && pageSelectedCount === pageSelectableIds.length) {
+    headerChecked = true;
+  } else if (pageSelectedCount > 0) {
+    headerChecked = "indeterminate";
+  }
+  const toggleSelectedPage = React.useCallback(
+    (checked: boolean) => {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of pageSelectableIds) {
+          if (checked) next.add(id);
+          else next.delete(id);
+        }
+        return next;
+      });
+    },
+    [pageSelectableIds],
+  );
+
+  // 打开导出弹窗时,若有勾选项则默认范围切到「选中」,否则「当前筛选」。
+  function openExport() {
+    setExportScope(selectedIds.size > 0 ? "selected" : "filtered");
+    setExportOpen(true);
+  }
+
+  async function doExport() {
+    setExporting(true);
+    try {
+      await api.exportFindings({
+        format: exportFormat,
+        scope: exportScope,
+        filters: { severity, status, vulnclass, task, sort },
+        ids: [...selectedIds],
+      });
+      setExportOpen(false);
+      toast.success("已开始下载导出文件");
+    } catch (e) {
+      toast.error("导出失败：" + (e as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }
 
   // reset to page 1 whenever filters change
   React.useEffect(() => {
@@ -386,9 +465,19 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
-          <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-            共 {total} 条
-          </span>
+          <div className="ml-auto flex items-center gap-3">
+            {selectedIds.size > 0 && (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                已选 {selectedIds.size} 条
+              </span>
+            )}
+            <span className="text-xs text-muted-foreground tabular-nums">
+              共 {total} 条
+            </span>
+            <Button size="sm" variant="outline" onClick={openExport}>
+              <DownloadIcon /> 导出
+            </Button>
+          </div>
         </div>
 
         <Card className="py-0">
@@ -398,6 +487,13 @@ export default function FindingsPage() {
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8">
+                    <Checkbox
+                      checked={headerChecked}
+                      onCheckedChange={(c) => toggleSelectedPage(c === true)}
+                      aria-label="选择本页全部"
+                    />
+                  </TableHead>
                   <TableHead className="w-8" />
                   <TableHead className="w-20">严重度</TableHead>
                   <TableHead>漏洞名称</TableHead>
@@ -417,6 +513,17 @@ export default function FindingsPage() {
                         className="cursor-pointer"
                         onClick={() => toggleRow(f)}
                       >
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          {f.finding_id && (
+                            <Checkbox
+                              checked={selectedIds.has(f.finding_id)}
+                              onCheckedChange={(c) =>
+                                toggleSelected(f.finding_id as string, c === true)
+                              }
+                              aria-label="选择该漏洞"
+                            />
+                          )}
+                        </TableCell>
                         <TableCell>
                           <ChevronRightIcon
                             className={cn(
@@ -555,7 +662,7 @@ export default function FindingsPage() {
                         <TableRow className="hover:bg-transparent">
                           {/* whitespace-normal 覆盖 TableCell 默认的 nowrap,否则展开区文字
                               被强制单行、直接溢出单元格。 */}
-                          <TableCell colSpan={8} className="bg-muted/30 whitespace-normal">
+                          <TableCell colSpan={9} className="bg-muted/30 whitespace-normal">
                             <div className="flex flex-col gap-2 px-2 py-1">
                               {/* 行内编辑:名称/类别/严重等级,可改并保存(仅独立 finding 行)。 */}
                               {f.finding_id && edit && (
@@ -643,9 +750,20 @@ export default function FindingsPage() {
                               {/* 详细报告(Markdown):展开时按 finding_id 懒加载,免进详情页即可查看。 */}
                               {f.finding_id && (
                                 <div className="flex flex-col gap-1.5">
-                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <FileTextIcon className="size-3.5" />
-                                    详细报告
+                                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                                    <span className="flex items-center gap-2">
+                                      <FileTextIcon className="size-3.5" />
+                                      详细报告
+                                    </span>
+                                    {reports[f.id]?.status === "done" &&
+                                      reports[f.id]?.text.trim() && (
+                                        <CopyButton
+                                          text={reports[f.id]?.text}
+                                          successMessage="已复制详细报告"
+                                          variant="ghost"
+                                          className="h-6 px-2 text-xs"
+                                        />
+                                      )}
                                   </div>
                                   {(() => {
                                     const rep = reports[f.id];
@@ -686,7 +804,7 @@ export default function FindingsPage() {
                 {findings.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={8}
+                      colSpan={9}
                       className="py-12 text-center text-sm text-muted-foreground"
                     >
                       没有匹配的发现。
@@ -705,6 +823,76 @@ export default function FindingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>导出发现</DialogTitle>
+            <DialogDescription>
+              选择导出范围与格式,生成后浏览器会自动下载。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-5 py-1">
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-muted-foreground">导出范围</Label>
+              <RadioGroup
+                value={exportScope}
+                onValueChange={(v) => setExportScope(v as typeof exportScope)}
+              >
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="filtered" /> 导出当前筛选结果（共 {total} 条）
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="all" /> 导出全部
+                </label>
+                <label
+                  className={cn(
+                    "flex items-center gap-2 text-sm",
+                    selectedIds.size === 0 && "text-muted-foreground",
+                  )}
+                >
+                  <RadioGroupItem value="selected" disabled={selectedIds.size === 0} />
+                  导出勾选的 {selectedIds.size} 条
+                </label>
+              </RadioGroup>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-muted-foreground">导出格式</Label>
+              <RadioGroup
+                value={exportFormat}
+                onValueChange={(v) => setExportFormat(v as typeof exportFormat)}
+              >
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="md-single" /> Markdown 汇总报告（单个 .md 文件）
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="md-zip" /> Markdown 分文件（一漏洞一 .md,打包 .zip）
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="csv" /> CSV 表格（.csv）
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="json" /> JSON（.json）
+                </label>
+              </RadioGroup>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportOpen(false)} disabled={exporting}>
+              取消
+            </Button>
+            <Button
+              onClick={doExport}
+              disabled={exporting || (exportScope === "selected" && selectedIds.size === 0)}
+            >
+              <DownloadIcon /> {exporting ? "导出中…" : "导出"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 
@@ -274,14 +275,14 @@ func (s *Server) agentMaxTurns(key string) int {
 }
 
 // agentRunSeconds returns the configured wall-clock run budget (seconds) for an
-// agent key (0 = unlimited; 600 fallback when no DB or no row, matching schema).
+// agent key (0 = unlimited; 1200 fallback when no DB or no row, matching schema).
 func (s *Server) agentRunSeconds(key string) int {
 	if s.m.pg == nil {
-		return 600
+		return 1200
 	}
 	a, err := s.m.pg.GetAgentByKey(key)
 	if err != nil || a == nil {
-		return 600
+		return 1200
 	}
 	return a.RunSecs
 }
@@ -295,6 +296,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -328,7 +330,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	newID, err := s.m.pg.SaveProfile(&db.LLMProfile{
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
-		ContextWindowK: cfg.ContextWindowK, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
+		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude,
 	})
 	if err != nil {
@@ -408,7 +410,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		s.cfgMu.Lock()
 		profName := s.llmProf
 		s.cfgMu.Unlock()
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 	}
 	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
 	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
@@ -458,6 +460,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
+	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -501,7 +504,7 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 	}
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
@@ -647,6 +650,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
+	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
+	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
@@ -675,6 +680,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
+	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
@@ -688,6 +694,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
 	mux.HandleFunc("GET /api/tokens/daily", s.tokenDailyStats)
 	mux.HandleFunc("GET /api/tokens/conversations", s.conversationTokens)
+	mux.HandleFunc("GET /api/tokens/usage", s.pgUsageStats) // 全局 llm_usage 聚合（仪表盘新版视图）
 
 	mux.HandleFunc("GET /api/audit", s.getAudit)
 	mux.HandleFunc("POST /api/gc", s.gc)
@@ -700,6 +707,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
+	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
@@ -770,6 +778,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/skills", s.fsCreateSkill)
 	mux.HandleFunc("POST /api/skills/upload", s.fsUploadSkill)
 	mux.HandleFunc("DELETE /api/skills/{name}", s.fsDeleteSkill)
+	mux.HandleFunc("GET /api/skills/missing", s.fsMissingSkills)   // 未命中(想调但不存在)的 skill 名
+	mux.HandleFunc("GET /api/skills/{name}/usage", s.fsSkillUsage) // 单个 skill 的最近调用
 	mux.HandleFunc("PUT /api/skills/{name}/meta", s.fsUpdateSkillMeta)
 	mux.HandleFunc("POST /api/skills/{name}/dirs", s.fsCreateDir)
 	mux.HandleFunc("GET /api/skills/{name}/files", s.fsListFiles)
@@ -994,7 +1004,9 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	case "pause":
 		s.engine.Pause(t.ID, agent.AbortPausedByUser)
 		// Main Agent turns run outside Engine's planner/worker context so they need
-		// their own cancellation. New turns are rejected while the task is paused.
+		// their own cancellation: pausing terminates the CURRENTLY running turn. New
+		// turns are still allowed while paused — the main-agent console is independent
+		// of task pause (the chat handler no longer rejects on IsPaused).
 		s.cancelTaskChat(t.ID, agent.AbortChatPausedWithTask)
 	case "resume":
 		s.engine.Run(s.ctx, t) // ensure loops are alive, then un-pause + nudge
@@ -1167,6 +1179,7 @@ func (s *Server) getLLM(w http.ResponseWriter, r *http.Request) {
 		"rate_per_second":  s.llmCfg.RatePerSecond,
 		"rate_per_minute":  s.llmCfg.RatePerMinute,
 		"context_window_k": s.llmCfg.ContextWindowK,
+		"thinking_type":    s.llmCfg.ThinkingType,
 		"reasoning_effort": s.llmCfg.ReasoningEffort,
 	})
 }
@@ -1182,6 +1195,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		RatePerSecond   float64 `json:"rate_per_second"`
 		RatePerMinute   float64 `json:"rate_per_minute"`
 		ContextWindowK  int     `json:"context_window_k"`
+		ThinkingType    string  `json:"thinking_type"`
 		ReasoningEffort string  `json:"reasoning_effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1190,6 +1204,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
+	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
 	if k := req.ContextWindowK; k > 0 { // 0 = keep default (200K); cap at 1M
 		if k > 1000 {
@@ -1236,6 +1251,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		BaseURL         string `json:"base_url"`
 		Proxy           string `json:"proxy"`
 		APIKey          string `json:"api_key"`
+		ThinkingType    string `json:"thinking_type"`
 		ReasoningEffort string `json:"reasoning_effort"`
 		ProfileID       *int64 `json:"profile_id"` // 测已存 profile 时传入：api_key 为空则用它存的 key
 	}
@@ -1246,6 +1262,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
+	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
@@ -1634,6 +1651,64 @@ func (s *Server) taskScopeList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"scope": rows})
 }
 
+func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	var body struct {
+		Kind   string `json:"kind"`
+		Value  string `json:"value"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "invalid JSON")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	ts, err := as.AddAgentScope(taskID, body.Kind, body.Value, body.Reason, "manual")
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, ts)
+}
+
+func (s *Server) taskScopeDelete(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	scopeID, err := strconv.ParseInt(r.PathValue("sid"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "invalid scope id")
+		return
+	}
+	deleted, err := as.DeleteTaskScope(taskID, scopeID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !deleted {
+		writeErr(w, 404, "scope row not found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
 func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
@@ -1831,6 +1906,110 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		dto.Inherited = inherited
 	}
 	writeJSON(w, 200, dto)
+}
+
+// findingsExport 导出发现页的漏洞。
+//
+//	scope   = filtered（沿用页面筛选）| all（全部）| selected（勾选的 ids）
+//	format  = md-single（整合一份 .md）| md-zip（一漏洞一 .md,打包 zip）
+//	          | csv | json
+//	ids     = 逗号分隔的 finding id（scope=selected 时必填）
+//	筛选参数 severity/status/vulnclass/task_id/sort 与列表接口一致（scope=filtered 用）。
+func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	scope := q.Get("scope")
+	format := q.Get("format")
+
+	var ids []int64
+	var filter db.FindingFilter
+	switch scope {
+	case "selected":
+		for _, part := range strings.Split(q.Get("ids"), ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || id <= 0 {
+				writeErr(w, 400, "bad finding id: "+part)
+				return
+			}
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			writeErr(w, 400, "no findings selected")
+			return
+		}
+	case "all":
+		// 空 filter = 不加任何条件。
+	case "filtered", "":
+		filter = db.FindingFilter{
+			Severity:  normFilter(q.Get("severity")),
+			Status:    normFilter(q.Get("status")),
+			VulnClass: normFilter(q.Get("vulnclass")),
+			TaskID:    normFilter(q.Get("task_id")),
+			Sort:      q.Get("sort"),
+		}
+	default:
+		writeErr(w, 400, "bad scope: "+scope)
+		return
+	}
+
+	fs, err := s.m.pg.ListFindingsForExport(filter, ids)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	now := time.Now()
+	stamp := now.Format("20060102-150405")
+	setDownload := func(contentType, filename string) {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	}
+
+	switch format {
+	case "md-single":
+		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
+		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
+	case "md-zip":
+		setDownload("application/zip", "findings-"+stamp+".zip")
+		zw := zip.NewWriter(w)
+		used := map[string]int{}
+		for _, f := range fs {
+			base := report.FindingFilename(f)
+			name := base
+			// 去重:同名文件追加 -2、-3……
+			if n := used[base]; n > 0 {
+				name = fmt.Sprintf("%s-%d.md", strings.TrimSuffix(base, ".md"), n+1)
+			}
+			used[base]++
+			fw, werr := zw.Create(name)
+			if werr != nil {
+				log.Printf("[findings-export] zip create %s: %v", name, werr)
+				continue
+			}
+			_, _ = fw.Write([]byte(report.SingleFindingMarkdown(f, now)))
+		}
+		if cerr := zw.Close(); cerr != nil {
+			log.Printf("[findings-export] zip close: %v", cerr)
+		}
+	case "csv":
+		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
+		_, _ = w.Write(report.FindingsCSV(fs))
+	case "json":
+		assets := s.resolveFindingAssets(fs)
+		out := make([]FindingDTO, 0, len(fs))
+		for _, f := range fs {
+			out = append(out, findingFromDB(f, assets))
+		}
+		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(out)
+	default:
+		writeErr(w, 400, "bad format: "+format)
+	}
 }
 
 func findingProvenanceInTask(contextTask *Task, findingTaskID *int64) (sourceTaskID string, inherited, allowed bool) {
@@ -2940,10 +3119,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
-	if s.engine.IsPaused(t.ID) {
-		writeErr(w, 409, "任务已暂停，无法发送新消息")
-		return
-	}
+	// 注意:任务暂停(paused)不拦截主 Agent 对话。主 Agent 编排会话独立于 planner/
+	// worker 的暂停,暂停中仍可继续对话(暂停只终止其正在进行的那一轮,见 control())。
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
@@ -2956,9 +3133,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// turn busy before its first activity/file write, including rule-mode turns.
 	// If deletion wins the race, the second barrier check rejects this request.
 	s.chatMu.Lock()
-	if s.engine.IsDeleting(t.ID) || s.engine.IsPaused(t.ID) {
+	if s.engine.IsDeleting(t.ID) {
 		s.chatMu.Unlock()
-		writeErr(w, 409, "任务正在删除或已暂停，无法发送新消息")
+		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
 	if s.chatBusy[t.ID] {

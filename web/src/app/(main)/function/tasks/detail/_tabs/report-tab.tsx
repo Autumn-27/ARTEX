@@ -9,6 +9,7 @@ import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { copyText } from "@/lib/utils";
 
 export function ReportTab({ taskId }: { taskId: string }) {
   const [report, setReport] = React.useState<string>("");
@@ -34,12 +35,16 @@ export function ReportTab({ taskId }: { taskId: string }) {
     };
   }, [taskId]);
 
-  function copy() {
+  async function copy() {
     if (!report) return;
-    navigator.clipboard?.writeText(report);
-    setCopied(true);
-    toast.success("已复制 Markdown");
-    setTimeout(() => setCopied(false), 1500);
+    const ok = await copyText(report);
+    if (ok) {
+      setCopied(true);
+      toast.success("已复制 Markdown");
+      setTimeout(() => setCopied(false), 1500);
+    } else {
+      toast.error("复制失败，请手动选择文本复制");
+    }
   }
 
   let content: React.ReactNode;

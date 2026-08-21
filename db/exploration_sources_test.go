@@ -356,13 +356,13 @@ func TestTaskAssetContextUsesDirectSourceScopeAndAnchors(t *testing.T) {
 		_ = d.DeleteTask(grand.ID)
 		_, _ = assets.DeleteByIDs([]int64{sourceTestedID, sourceUntestedID, sourceAnchoredOnlyID, grandID})
 	})
-	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceTestedDomain, "test"); err != nil {
+	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceTestedDomain, "test", "agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceUntestedDomain, "test"); err != nil {
+	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceUntestedDomain, "test", "agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.AddAgentScope(grand.ID, "root_domain", grandDomain, "test"); err != nil {
+	if _, err := assets.AddAgentScope(grand.ID, "root_domain", grandDomain, "test", "agent"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Exploration(source.ExplorationID).AddNode(KindFact, map[string]any{"summary": "tested source asset"}, 0, "confirmed", "worker", []int64{sourceTestedID}); err != nil {
