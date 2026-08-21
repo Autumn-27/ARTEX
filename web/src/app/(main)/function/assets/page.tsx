@@ -12,7 +12,6 @@ import {
   LinkIcon,
   type LucideIcon,
   NetworkIcon,
-  PlusIcon,
   RefreshCwIcon,
   SearchIcon,
   SmartphoneIcon,
@@ -46,7 +45,6 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Sheet,
@@ -59,7 +57,9 @@ import {
 } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { MAX_COMPANY_SCOPE_RULES, type ParsedCompanyScopeText, parseCompanyScopeText } from "@/lib/company-scope";
 import type { Asset, Company, CompanyScopeKind, CompanyScopeRule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -1254,11 +1254,13 @@ function AssetCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {PAGE_SIZES.map((n) => (
-                <SelectItem key={n} value={String(n)}>
-                  {n} / 页
-                </SelectItem>
-              ))}
+              <SelectGroup>
+                {PAGE_SIZES.map((n) => (
+                  <SelectItem key={n} value={String(n)}>
+                    {n} / 页
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
           <span className="tabular-nums">
@@ -1319,171 +1321,94 @@ function CompanyAvatar({ name, logo }: { name: string; logo?: string }) {
   );
 }
 
-const COMPANY_SCOPE_KINDS: { value: CompanyScopeKind; label: string; placeholder: string }[] = [
-  { value: "domain", label: "域名", placeholder: "example.com" },
-  { value: "ip", label: "IP", placeholder: "203.0.113.10" },
-  { value: "cidr", label: "CIDR", placeholder: "198.51.100.0/24" },
-  { value: "icp", label: "ICP", placeholder: "京ICP备12345678号-1" },
-  { value: "keyword", label: "企业关键词", placeholder: "Acme / 产品品牌名" },
-];
+const COMPANY_SCOPE_KIND_LABELS: Record<CompanyScopeKind, string> = {
+  domain: "域名",
+  ip: "IP",
+  cidr: "CIDR",
+  icp: "ICP",
+  keyword: "关键词",
+};
 
-const MAX_COMPANY_SCOPE_RULES = 256;
-const MAX_COMPANY_SCOPE_VALUE_LENGTH = 1024;
-
-type EditableScopeRule = CompanyScopeRule & { key: string };
-let nextScopeRuleKey = 0;
-
-function editableScopeRule(kind: CompanyScopeKind = "domain", value = ""): EditableScopeRule {
-  nextScopeRuleKey += 1;
-  return { kind, value, key: `company-scope-${nextScopeRuleKey}` };
-}
-
-function isIPv4(value: string): boolean {
-  const parts = value.split(".");
-  return (
-    parts.length === 4 &&
-    parts.every((part) => (part === "0" || /^[1-9]\d{0,2}$/.test(part)) && Number(part) >= 0 && Number(part) <= 255)
-  );
-}
-
-function isIPv6(value: string): boolean {
-  if (!value.includes(":") || /[^0-9a-f:.]/i.test(value) || value.includes(":::")) return false;
-  const halves = value.split("::");
-  if (halves.length > 2) return false;
-  const countSegments = (half: string): number | null => {
-    if (!half) return 0;
-    const segments = half.split(":");
-    let count = 0;
-    for (const [index, segment] of segments.entries()) {
-      if (segment.includes(".")) {
-        if (index !== segments.length - 1 || !isIPv4(segment)) return null;
-        count += 2;
-      } else {
-        if (!/^[0-9a-f]{1,4}$/i.test(segment)) return null;
-        count++;
-      }
-    }
-    return count;
-  };
-  const left = countSegments(halves[0]);
-  const right = countSegments(halves[1] ?? "");
-  if (left === null || right === null) return false;
-  return halves.length === 2 ? left + right < 8 : left === 8;
-}
-
-function ipVersion(value: string): 4 | 6 | null {
-  if (isIPv4(value)) return 4;
-  if (isIPv6(value)) return 6;
-  return null;
-}
-
-function scopeRuleError(rule: CompanyScopeRule): string {
-  const value = rule.value.trim();
-  if (!value) return "请填写范围值";
-  if (rule.kind === "domain" && (!value.includes(".") || /\s/.test(value))) return "请输入有效域名";
-  if (rule.kind === "ip" && ipVersion(value) === null) return "请输入有效 IP";
-  if (rule.kind === "cidr") {
-    const separator = value.lastIndexOf("/");
-    if (separator <= 0) return "请输入 CIDR 网段";
-    const address = value.slice(0, separator);
-    const prefixText = value.slice(separator + 1);
-    const version = ipVersion(address);
-    if (version === null || !/^\d+$/.test(prefixText)) return "请输入 CIDR 网段";
-    const prefix = Number(prefixText);
-    if (version === 4 && (prefix < 16 || prefix > 32)) return "IPv4 网段前缀需为 /16 至 /32";
-    if (version === 6 && (prefix < 32 || prefix > 128)) return "IPv6 网段前缀需为 /32 至 /128";
-  }
-  return "";
-}
-
-function ScopeRulesEditor({
+function ScopeTextEditor({
+  id,
   value,
   onValueChange,
+  parsed,
 }: {
-  value: EditableScopeRule[];
-  onValueChange: (value: EditableScopeRule[]) => void;
+  id: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  parsed: ParsedCompanyScopeText;
 }) {
-  const update = (index: number, patch: Partial<EditableScopeRule>) => {
-    onValueChange(value.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)));
-  };
+  const counts = React.useMemo(() => {
+    const result = new Map<CompanyScopeKind, number>();
+    for (const rule of parsed.rules) result.set(rule.kind, (result.get(rule.kind) ?? 0) + 1);
+    return result;
+  }, [parsed.rules]);
   return (
-    <div className="flex flex-col gap-3">
-      {value.map((rule, index) => {
-        const meta = COMPANY_SCOPE_KINDS.find((item) => item.value === rule.kind) ?? COMPANY_SCOPE_KINDS[0];
-        // Empty rows are omitted on submit, so the initial optional row should
-        // not appear invalid before the user enters a value.
-        const error = rule.value.trim() ? scopeRuleError(rule) : "";
-        return (
-          <Field key={rule.key} data-invalid={!!error}>
-            <div className="flex items-start gap-2">
-              <Select value={rule.kind} onValueChange={(kind) => update(index, { kind: kind as CompanyScopeKind })}>
-                <SelectTrigger className="w-32 shrink-0" aria-label={`范围 ${index + 1} 类型`}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {COMPANY_SCOPE_KINDS.map((item) => (
-                      <SelectItem key={item.value} value={item.value}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <Input
-                value={rule.value}
-                placeholder={meta.placeholder}
-                aria-label={`范围 ${index + 1} 内容`}
-                aria-invalid={!!error}
-                maxLength={MAX_COMPANY_SCOPE_VALUE_LENGTH}
-                onChange={(event) => update(index, { value: event.target.value })}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={`删除范围 ${index + 1}`}
-                disabled={value.length === 1}
-                onClick={() => onValueChange(value.filter((_, i) => i !== index))}
-              >
-                <Trash2Icon />
-              </Button>
-            </div>
-            {rule.value && error ? <FieldError>{error}</FieldError> : null}
-          </Field>
-        );
-      })}
-      <Button
-        type="button"
-        variant="outline"
-        className="self-start"
-        disabled={value.length >= MAX_COMPANY_SCOPE_RULES}
-        title={value.length >= MAX_COMPANY_SCOPE_RULES ? `每个企业最多 ${MAX_COMPANY_SCOPE_RULES} 条范围` : undefined}
-        onClick={() => onValueChange([...value, editableScopeRule()])}
-      >
-        <PlusIcon data-icon="inline-start" />
-        添加范围
-      </Button>
-    </div>
+    <Field data-invalid={parsed.errors.length > 0}>
+      <FieldLabel htmlFor={id}>资产范围</FieldLabel>
+      <FieldDescription>每行一条，自动识别域名、IP、CIDR、ICP 备案和企业关键词。</FieldDescription>
+      <Textarea
+        id={id}
+        rows={8}
+        value={value}
+        aria-invalid={parsed.errors.length > 0}
+        placeholder={"example.com\n203.0.113.10\n198.51.100.0/24\n京ICP备12345678号-1\n企业名称关键词"}
+        className="min-h-36 resize-y font-mono text-sm"
+        onChange={(event) => onValueChange(event.target.value)}
+      />
+      {parsed.rules.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <span>已识别 {parsed.rules.length} 条</span>
+          {Object.entries(COMPANY_SCOPE_KIND_LABELS).map(([kind, label]) => {
+            const count = counts.get(kind as CompanyScopeKind) ?? 0;
+            return count > 0 ? (
+              <Badge key={kind} variant="secondary" className="font-mono tabular-nums">
+                {label} {count}
+              </Badge>
+            ) : null;
+          })}
+        </div>
+      )}
+      {parsed.errors.length > 0 && (
+        <FieldError>
+          {parsed.errors.slice(0, 5).map((item) => (
+            <span key={`${item.line}-${item.error}`} className="block">
+              第 {item.line} 行：{item.error}
+            </span>
+          ))}
+          {parsed.errors.length > 5 && <span className="block">另有 {parsed.errors.length - 5} 行错误</span>}
+        </FieldError>
+      )}
+    </Field>
   );
 }
 
-function savedScopeRules(company: Company): EditableScopeRule[] {
-  const rules = (company.scope ?? []).map((scope) => editableScopeRule(scope.kind, scope.raw));
-  return rules.length > 0 ? rules : [editableScopeRule()];
+function savedScopeRules(company: Company): CompanyScopeRule[] {
+  return (company.scope ?? [])
+    .map((scope) => ({ kind: scope.kind, value: scope.raw.trim() }))
+    .filter((scope) => scope.value);
+}
+
+function savedScopeText(company: Company): string {
+  return savedScopeRules(company)
+    .map((scope) => scope.value)
+    .join("\n");
 }
 
 // 新增企业使用与任务、LLM 编辑一致的右侧抽屉。
 function CompanyDialog({ onSaved }: { onSaved: () => void }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
-  const [scope, setScope] = React.useState<EditableScopeRule[]>(() => [editableScopeRule()]);
+  const [scopeText, setScopeText] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const parsedScope = React.useMemo(() => parseCompanyScopeText(scopeText), [scopeText]);
 
   React.useEffect(() => {
     if (!open) return;
     setName("");
-    setScope([editableScopeRule()]);
+    setScopeText("");
   }, [open]);
 
   const submit = async () => {
@@ -1491,16 +1416,13 @@ function CompanyDialog({ onSaved }: { onSaved: () => void }) {
       toast.error("请填写企业名称");
       return;
     }
-    const rules: CompanyScopeRule[] = scope
-      .filter((rule) => rule.value.trim())
-      .map((rule) => ({ kind: rule.kind, value: rule.value.trim() }));
-    if (rules.some(scopeRuleError)) {
+    if (parsedScope.errors.length > 0) {
       toast.error("请修正无效的资产范围");
       return;
     }
     setBusy(true);
     try {
-      const res = await api.createCompany(name.trim(), rules);
+      const res = await api.createCompany(name.trim(), parsedScope.rules);
       const added = res.scope_added ?? 0;
       const invalid = res.scope_invalid ?? 0;
       if (invalid > 0) toast.warning(`已创建企业，添加 ${added} 条范围；${invalid} 行无效`);
@@ -1539,18 +1461,14 @@ function CompanyDialog({ onSaved }: { onSaved: () => void }) {
                 onChange={(e) => setName(e.target.value)}
               />
             </Field>
-            <Field>
-              <FieldLabel>资产范围</FieldLabel>
-              <FieldDescription>支持域名、IP、CIDR、ICP 备案和企业名称关键词。</FieldDescription>
-              <ScopeRulesEditor value={scope} onValueChange={setScope} />
-            </Field>
+            <ScopeTextEditor id="cn-scope" value={scopeText} onValueChange={setScopeText} parsed={parsedScope} />
           </FieldGroup>
         </div>
         <SheetFooter className="flex-row justify-end gap-2 border-t p-4">
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
             取消
           </Button>
-          <Button onClick={submit} disabled={busy || !name.trim()}>
+          <Button onClick={submit} disabled={busy || !name.trim() || parsedScope.errors.length > 0}>
             {busy ? "保存中…" : "保存"}
           </Button>
         </SheetFooter>
@@ -1562,27 +1480,29 @@ function CompanyDialog({ onSaved }: { onSaved: () => void }) {
 // 编辑（覆盖）资产范围弹窗
 function EditScopeDialog({ company, onSaved }: { company: Company; onSaved: () => void }) {
   const [open, setOpen] = React.useState(false);
-  const [scope, setScope] = React.useState<EditableScopeRule[]>(() => [editableScopeRule()]);
+  const [scopeText, setScopeText] = React.useState("");
   const [reason, setReason] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const preservedScopeRules = React.useMemo(() => savedScopeRules(company), [company]);
+  const parsedScope = React.useMemo(
+    () => parseCompanyScopeText(scopeText, { preservedRules: preservedScopeRules }),
+    [preservedScopeRules, scopeText],
+  );
 
   React.useEffect(() => {
     if (!open) return;
-    setScope(savedScopeRules(company));
+    setScopeText(savedScopeText(company));
     setReason("");
   }, [open, company]);
 
   const submit = async () => {
-    const rules: CompanyScopeRule[] = scope
-      .filter((rule) => rule.value.trim())
-      .map((rule) => ({ kind: rule.kind, value: rule.value.trim() }));
-    if (rules.some(scopeRuleError)) {
+    if (parsedScope.errors.length > 0) {
       toast.error("请修正无效的资产范围");
       return;
     }
     setBusy(true);
     try {
-      const res = await api.updateCompanyScope(company.id, rules, reason);
+      const res = await api.updateCompanyScope(company.id, parsedScope.rules, reason);
       const errCount = res.invalid ?? 0;
       if (errCount > 0) toast.warning(`已保存；${errCount} 行无效`);
       else toast.success(`范围已更新，共 ${res.added} 条`);
@@ -1609,23 +1529,28 @@ function EditScopeDialog({ company, onSaved }: { company: Company; onSaved: () =
             编辑后将替换全部现有范围。ICP 精确匹配资产，企业关键词仅作为 Agent 提示。
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-4 py-2">
-          <ScopeRulesEditor value={scope} onValueChange={setScope} />
-          <div className="grid gap-1.5">
-            <Label htmlFor="es-reason">归属依据（可选）</Label>
+        <FieldGroup className="py-2">
+          <ScopeTextEditor
+            id={`edit-company-scope-${company.id}`}
+            value={scopeText}
+            onValueChange={setScopeText}
+            parsed={parsedScope}
+          />
+          <Field>
+            <FieldLabel htmlFor="es-reason">归属依据（可选）</FieldLabel>
             <Input
               id="es-reason"
               placeholder="如 证书 / whois / ASN 佐证"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
-          </div>
-        </div>
+          </Field>
+        </FieldGroup>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
             取消
           </Button>
-          <Button onClick={submit} disabled={busy}>
+          <Button onClick={submit} disabled={busy || parsedScope.errors.length > 0}>
             {busy ? "保存中…" : "覆盖保存"}
           </Button>
         </DialogFooter>
@@ -1637,31 +1562,33 @@ function EditScopeDialog({ company, onSaved }: { company: Company; onSaved: () =
 // 追加资产范围弹窗
 function AppendScopeDialog({ company, onSaved }: { company: Company; onSaved: () => void }) {
   const [open, setOpen] = React.useState(false);
-  const [scope, setScope] = React.useState<EditableScopeRule[]>(() => [editableScopeRule()]);
+  const [scopeText, setScopeText] = React.useState("");
   const [reason, setReason] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const remainingScopeRules = Math.max(0, MAX_COMPANY_SCOPE_RULES - (company.scope?.length || 0));
+  const parsedScope = React.useMemo(
+    () => parseCompanyScopeText(scopeText, { maxRules: remainingScopeRules }),
+    [remainingScopeRules, scopeText],
+  );
 
   React.useEffect(() => {
     if (!open) return;
-    setScope([editableScopeRule()]);
+    setScopeText("");
     setReason("");
   }, [open]);
 
   const submit = async () => {
-    const rules: CompanyScopeRule[] = scope
-      .filter((rule) => rule.value.trim())
-      .map((rule) => ({ kind: rule.kind, value: rule.value.trim() }));
-    if (rules.length === 0) {
+    if (parsedScope.rules.length === 0) {
       toast.error("请填写要追加的范围");
       return;
     }
-    if (rules.some(scopeRuleError)) {
+    if (parsedScope.errors.length > 0) {
       toast.error("请修正无效的资产范围");
       return;
     }
     setBusy(true);
     try {
-      const res = await api.addCompanyScope(company.id, rules, reason);
+      const res = await api.addCompanyScope(company.id, parsedScope.rules, reason);
       const errCount = res.invalid ?? 0;
       if (errCount > 0) toast.warning(`已保存；${errCount} 行无效`);
       else toast.success(`已追加 ${res.added} 条范围`);
@@ -1686,23 +1613,28 @@ function AppendScopeDialog({ company, onSaved }: { company: Company; onSaved: ()
           <DialogTitle>追加资产范围 · {company.name}</DialogTitle>
           <DialogDescription>新范围会追加到现有范围。ICP 精确匹配资产，企业关键词仅作为 Agent 提示。</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-4 py-2">
-          <ScopeRulesEditor value={scope} onValueChange={setScope} />
-          <div className="grid gap-1.5">
-            <Label htmlFor="as-reason">归属依据（可选）</Label>
+        <FieldGroup className="py-2">
+          <ScopeTextEditor
+            id={`append-company-scope-${company.id}`}
+            value={scopeText}
+            onValueChange={setScopeText}
+            parsed={parsedScope}
+          />
+          <Field>
+            <FieldLabel htmlFor="as-reason">归属依据（可选）</FieldLabel>
             <Input
               id="as-reason"
               placeholder="如 证书 / whois / ASN 佐证"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
-          </div>
-        </div>
+          </Field>
+        </FieldGroup>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
             取消
           </Button>
-          <Button onClick={submit} disabled={busy}>
+          <Button onClick={submit} disabled={busy || parsedScope.rules.length === 0 || parsedScope.errors.length > 0}>
             {busy ? "保存中…" : "追加"}
           </Button>
         </DialogFooter>

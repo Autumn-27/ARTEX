@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import {
+  ArrowUpIcon,
   Bot,
   ChevronDownIcon,
   Loader2Icon,
@@ -12,7 +13,6 @@ import {
   PinIcon,
   PinOffIcon,
   PlusIcon,
-  SendIcon,
   Square,
   Trash2Icon,
   XIcon,
@@ -202,8 +202,14 @@ function Composer({
             <Square className="size-3.5 fill-current" />
           </Button>
         ) : (
-          <Button size="icon" onClick={onSend} disabled={disabled || (!value.trim() && atts.length === 0)}>
-            <SendIcon className="size-4" />
+          <Button
+            size="icon"
+            onClick={onSend}
+            disabled={disabled || (!value.trim() && atts.length === 0)}
+            title="发送消息"
+            aria-label="发送消息"
+          >
+            <ArrowUpIcon />
           </Button>
         )}
       </div>

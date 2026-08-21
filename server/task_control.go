@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/agent"
@@ -32,7 +31,6 @@ type batchControlItem struct {
 	ID     string `json:"id"`
 	OK     bool   `json:"ok"`
 	Status string `json:"status,omitempty"`
-	State  string `json:"state,omitempty"`
 	Queued bool   `json:"queued,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
@@ -236,77 +234,6 @@ func (s *Server) controlTasksBatch(w http.ResponseWriter, r *http.Request) {
 			item.Error = err.Error()
 		} else {
 			item.OK, item.Status, item.Queued = true, result.Status, result.Queued
-		}
-		items = append(items, item)
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-
-func (s *Server) controlIntentsBatch(w http.ResponseWriter, r *http.Request) {
-	t, ok := s.m.Task(r.PathValue("id"))
-	if !ok {
-		writeErr(w, 404, "task not found")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
-	var req struct {
-		IntentIDs []string `json:"intent_ids"`
-		Action    string   `json:"action"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "bad json: "+err.Error())
-		return
-	}
-	if req.Action != "pause" && req.Action != "resume" {
-		writeErr(w, 400, "action must be pause|resume")
-		return
-	}
-	type parsedIntentID struct {
-		raw   string
-		id    int64
-		valid bool
-	}
-	seen := map[int64]bool{}
-	seenInvalid := map[string]bool{}
-	intentIDs := make([]parsedIntentID, 0, len(req.IntentIDs))
-	for _, raw := range req.IntentIDs {
-		iid, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || iid <= 0 {
-			if seenInvalid[raw] {
-				continue
-			}
-			seenInvalid[raw] = true
-			intentIDs = append(intentIDs, parsedIntentID{raw: raw})
-			continue
-		}
-		if seen[iid] {
-			continue
-		}
-		seen[iid] = true
-		intentIDs = append(intentIDs, parsedIntentID{raw: raw, id: iid, valid: true})
-	}
-	if len(intentIDs) == 0 || len(intentIDs) > maxBatchControlIDs {
-		writeErr(w, 400, fmt.Sprintf("intent_ids 数量必须为 1-%d", maxBatchControlIDs))
-		return
-	}
-	if !s.engine.beginTaskOperation(t.ID) {
-		writeErr(w, 409, "任务正在删除，无法控制意图")
-		return
-	}
-	defer s.engine.decInflight(t.ID)
-	items := make([]batchControlItem, 0, len(intentIDs))
-	for _, parsed := range intentIDs {
-		item := batchControlItem{ID: parsed.raw}
-		if !parsed.valid {
-			item.Error = "bad intent id"
-			items = append(items, item)
-			continue
-		}
-		result, err := s.applyIntentControl(r.Context(), t, parsed.id, req.Action)
-		if err != nil {
-			item.Error = err.Error()
-		} else {
-			item.OK, item.State = true, result.State
 		}
 		items = append(items, item)
 	}

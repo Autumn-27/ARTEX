@@ -255,6 +255,23 @@ func TestUpdateScope(t *testing.T) {
 	if len(scope) != 1 || scope[0].Domain != "new-domain.com" {
 		t.Errorf("UpdateScope: expected new-domain.com only, got %+v", scope)
 	}
+
+	// Invalid replacement input must not turn a partial validation response into
+	// a destructive replacement of the existing rules.
+	added, invalid, validationErrors, err := cs.UpdateScopeInputsChecked(id, []ScopeInput{
+		{Kind: "domain", Value: "co.uk"},
+	}, "invalid replacement")
+	var validationErr *CompanyScopeValidationError
+	if added != 0 || invalid != 1 || len(validationErrors) != 1 || !errors.As(err, &validationErr) {
+		t.Fatalf("invalid replacement: added=%d invalid=%d validation=%v err=%v", added, invalid, validationErrors, err)
+	}
+	scope, err = cs.GetScope(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].Domain != "new-domain.com" {
+		t.Fatalf("invalid replacement changed existing scope: %+v", scope)
+	}
 }
 
 func TestUpdateScopeRollsBackOnInsertFailure(t *testing.T) {

@@ -688,43 +688,6 @@ func TestBatchControlLimitCountsDeduplicatedIDs(t *testing.T) {
 		t.Fatalf("unique task ids status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	task, err := m.CreateTask("batch intent limit", "deduplicate intent ids", nil, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
-	repeatedIntents := make([]string, maxBatchControlIDs+1)
-	for i := range repeatedIntents {
-		repeatedIntents[i] = "999999"
-	}
-	rec = request(s.controlIntentsBatch, "/api/tasks/1/intents/control/batch", map[string]string{"id": task.ID}, map[string]any{
-		"intent_ids": repeatedIntents,
-		"action":     "pause",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("deduplicated intent ids status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var intentPayload struct {
-		Items []batchControlItem `json:"items"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &intentPayload); err != nil {
-		t.Fatal(err)
-	}
-	if len(intentPayload.Items) != 1 || intentPayload.Items[0].ID != "999999" {
-		t.Fatalf("deduplicated intent response=%+v", intentPayload.Items)
-	}
-
-	uniqueIntents := make([]string, maxBatchControlIDs+1)
-	for i := range uniqueIntents {
-		uniqueIntents[i] = strconv.Itoa(i + 1)
-	}
-	rec = request(s.controlIntentsBatch, "/api/tasks/1/intents/control/batch", map[string]string{"id": task.ID}, map[string]any{
-		"intent_ids": uniqueIntents,
-		"action":     "resume",
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unique intent ids status=%d body=%s", rec.Code, rec.Body.String())
-	}
 }
 
 func TestPauseTaskToolPersistsAndDequeuesTask(t *testing.T) {

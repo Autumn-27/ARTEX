@@ -2,6 +2,13 @@
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
 
+import {
+  classifyCompanyScopeLine,
+  companyScopeRuleError,
+  isCompanyScopeKind,
+  MAX_COMPANY_SCOPE_RULES,
+  normalizeCompanyScopeValue,
+} from "../company-scope";
 import type {
   Asset,
   BatchControlItem,
@@ -36,24 +43,53 @@ function mockAssetCounts(): Record<string, number> {
   }, {});
 }
 
-function mockScopeRows(companyID: number, input: unknown): ScopeRow[] {
-  if (!Array.isArray(input)) return [];
+function mockScopeRows(
+  companyID: number,
+  input: unknown,
+  existing: ScopeRow[] = [],
+): { rows: ScopeRow[]; invalid: number; skipped: number } {
+  if (!Array.isArray(input)) return { rows: [], invalid: 0, skipped: 0 };
+  if (input.length > MAX_COMPANY_SCOPE_RULES) throw new Error(`企业范围最多支持 ${MAX_COMPANY_SCOPE_RULES} 条`);
   let nextID =
     mockCompanies.flatMap((company) => company.scope ?? []).reduce((max, row) => Math.max(max, row.id), 0) + 1;
   const rows: ScopeRow[] = [];
-  for (const candidate of input) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const rule = candidate as Partial<CompanyScopeRule>;
-    const kind = rule.kind;
-    const value = String(rule.value ?? "").trim();
-    if (!kind || !value) continue;
-    const row: ScopeRow = { id: nextID++, company_id: companyID, kind, raw: value };
-    if (kind === "domain") row.domain = value.toLowerCase();
-    else if (kind === "ip" || kind === "cidr") row.net = value;
-    else row.value = value;
+  let invalid = 0;
+  let skipped = 0;
+  const keys = new Set(
+    existing.map((row) => `${row.kind}|${row.domain ?? row.net ?? row.value ?? row.raw.trim().toLowerCase()}`),
+  );
+  for (const [index, candidate] of input.entries()) {
+    let rule: CompanyScopeRule | undefined;
+    if (typeof candidate === "string") {
+      rule = classifyCompanyScopeLine(candidate, index + 1).rule;
+    } else if (candidate && typeof candidate === "object") {
+      const item = candidate as { kind?: unknown; value?: unknown };
+      const value = String(item.value ?? "").trim();
+      if (item.kind === undefined || item.kind === "") rule = classifyCompanyScopeLine(value, index + 1).rule;
+      else if (isCompanyScopeKind(item.kind)) rule = { kind: item.kind, value };
+    }
+    if (!rule || companyScopeRuleError(rule)) {
+      invalid++;
+      continue;
+    }
+    const normalized = normalizeCompanyScopeValue(rule);
+    const row: ScopeRow = { id: nextID++, company_id: companyID, kind: rule.kind, raw: rule.value.trim() };
+    if (rule.kind === "domain") row.domain = normalized;
+    else if (rule.kind === "ip") row.net = `${normalized}/${normalized.includes(":") ? 128 : 32}`;
+    else if (rule.kind === "cidr") row.net = normalized;
+    else row.value = normalized;
+    const key = `${row.kind}|${row.domain ?? row.net ?? row.value}`;
+    if (keys.has(key)) {
+      skipped++;
+      continue;
+    }
+    keys.add(key);
     rows.push(row);
   }
-  return rows;
+  if (existing.length + rows.length > MAX_COMPANY_SCOPE_RULES) {
+    throw new Error(`企业范围规则过多：每个企业最多 ${MAX_COMPANY_SCOPE_RULES} 条`);
+  }
+  return { rows, invalid, skipped };
 }
 
 function mockProfileResolution(profileID: number | undefined, source: TaskLLMResolution["source"]): TaskLLMResolution {
@@ -109,15 +145,17 @@ function bodyIDs(value: unknown): string[] {
   return ids;
 }
 
-function controlMockIntent(id: string, action: "pause" | "resume"): BatchControlItem {
+type MockIntentControlResult = { ok: boolean; state?: string; error?: string };
+
+function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentControlResult {
   const intent = mockIntents.find((item) => item.id === id);
-  if (!intent) return { id, ok: false, error: "意图不存在" };
+  if (!intent) return { ok: false, error: "意图不存在" };
   const requiredState = action === "pause" ? "running" : "paused";
   if (intent.inherited || intent.state !== requiredState) {
-    return { id, ok: false, state: intent.state, error: "Worker 状态已变化" };
+    return { ok: false, state: intent.state, error: "Worker 状态已变化" };
   }
   intent.state = action === "pause" ? "paused" : "open";
-  return { id, ok: true, state: intent.state };
+  return { ok: true, state: intent.state };
 }
 
 function controlMockTask(id: string, action: "pause" | "resume"): BatchControlItem {
@@ -357,10 +395,6 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const action = b.action === "resume" ? "resume" : "pause";
     return { items: bodyIDs(b.task_ids).map((id) => controlMockTask(id, action)) };
   }
-  if (seg[0] === "tasks" && seg[2] === "intents" && seg[3] === "control" && seg[4] === "batch" && m === "POST") {
-    const action = b.action === "resume" ? "resume" : "pause";
-    return { items: bodyIDs(b.intent_ids).map((id) => controlMockIntent(id, action)) };
-  }
   if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "control" && m === "POST") {
     const id = seg[3];
     if (b.action === "cancel") {
@@ -515,17 +549,25 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       throw new Error("企业已存在");
     }
     const id = mockCompanies.reduce((max, company) => Math.max(max, company.id), 0) + 1;
-    const scope = mockScopeRows(id, b.scope);
-    const company: Company = { id, name, asset_count: 0, scope };
+    const scopeResult = mockScopeRows(id, b.scope);
+    const company: Company = { id, name, asset_count: 0, scope: scopeResult.rows };
     mockCompanies.push(company);
-    return { id, created: true, scope_added: scope.length, scope_invalid: 0 };
+    return {
+      id,
+      created: true,
+      scope_added: scopeResult.rows.length,
+      scope_skipped: scopeResult.skipped,
+      scope_invalid: scopeResult.invalid,
+    };
   }
   if (seg[0] === "companies" && seg[2] === "scope" && m === "POST") {
     const company = mockCompanies.find((item) => item.id === Number(seg[1]));
     if (!company) throw new Error("企业不存在");
-    const rows = mockScopeRows(company.id, b.scope);
-    company.scope = b.reset === true ? rows : [...(company.scope ?? []), ...rows];
-    return { added: rows.length, skipped: 0, invalid: 0 };
+    const reset = b.reset === true;
+    const scopeResult = mockScopeRows(company.id, b.scope, reset ? [] : (company.scope ?? []));
+    if (reset && scopeResult.invalid > 0) throw new Error("企业范围包含无效规则，未覆盖原有范围");
+    company.scope = reset ? scopeResult.rows : [...(company.scope ?? []), ...scopeResult.rows];
+    return { added: scopeResult.rows.length, skipped: scopeResult.skipped, invalid: scopeResult.invalid };
   }
   if (seg[0] === "companies" && seg.length === 2 && m === "DELETE") {
     const id = Number(seg[1]);

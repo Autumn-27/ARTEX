@@ -2,11 +2,29 @@ package traffic
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
+
+func TestRequestHeaderLinesIncludesHost(t *testing.T) {
+	req := &mproxy.Request{
+		URL:    &url.URL{Host: "target.example:8443"},
+		Header: http.Header{"Accept": []string{"application/json"}},
+	}
+	got := requestHeaderLines(req)
+	if !strings.Contains(got, "Host: target.example:8443\n") {
+		t.Fatalf("request headers missing Host: %q", got)
+	}
+	if !strings.Contains(got, "Accept: application/json\n") {
+		t.Fatalf("request headers missing regular header: %q", got)
+	}
+}
 
 // TestDeleteHost verifies the delete contract: rows for hosts containing the
 // substring are removed together with their file trees, non-matching hosts are

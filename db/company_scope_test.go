@@ -40,6 +40,65 @@ func TestParseScopeLine(t *testing.T) {
 	}
 }
 
+func TestParseAutoScopeLine(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		kind       string
+		normalized string
+		wantErr    bool
+	}{
+		{name: "domain", input: "example.com", kind: "domain", normalized: "example.com"},
+		{name: "url", input: "https://sub.example.com/path", kind: "domain", normalized: "sub.example.com"},
+		{name: "url query", input: "https://example.com/path?source=x", kind: "domain", normalized: "example.com"},
+		{name: "url credentials", input: "https://user:pass@example.com/path", kind: "domain", normalized: "example.com"},
+		{name: "url ip", input: "http://203.0.113.10/path", kind: "ip", normalized: "203.0.113.10/32"},
+		{name: "ipv4", input: "203.0.113.10", kind: "ip", normalized: "203.0.113.10/32"},
+		{name: "ipv6", input: "2001:db8::10", kind: "ip", normalized: "2001:db8::10/128"},
+		{name: "cidr", input: "198.51.100.0/24", kind: "cidr", normalized: "198.51.100.0/24"},
+		{name: "icp latin", input: "京 ICP备 123号", kind: "icp", normalized: "京icp备123号"},
+		{name: "icp chinese", input: "沪网备案 9988", kind: "icp", normalized: "沪网备案9988"},
+		{name: "icp domain", input: "icp.example.com", kind: "domain", normalized: "icp.example.com"},
+		{name: "icp url query", input: "https://example.com/path?icp=1", kind: "domain", normalized: "example.com"},
+		{name: "keyword", input: "  ACME   Security  ", kind: "keyword", normalized: "acme security"},
+		{name: "colon keyword", input: "ACME: Cloud: Security", kind: "keyword", normalized: "acme: cloud: security"},
+		{name: "empty", input: "  ", wantErr: true},
+		{name: "invalid cidr", input: "10.0.0.0/not-a-prefix", wantErr: true},
+		{name: "invalid ipv4", input: "999.0.0.1", wantErr: true},
+		{name: "invalid ipv6", input: "2001:db8::zz", wantErr: true},
+		{name: "invalid ipv6 cidr", input: "2001:db8::zz/64", wantErr: true},
+		{name: "overbroad cidr", input: "10.0.0.0/8", wantErr: true},
+		{name: "bare suffix", input: "co.uk", wantErr: true},
+		{name: "empty domain label", input: "foo..example.com", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rule, err := ParseAutoScopeLine(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ParseAutoScopeLine(%q) = %+v, want error", tc.input, rule)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseAutoScopeLine(%q): %v", tc.input, err)
+			}
+			if rule.Kind != tc.kind {
+				t.Fatalf("kind=%q want %q", rule.Kind, tc.kind)
+			}
+			got := rule.Value
+			if rule.Kind == "domain" {
+				got = rule.Domain
+			} else if rule.Kind == "ip" || rule.Kind == "cidr" {
+				got = rule.Net
+			}
+			if got != tc.normalized {
+				t.Fatalf("normalized=%q want %q", got, tc.normalized)
+			}
+		})
+	}
+}
+
 func TestExplicitCompanyAttributionSurvivesScopeRebuild(t *testing.T) {
 	d, as, cs := testSetup(t)
 	defer d.Close()
@@ -277,13 +336,6 @@ func TestCompanyScopeAttribution(t *testing.T) {
 		t.Fatalf("pre-scope asset should be unattributed, got %v", *preCompanyID)
 	}
 
-	rules, invalid := ParseScopeLines(root + "\n198.51.100.0/24\nco.uk")
-	if len(rules) != 2 {
-		t.Fatalf("want 2 valid rules, got %d (%+v)", len(rules), rules)
-	}
-	if len(invalid) != 1 {
-		t.Fatalf("want 1 invalid line, got %v", invalid)
-	}
 	cs.AddScope(cid, []string{root, "198.51.100.0/24"}, "unit test")
 
 	mustCid := func(id int64, want int64, label string) {

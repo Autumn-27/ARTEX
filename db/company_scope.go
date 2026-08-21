@@ -3,14 +3,16 @@ package db
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"unicode"
 
+	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 )
 
 // ParsedScope is one parsed asset-scope entry. Its kind selects Domain, Net, or Value.
-// Used internally by ParseScopeLine / ParseScopeLines (passed to CompanyStore).
+// Used internally by the company scope parsers and CompanyStore.
 type ParsedScope struct {
 	Kind   string // "domain" | "ip" | "cidr" | "icp" | "keyword"
 	Domain string // normalized registrable/root domain (kind=domain)
@@ -20,7 +22,7 @@ type ParsedScope struct {
 }
 
 // ScopeInput is the structured API form for a company scope rule. Empty Kind
-// preserves the legacy one-line auto detection for domain/IP/CIDR clients.
+// uses the same automatic classification as the single-textarea UI.
 type ScopeInput struct {
 	Kind  string `json:"kind,omitempty"`
 	Value string `json:"value"`
@@ -41,13 +43,56 @@ func normalizeKeyword(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
+func looksLikeIPAddress(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "://") || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return false
+	}
+	if strings.Count(value, ":") >= 2 {
+		// Require an IPv6-looking prefix. This still catches malformed values such
+		// as 2001:db8::zz without treating ordinary colon-delimited keywords as IPs.
+		parts := strings.Split(value, ":")
+		validSegments := 0
+		for _, part := range parts {
+			if part == "" {
+				if validSegments > 0 || strings.HasPrefix(value, "::") {
+					return true
+				}
+				continue
+			}
+			if len(part) > 4 {
+				return false
+			}
+			for _, r := range part {
+				if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+					return false
+				}
+			}
+			validSegments++
+			if validSegments >= 2 {
+				return true
+			}
+		}
+		return false
+	}
+	if !strings.Contains(value, ".") {
+		return false
+	}
+	for _, r := range value {
+		if r != '.' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseScopeInput validates an explicitly typed rule. Legacy callers can omit
-// Kind and retain the existing domain/IP/CIDR auto-detection behavior.
+// Kind and use the same automatic classification as the single-textarea UI.
 func ParseScopeInput(input ScopeInput) (ParsedScope, error) {
 	kind := strings.ToLower(strings.TrimSpace(input.Kind))
 	raw := strings.TrimSpace(input.Value)
 	if kind == "" {
-		return ParseScopeLine(raw)
+		return ParseAutoScopeLine(raw)
 	}
 	switch kind {
 	case "domain", "ip", "cidr":
@@ -76,6 +121,93 @@ func ParseScopeInput(input ScopeInput) (ParsedScope, error) {
 	}
 }
 
+// ParseAutoScopeLine classifies one untyped textarea line. Network-looking and
+// domain-looking values remain strict so malformed ranges do not silently become
+// Agent keywords; all other non-empty text is a keyword.
+func ParseAutoScopeLine(line string) (ParsedScope, error) {
+	raw := strings.TrimSpace(line)
+	if raw == "" {
+		return ParsedScope{}, fmt.Errorf("空行")
+	}
+
+	if _, _, err := net.ParseCIDR(raw); err == nil {
+		return ParseScopeLine(raw)
+	}
+	if ip := net.ParseIP(raw); ip != nil {
+		return ParseScopeLine(raw)
+	}
+	if slash := strings.LastIndexByte(raw, '/'); slash > 0 {
+		address := strings.TrimSpace(raw[:slash])
+		if net.ParseIP(address) != nil || looksLikeIPAddress(address) {
+			return ParsedScope{Raw: raw}, fmt.Errorf("无效 CIDR: %s", raw)
+		}
+	}
+
+	if looksLikeIPAddress(raw) {
+		return ParsedScope{Raw: raw}, fmt.Errorf("无效 IP: %s", raw)
+	}
+
+	looksLikeDomain := strings.Contains(raw, "://") ||
+		(strings.Contains(raw, ".") && strings.IndexFunc(raw, unicode.IsSpace) < 0)
+	if looksLikeDomain {
+		return ParseScopeLine(raw)
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "icp") || strings.Contains(raw, "备案") {
+		return ParseScopeInput(ScopeInput{Kind: "icp", Value: raw})
+	}
+	return ParseScopeInput(ScopeInput{Kind: "keyword", Value: raw})
+}
+
+func scopeHostname(raw string) (string, error) {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		return "", fmt.Errorf("主机名为空")
+	}
+	if strings.HasPrefix(candidate, "//") {
+		candidate = "http:" + candidate
+	} else if !strings.Contains(candidate, "://") {
+		candidate = "http://" + candidate
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.Host == "" {
+		if err == nil {
+			err = fmt.Errorf("缺少主机名")
+		}
+		return "", err
+	}
+	host := strings.TrimSuffix(strings.TrimSpace(parsed.Hostname()), ".")
+	if host == "" {
+		return "", fmt.Errorf("主机名为空")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	host, err = idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", err
+	}
+	host = strings.ToLower(host)
+	if len(host) > 253 {
+		return "", fmt.Errorf("域名超过 253 个字符")
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", fmt.Errorf("域名至少需要两个标签")
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("域名标签无效")
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				return "", fmt.Errorf("域名包含无效字符")
+			}
+		}
+	}
+	return host, nil
+}
+
 // ParseScopeLine classifies and validates one scope line (root domain / IP /
 // CIDR). Guardrails reject bare TLDs and over-broad networks so a rule can never
 // swallow the internet. IP ranges must be expressed as CIDR.
@@ -85,12 +217,8 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 	if raw == "" {
 		return r, fmt.Errorf("空行")
 	}
-	s := raw
-	if i := strings.Index(s, "://"); i >= 0 { // strip scheme if a URL was pasted
-		s = s[i+3:]
-	}
-	// CIDR first — it contains '/', which the path-strip below would remove.
-	if _, ipnet, err := net.ParseCIDR(s); err == nil {
+	// CIDR first because URL parsing treats its slash as a path separator.
+	if _, ipnet, err := net.ParseCIDR(raw); err == nil {
 		ones, bits := ipnet.Mask.Size()
 		if bits == 32 && ones < 16 {
 			return r, fmt.Errorf("网段过宽(IPv4 需 >= /16): %s", raw)
@@ -101,12 +229,8 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 		r.Kind, r.Net = "cidr", ipnet.String()
 		return r, nil
 	}
-	// Strip any path and :port remnants for host-like inputs.
-	if i := strings.IndexByte(s, '/'); i >= 0 {
-		s = s[:i]
-	}
 	// Single IP.
-	if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+	if ip := net.ParseIP(raw); ip != nil {
 		r.Kind = "ip"
 		if ip.To4() != nil {
 			r.Net = ip.String() + "/32"
@@ -115,37 +239,30 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 		}
 		return r, nil
 	}
-	if host, _, ok := strings.Cut(s, ":"); ok { // host:port → host
-		s = host
+	host, err := scopeHostname(raw)
+	if err != nil {
+		return r, fmt.Errorf("无法识别为有效域名/IP/CIDR: %s", raw)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		r.Kind = "ip"
+		if ip.To4() != nil {
+			r.Net = ip.String() + "/32"
+		} else {
+			r.Net = ip.String() + "/128"
+		}
+		return r, nil
+	}
+	if looksLikeIPAddress(host) {
+		return r, fmt.Errorf("无效 IP: %s", raw)
 	}
 	if strings.Contains(raw, "-") && strings.Count(raw, ".") >= 6 {
 		return r, fmt.Errorf("IP 段请用 CIDR 表示(如 1.2.3.0/24): %s", raw)
 	}
 	// Domain (registrable). Reject bare TLDs / public suffixes.
-	d := DomainKey(s)
-	if d == "" || !strings.Contains(d, ".") {
-		return r, fmt.Errorf("无法识别为根域名/IP/CIDR: %s", raw)
-	}
+	d := DomainKey(host)
 	if suf, icann := publicsuffix.PublicSuffix(d); icann && suf == d {
 		return r, fmt.Errorf("不能用裸 TLD 作为范围: %s", raw)
 	}
 	r.Kind, r.Domain = "domain", d
 	return r, nil
-}
-
-// ParseScopeLines parses a whole text block (one entry per line), returning the
-// valid rules and the invalid lines (with reasons) so the caller can report both.
-func ParseScopeLines(text string) (rules []ParsedScope, invalid []string) {
-	for _, ln := range strings.Split(text, "\n") {
-		if strings.TrimSpace(ln) == "" {
-			continue
-		}
-		r, err := ParseScopeLine(ln)
-		if err != nil {
-			invalid = append(invalid, err.Error())
-			continue
-		}
-		rules = append(rules, r)
-	}
-	return rules, invalid
 }

@@ -6,12 +6,16 @@ import Link from "next/link";
 
 import {
   ArrowUpRightIcon,
+  BugIcon,
   ChevronRightIcon,
+  ClockIcon,
   DownloadIcon,
   FileTextIcon,
   FlaskConicalIcon,
+  InfoIcon,
   ShieldAlertIcon,
   Trash2Icon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -30,7 +34,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -529,13 +532,13 @@ export default function FindingsPage() {
     }
   }
 
-  const statCards: { label: string; value: number; tone?: string }[] = [
-    { label: "发现总数", value: stats.total },
-    { label: "待处理", value: stats.pending, tone: "text-amber-500" },
-    { label: "严重", value: stats.critical, tone: "text-rose-600" },
-    { label: "高危", value: stats.high, tone: "text-red-500" },
-    { label: "中危", value: stats.medium, tone: "text-amber-500" },
-    { label: "低危", value: stats.low, tone: "text-slate-500" },
+  const statCards = [
+    { label: "发现总数", value: stats.total, icon: BugIcon },
+    { label: "待处理", value: stats.pending, tone: "text-amber-500", icon: ClockIcon },
+    { label: "严重", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
+    { label: "高危", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
+    { label: "中危", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
+    { label: "低危", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
   ];
 
   return (
@@ -546,14 +549,20 @@ export default function FindingsPage() {
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-          {statCards.map((s) => (
-            <Card key={s.label} className="gap-1 py-4">
-              <CardHeader className="px-4">
-                <CardDescription>{s.label}</CardDescription>
-                <CardTitle className={cn("text-2xl tabular-nums", s.tone)}>{s.value}</CardTitle>
-              </CardHeader>
-            </Card>
-          ))}
+          {statCards.map((stat) => {
+            const StatIcon = stat.icon;
+            return (
+              <Card key={stat.label} className="gap-1 py-4">
+                <CardHeader className="px-4">
+                  <CardDescription>{stat.label}</CardDescription>
+                  <CardTitle className={cn("flex items-center gap-2 text-2xl tabular-nums", stat.tone)}>
+                    <StatIcon className="size-5" aria-hidden="true" />
+                    {stat.value}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+            );
+          })}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -624,7 +633,10 @@ export default function FindingsPage() {
                       <span className="max-w-[14rem] truncate" title={label}>
                         {label}
                       </span>
-                      <span className="text-muted-foreground tabular-nums">{t.count}</span>
+                      <span className="inline-flex items-center gap-1 text-muted-foreground tabular-nums">
+                        <BugIcon className="size-3.5" aria-hidden="true" />
+                        {t.count}
+                      </span>
                     </span>
                   </SelectItem>
                 );
@@ -646,7 +658,6 @@ export default function FindingsPage() {
             {selectedIds.size > 0 && (
               <span className="text-xs text-muted-foreground tabular-nums">已选 {selectedIds.size} 条</span>
             )}
-            <span className="text-xs text-muted-foreground tabular-nums">共 {total} 条</span>
             <Button size="sm" variant="outline" onClick={openExport}>
               <DownloadIcon /> 导出
             </Button>
@@ -712,9 +723,6 @@ export default function FindingsPage() {
                           </span>
                         );
                       })}
-                      <Badge variant="secondary" className="tabular-nums">
-                        共 {group.count} 条
-                      </Badge>
                       <span className="text-xs tabular-nums text-muted-foreground">{fmtTime(group.last_found_at)}</span>
                       {group.task_id !== null && (
                         <Button size="icon-sm" variant="ghost" asChild>

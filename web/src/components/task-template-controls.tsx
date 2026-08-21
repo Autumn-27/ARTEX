@@ -24,17 +24,10 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
@@ -172,19 +165,19 @@ function TaskTemplateManager({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="grid max-h-[90svh] max-w-4xl grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0">
-          <DialogHeader className="border-b px-6 py-5">
-            <DialogTitle>任务模板管理</DialogTitle>
-            <DialogDescription>模板只保存描述与目标；修改不会影响已经创建的任务。</DialogDescription>
-          </DialogHeader>
-          <div className="grid min-h-0 overflow-y-auto md:grid-cols-[15rem_minmax(0,1fr)] md:overflow-hidden">
-            <div className="flex min-h-0 flex-col border-b p-3 md:border-r md:border-b-0">
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent className="grid h-full w-full! max-w-none! grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:w-[48rem]! sm:max-w-[48rem]!">
+          <SheetHeader className="border-b px-6 py-5">
+            <SheetTitle>任务模板管理</SheetTitle>
+            <SheetDescription>模板只保存描述与目标；修改不会影响已经创建的任务。</SheetDescription>
+          </SheetHeader>
+          <div className="grid min-h-0 overflow-y-auto lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
+            <div className="flex min-h-0 flex-col border-b p-3 lg:border-r lg:border-b-0">
               <Button type="button" variant="outline" className="w-full" onClick={startNew}>
                 <PlusIcon data-icon="inline-start" />
                 新建模板
               </Button>
-              <ScrollArea className="mt-2 max-h-44 md:max-h-[27rem]">
+              <ScrollArea className="mt-2 max-h-44 lg:max-h-none lg:flex-1">
                 <div className="flex flex-col gap-1 pr-2">
                   {templates.length === 0 && (
                     <p className="px-2 py-6 text-center text-muted-foreground text-sm">暂无模板</p>
@@ -206,7 +199,7 @@ function TaskTemplateManager({
                 </div>
               </ScrollArea>
             </div>
-            <ScrollArea className="max-h-[58svh]">
+            <ScrollArea className="min-h-0">
               <FieldGroup className="p-6">
                 <Field>
                   <FieldLabel htmlFor="task-template-name">模板名称</FieldLabel>
@@ -241,7 +234,7 @@ function TaskTemplateManager({
               </FieldGroup>
             </ScrollArea>
           </div>
-          <DialogFooter className="border-t px-6 py-4">
+          <SheetFooter className="border-t px-6 py-4 sm:flex-row sm:items-center">
             {selectedID != null && (
               <Button type="button" variant="destructive" className="sm:mr-auto" onClick={() => setDeleteOpen(true)}>
                 <Trash2Icon data-icon="inline-start" />
@@ -255,9 +248,9 @@ function TaskTemplateManager({
               {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
               {saveLabel}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -303,6 +296,7 @@ export function TaskTemplateControls({
 }: TaskTemplateControlsProps) {
   const [templates, setTemplates] = React.useState<TaskTemplate[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [templateInputValue, setTemplateInputValue] = React.useState("");
   const [pendingTemplate, setPendingTemplate] = React.useState<TaskTemplate | null>(null);
   const [managerOpen, setManagerOpen] = React.useState(false);
   const [managerSeed, setManagerSeed] = React.useState<Pick<TemplateDraft, "description" | "goal"> | null>(null);
@@ -323,11 +317,14 @@ export function TaskTemplateControls({
     void loadTemplates();
   }, [loadTemplates]);
 
-  const templateIDs = React.useMemo(() => templates.map((template) => String(template.id)), [templates]);
-  const templatesByID = React.useMemo(
-    () => new Map(templates.map((template) => [String(template.id), template])),
-    [templates],
+  const selectedTemplate = React.useMemo(
+    () => templates.find((template) => template.id === selectedTemplateID) ?? null,
+    [selectedTemplateID, templates],
   );
+
+  React.useEffect(() => {
+    setTemplateInputValue(selectedTemplate?.name ?? "");
+  }, [selectedTemplate]);
 
   const applyTemplate = (template: TaskTemplate) => {
     onApply(template);
@@ -335,13 +332,13 @@ export function TaskTemplateControls({
     setPendingTemplate(null);
   };
 
-  const chooseTemplate = (value: string | null) => {
-    if (!value) {
+  const chooseTemplate = (template: TaskTemplate | null) => {
+    if (!template) {
+      setTemplateInputValue("");
       onSelectedTemplateIDChange(null);
       return;
     }
-    const template = templatesByID.get(value);
-    if (!template) return;
+    setTemplateInputValue(template.name);
     const hasContent = description.trim() !== "" || goal.trim() !== "";
     const changesContent = description !== template.description || goal !== template.goal;
     if (hasContent && changesContent) {
@@ -391,9 +388,12 @@ export function TaskTemplateControls({
           </div>
         </div>
         <Combobox
-          items={templateIDs}
-          itemToStringValue={(id) => templatesByID.get(id)?.name ?? id}
-          value={selectedTemplateID == null ? null : String(selectedTemplateID)}
+          items={templates}
+          itemToStringLabel={(template) => template.name}
+          itemToStringValue={(template) => String(template.id)}
+          inputValue={templateInputValue}
+          onInputValueChange={(value) => setTemplateInputValue(value)}
+          value={selectedTemplate}
           onValueChange={chooseTemplate}
         >
           <ComboboxInput
@@ -406,27 +406,31 @@ export function TaskTemplateControls({
           <ComboboxContent portalContainer={portalContainer}>
             <ComboboxEmpty>没有匹配的模板</ComboboxEmpty>
             <ComboboxList>
-              {(id) => {
-                const template = templatesByID.get(id);
-                return (
-                  <ComboboxItem key={id} value={id}>
-                    <LibraryIcon />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-medium text-sm">{template?.name ?? `模板 #${id}`}</p>
-                      {template?.description && (
-                        <p className="truncate text-muted-foreground text-xs">{template.description}</p>
-                      )}
-                    </div>
-                  </ComboboxItem>
-                );
-              }}
+              {(template) => (
+                <ComboboxItem key={template.id} value={template}>
+                  <LibraryIcon />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-sm">{template.name}</p>
+                    {template.description && (
+                      <p className="truncate text-muted-foreground text-xs">{template.description}</p>
+                    )}
+                  </div>
+                </ComboboxItem>
+              )}
             </ComboboxList>
           </ComboboxContent>
         </Combobox>
         <FieldDescription>选择后会复制模板的描述和目标，不与模板保持关联。</FieldDescription>
       </Field>
 
-      <AlertDialog open={pendingTemplate != null} onOpenChange={(open) => !open && setPendingTemplate(null)}>
+      <AlertDialog
+        open={pendingTemplate != null}
+        onOpenChange={(open) => {
+          if (open) return;
+          setPendingTemplate(null);
+          setTemplateInputValue(selectedTemplate?.name ?? "");
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>使用模板「{pendingTemplate?.name}」？</AlertDialogTitle>

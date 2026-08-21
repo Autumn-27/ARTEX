@@ -323,8 +323,8 @@ func (s *CompanyStore) AddScope(companyID int64, lines []string, reason string) 
 	return s.AddScopeInputs(companyID, inputs, reason)
 }
 
-// AddScopeInputs inserts structured scope rules. Empty kinds retain the legacy
-// domain/IP/CIDR auto-detection used by AddScope.
+// AddScopeInputs inserts structured scope rules. Empty kinds use the automatic
+// CIDR/IP/ICP/domain/keyword classification used by AddScope.
 func (s *CompanyStore) AddScopeInputs(companyID int64, inputs []ScopeInput, reason string) (added, skipped, invalid int, errors []string) {
 	added, skipped, invalid, validationErrors, err := s.AddScopeInputsChecked(companyID, inputs, reason)
 	if err != nil {
@@ -604,6 +604,11 @@ func (s *CompanyStore) UpdateScopeInputsChecked(companyID int64, inputs []ScopeI
 		return 0, 0, nil, err
 	}
 	rules, invalid, errs := parseScopeInputs(inputs)
+	if invalid > 0 {
+		return 0, invalid, errs, &CompanyScopeValidationError{Message: fmt.Sprintf(
+			"企业范围包含 %d 条无效规则，未覆盖原有范围", invalid,
+		)}
+	}
 	if err := validateParsedScopeBounds(rules); err != nil {
 		return 0, invalid, errs, err
 	}

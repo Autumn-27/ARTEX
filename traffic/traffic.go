@@ -219,7 +219,7 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	respBody := t.bodyOrBlob(f.Response.Body)
 	ct := f.Response.Header.Get("Content-Type")
 
-	reqTxt := fmt.Sprintf("%s %s %s\n%s\n%s", method, f.Request.URL.RequestURI(), f.Request.Proto, headerLines(f.Request.Header), reqBody)
+	reqTxt := fmt.Sprintf("%s %s %s\n%s\n%s", method, f.Request.URL.RequestURI(), f.Request.Proto, requestHeaderLines(f.Request), reqBody)
 	respTxt := fmt.Sprintf("HTTP %d\n%s\n%s", f.Response.StatusCode, headerLines(f.Response.Header), respBody)
 	_ = os.WriteFile(filepath.Join(exDir, "request.http"), []byte(reqTxt), 0o644)
 	_ = os.WriteFile(filepath.Join(exDir, "response.http"), []byte(respTxt), 0o644)
@@ -264,6 +264,26 @@ func headerLines(h map[string][]string) string {
 			b.WriteByte('\n')
 		}
 	}
+	return b.String()
+}
+
+// requestHeaderLines restores the HTTP Host header, which net/http stores on
+// Request.Host rather than in Header. Keeping it in request.http makes the raw
+// capture complete and directly replayable.
+func requestHeaderLines(req *mproxy.Request) string {
+	headers := req.Header.Clone()
+	headers.Del("Host")
+	host := req.URL.Host
+	if raw := req.Raw(); raw != nil && strings.TrimSpace(raw.Host) != "" {
+		host = raw.Host
+	}
+	var b strings.Builder
+	if host = strings.TrimSpace(host); host != "" {
+		b.WriteString("Host: ")
+		b.WriteString(host)
+		b.WriteByte('\n')
+	}
+	b.WriteString(headerLines(headers))
 	return b.String()
 }
 

@@ -55,9 +55,10 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           BIN=artex
+          VERSION="${GITHUB_REF_NAME#v}"
           [ "$GOOS" = "windows" ] && BIN=artex.exe
           go build -tags embedui -trimpath \
-            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -ldflags "-s -w -X main.version=${VERSION}" \
             -o "$BIN" ./cmd/artex
       - name: Package
         run: |

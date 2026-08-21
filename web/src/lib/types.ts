@@ -555,7 +555,6 @@ export interface BatchControlItem {
   id: string;
   ok: boolean;
   status?: string;
-  state?: string;
   queued?: boolean;
   error?: string;
 }

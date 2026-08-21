@@ -11,7 +11,6 @@ import type {
   AgentDetail,
   AgentTrigger,
   Asset,
-  AssetNode,
   Audit,
   BatchControlItem,
   ChatAttachment,
@@ -56,7 +55,6 @@ import type {
   SSTask,
   Stats,
   Task,
-  TaskAssetView,
   TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
@@ -230,11 +228,6 @@ export const api = {
       state: "paused" | "open" | "cancelled";
       deleted?: { intents: number; facts: number; findings: number; activities: number };
     }>(`/tasks/${taskId}/intents/${intentId}/control`, { action }),
-  controlIntentsBatch: (taskId: string, intentIds: string[], action: "pause" | "resume") =>
-    post<{ items: BatchControlItem[] }>(`/tasks/${taskId}/intents/control/batch`, {
-      intent_ids: intentIds,
-      action,
-    }),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

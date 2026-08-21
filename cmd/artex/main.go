@@ -21,9 +21,9 @@ import (
 	"github.com/Autumn-27/artex/server"
 )
 
-// version is the build version, injected at release time via
-// -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
-var version = "dev"
+// version is the application version. Release builds may override it via
+// -ldflags "-X main.version=<version>".
+var version = "0.3.3"
 
 const banner = `
     _    ____ _____ _______  __

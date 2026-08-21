@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import {
+  ArrowUpIcon,
   BrainIcon,
   CircleCheckIcon,
   CircleSlashIcon,
@@ -15,7 +16,6 @@ import {
   PlayIcon,
   RadioIcon,
   RotateCwIcon,
-  SendIcon,
   ShieldAlertIcon,
   SquareIcon,
   Trash2Icon,
@@ -40,7 +40,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -48,7 +47,6 @@ import { api, sseUrl } from "@/lib/api";
 import { MOCK } from "@/lib/mock/enabled";
 import type {
   Activity,
-  BatchControlItem,
   ChatAttachment,
   InterceptApprovalRow,
   Session,
@@ -162,6 +160,36 @@ function fmtTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(n);
 }
+
+const TokenMetrics = React.forwardRef<
+  HTMLSpanElement,
+  React.ComponentPropsWithoutRef<"span"> & {
+    input: number;
+    cache: number;
+    output: number;
+    labels?: "short" | "long";
+  }
+>(({ input, cache, output, labels = "short", className, ...props }, ref) => {
+  const names = labels === "short" ? ["入", "缓", "出"] : ["input", "cache", "output"];
+  const values = [input, cache, output];
+  return (
+    <span
+      ref={ref}
+      className={cn("inline-flex min-w-0 flex-wrap items-center gap-1 text-muted-foreground", className)}
+      {...props}
+    >
+      {values.map((value, index) => (
+        <React.Fragment key={names[index]}>
+          <span>{names[index]}</span>
+          <Badge variant="secondary" className="h-5 px-1.5 font-mono tabular-nums">
+            {fmtTokens(value)}
+          </Badge>
+        </React.Fragment>
+      ))}
+    </span>
+  );
+});
+TokenMetrics.displayName = "TokenMetrics";
 
 // fmtDuration renders an elapsed milliseconds span compactly (90s → 1m30s).
 function fmtDuration(ms: number): string {
@@ -277,12 +305,6 @@ function SessionItem({
   onResume,
   onCancel,
   controlling,
-  resolution,
-  tokens,
-  selectable,
-  selected,
-  onSelectedChange,
-  selectionDisabled,
 }: {
   s: Session;
   active: boolean;
@@ -294,16 +316,7 @@ function SessionItem({
   onResume?: () => void;
   onCancel?: () => void;
   controlling?: boolean;
-  resolution?: TaskLLMResolution;
-  tokens?: TokenTotal;
-  selectable?: boolean;
-  selected?: boolean;
-  onSelectedChange?: (checked: boolean) => void;
-  selectionDisabled?: boolean;
 }) {
-  const tokenCount = tokens
-    ? tokens.input_tokens + tokens.output_tokens + tokens.cache_read_tokens + tokens.cache_write_tokens
-    : 0;
   const icon =
     s.role === "worker" ? (
       statusIcon(s.status)
@@ -319,16 +332,6 @@ function SessionItem({
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
-      {selectable && (
-        <Checkbox
-          checked={selected}
-          onCheckedChange={(value) => onSelectedChange?.(value === true)}
-          onClick={(event) => event.stopPropagation()}
-          disabled={selectionDisabled}
-          className="ml-1 shrink-0"
-          aria-label={`选择 Worker ${s.intent_id}`}
-        />
-      )}
       <button
         type="button"
         onClick={onClick}
@@ -345,32 +348,7 @@ function SessionItem({
             来源 #{s.source_task_id}
           </Badge>
         )}
-        <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
-        {resolution && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Badge variant="outline" className="min-w-0 max-w-24 shrink-0">
-                <span className="min-w-0 truncate">{resolution.available ? resolution.model : "模型不可用"}</span>
-              </Badge>
-            </TooltipTrigger>
-            <TooltipContent side="right" className="max-w-xs [overflow-wrap:anywhere]">
-              {resolution.available
-                ? `${resolution.name} / ${resolution.format} / ${resolution.model}`
-                : resolution.reason || "没有可用的 LLM 配置"}
-            </TooltipContent>
-          </Tooltip>
-        )}
-        {tokens && tokenCount > 0 && s.role === "worker" && !s.inherited && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Badge className="shrink-0 font-mono tabular-nums">{fmtTokens(tokenCount)}</Badge>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              输入 {tokens.input_tokens.toLocaleString()} · 输出 {tokens.output_tokens.toLocaleString()} · 缓存读取{" "}
-              {tokens.cache_read_tokens.toLocaleString()} · 缓存写入 {tokens.cache_write_tokens.toLocaleString()}
-            </TooltipContent>
-          </Tooltip>
-        )}
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{displayTitle}</span>
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
           <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
@@ -446,8 +424,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
-  const [selectedIntentIds, setSelectedIntentIds] = React.useState<Set<string>>(() => new Set());
-  const [batchControlling, setBatchControlling] = React.useState<"pause" | "resume" | null>(null);
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -478,7 +454,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   const controlWorker = React.useCallback(
     async (session: Session, action: "pause" | "resume" | "cancel") => {
-      if (!session.intent_id || session.inherited || controllingIntent || batchControlling) return;
+      if (!session.intent_id || session.inherited || controllingIntent) return;
       setControllingIntent(session.intent_id);
       try {
         const result = await api.controlIntent(taskId, session.intent_id, action);
@@ -505,7 +481,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         setCancelIntent(null);
       }
     },
-    [activeId, batchControlling, controllingIntent, patchIntentState, taskId],
+    [activeId, controllingIntent, patchIntentState, taskId],
   );
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
@@ -758,7 +734,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
     setHasLoadedOlderIntentsPage(false);
-    setSelectedIntentIds(new Set());
     setTaskTokens(null);
     setSessionTokens({});
     setLLMResolutions(null);
@@ -978,77 +953,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;
 
-  const selectableIntentIds = React.useMemo(
-    () =>
-      allIntents
-        .filter((node) => !node.inherited && (node.state === "running" || node.state === "paused"))
-        .map((node) => node.id),
-    [allIntents],
-  );
-  React.useEffect(() => {
-    const allowed = new Set(selectableIntentIds);
-    setSelectedIntentIds((current) => {
-      const next = new Set([...current].filter((id) => allowed.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, [selectableIntentIds]);
-
-  const toggleIntentSelection = React.useCallback((id: string, checked: boolean) => {
-    setSelectedIntentIds((current) => {
-      const next = new Set(current);
-      if (checked) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }, []);
-
-  const batchControlWorkers = React.useCallback(
-    async (action: "pause" | "resume") => {
-      const requiredState = action === "pause" ? "running" : "paused";
-      const ids = allIntents
-        .filter((node) => selectedIntentIds.has(node.id) && !node.inherited && node.state === requiredState)
-        .map((node) => node.id);
-      if (ids.length === 0 || batchControlling) return;
-      setBatchControlling(action);
-      try {
-        const items: BatchControlItem[] = [];
-        const requestErrors: Error[] = [];
-        for (let offset = 0; offset < ids.length; offset += 100) {
-          const chunk = ids.slice(offset, offset + 100);
-          try {
-            const response = await api.controlIntentsBatch(taskId, chunk, action);
-            items.push(...response.items);
-          } catch (error) {
-            requestErrors.push(error as Error);
-            items.push(...chunk.map((id) => ({ id, ok: false, error: (error as Error).message })));
-          }
-        }
-        const succeeded = items.filter((item) => item.ok);
-        const failed = items.length - succeeded.length;
-        for (const item of succeeded) {
-          patchIntentState(item.id, item.state ?? (action === "pause" ? "paused" : "open"));
-        }
-        setSelectedIntentIds((current) => {
-          const next = new Set(current);
-          for (const item of succeeded) next.delete(item.id);
-          return next;
-        });
-        if (succeeded.length > 0)
-          toast.success(`已${action === "pause" ? "暂停" : "继续"} ${succeeded.length} 个 Worker`);
-        if (requestErrors.length > 0) {
-          toast.error(`${requestErrors.length} 组批量请求失败，${failed} 个 Worker 未执行`);
-        } else if (failed > 0) {
-          toast.warning(`${failed} 个 Worker 状态已变化，未执行`);
-        }
-      } catch (error) {
-        toast.error(`批量操作失败：${(error as Error).message}`);
-      } finally {
-        setBatchControlling(null);
-      }
-    },
-    [allIntents, batchControlling, patchIntentState, selectedIntentIds, taskId],
-  );
-
   // For each worker session (intent), derive the display title from the intent
   // payload summary. Also store the full TaskNode for the hover-JSON tooltip.
   const sessionMeta = React.useMemo(() => {
@@ -1217,7 +1121,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     i: activeTokens.input_tokens,
     o: activeTokens.output_tokens,
     cr: activeTokens.cache_read_tokens,
-    cw: activeTokens.cache_write_tokens,
     any:
       activeTokens.input_tokens +
         activeTokens.output_tokens +
@@ -1331,25 +1234,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const mainLoaded = !!store.main?.loaded;
   // What the transcript pane should show for the active session.
   const showLoader = !activeState || (activeState.loading && !activeState.loaded);
-  const selectedPauseCount = allIntents.filter(
-    (node) => selectedIntentIds.has(node.id) && !node.inherited && node.state === "running",
-  ).length;
-  const selectedResumeCount = allIntents.filter(
-    (node) => selectedIntentIds.has(node.id) && !node.inherited && node.state === "paused",
-  ).length;
-  const selectedSelectableCount = selectableIntentIds.filter((id) => selectedIntentIds.has(id)).length;
-  let allSelectableChecked: boolean | "indeterminate" = false;
-  if (selectableIntentIds.length > 0 && selectedSelectableCount === selectableIntentIds.length) {
-    allSelectableChecked = true;
-  } else if (selectedSelectableCount > 0) {
-    allSelectableChecked = "indeterminate";
-  }
   const resolutionForSession = (session: Session): TaskLLMResolution | undefined => {
     if (!llmResolutions || session.inherited || session.role === "system") return undefined;
     if (session.role === "mainagent") return llmResolutions.mainagent;
     if (session.role === "planner") return llmResolutions.planner;
     return llmResolutions.worker;
   };
+  const activeResolution = resolutionForSession(active);
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -1384,10 +1275,15 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             {taskTokens && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Badge className="mt-2 w-full min-w-0 justify-start font-mono tabular-nums">
-                    任务总计 · 入 {fmtTokens(taskTokens.input_tokens)} · 缓 {fmtTokens(taskTokens.cache_read_tokens)} ·
-                    出 {fmtTokens(taskTokens.output_tokens)}
-                  </Badge>
+                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                    <span>任务总计</span>
+                    <span>·</span>
+                    <TokenMetrics
+                      input={taskTokens.input_tokens}
+                      cache={taskTokens.cache_read_tokens}
+                      output={taskTokens.output_tokens}
+                    />
+                  </div>
                 </TooltipTrigger>
                 <TooltipContent>
                   输入 {taskTokens.input_tokens.toLocaleString()} · 输出 {taskTokens.output_tokens.toLocaleString()} ·
@@ -1395,35 +1291,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   {taskTokens.cache_write_tokens.toLocaleString()}
                 </TooltipContent>
               </Tooltip>
-            )}
-            {selectedIntentIds.size > 0 && (
-              <div className="mt-2 flex items-center gap-1">
-                <span className="min-w-0 flex-1 text-xs text-muted-foreground">
-                  已选 {selectedIntentIds.size} 个 Worker
-                </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-xs"
-                  disabled={selectedPauseCount === 0 || batchControlling !== null}
-                  onClick={() => void batchControlWorkers("pause")}
-                  title={`暂停 ${selectedPauseCount} 个运行中 Worker`}
-                  aria-label="批量暂停 Worker"
-                >
-                  {batchControlling === "pause" ? <Loader2Icon className="animate-spin" /> : <PauseIcon />}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-xs"
-                  disabled={selectedResumeCount === 0 || batchControlling !== null}
-                  onClick={() => void batchControlWorkers("resume")}
-                  title={`继续 ${selectedResumeCount} 个已暂停 Worker`}
-                  aria-label="批量继续 Worker"
-                >
-                  {batchControlling === "resume" ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}
-                </Button>
-              </div>
             )}
           </div>
           <ScrollArea type="auto" className="min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
@@ -1435,23 +1302,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 return (
                   <div key={role} className="flex flex-col gap-0.5">
                     <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
-                      {role === "worker" && selectableIntentIds.length > 0 && (
-                        <Checkbox
-                          checked={allSelectableChecked}
-                          onCheckedChange={(value) => {
-                            const checked = value === true;
-                            setSelectedIntentIds((current) => {
-                              const next = new Set(current);
-                              for (const id of selectableIntentIds) {
-                                if (checked) next.add(id);
-                                else next.delete(id);
-                              }
-                              return next;
-                            });
-                          }}
-                          aria-label="选择全部可控制 Worker"
-                        />
-                      )}
                       <Meta.icon className="size-3.5" />
                       {Meta.label}
                     </div>
@@ -1466,19 +1316,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           hasPending={hasPendingForSession(s)}
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => setActiveId(s.id)}
-                          controlling={batchControlling !== null || controllingIntent === s.intent_id}
-                          resolution={resolutionForSession(s)}
-                          tokens={tokenForSession(keyForSession(s))}
-                          selectable={
-                            s.role === "worker" && !s.inherited && (s.status === "running" || s.status === "paused")
-                          }
-                          selected={selectedIntentIds.has(s.intent_id ?? "")}
-                          selectionDisabled={batchControlling !== null}
-                          onSelectedChange={(checked) => s.intent_id && toggleIntentSelection(s.intent_id, checked)}
+                          controlling={controllingIntent === s.intent_id}
                           onPause={() => void controlWorker(s, "pause")}
                           onResume={() => void controlWorker(s, "resume")}
                           onCancel={() => {
-                            if (!batchControlling) setCancelIntent(s);
+                            setCancelIntent(s);
                           }}
                         />
                       );
@@ -1529,6 +1371,26 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 titleEl
               );
             })()}
+            {activeResolution && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge
+                    variant="outline"
+                    className="max-w-28 shrink-0 font-mono font-normal"
+                    aria-label={activeResolution.available ? `当前模型：${activeResolution.model}` : "模型不可用"}
+                  >
+                    <span className="truncate">
+                      {activeResolution.available ? activeResolution.model : "模型不可用"}
+                    </span>
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
+                  {activeResolution.available
+                    ? `${activeResolution.name} / ${activeResolution.format} / ${activeResolution.model}`
+                    : activeResolution.reason || "没有可用的 LLM 配置"}
+                </TooltipContent>
+              </Tooltip>
+            )}
             {active.inherited && active.source_task_id && (
               <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
             )}
@@ -1545,9 +1407,17 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             )}
             <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
               {tokenTotal.any && (
-                <span className="min-w-0 truncate" title="input / cache(read) / output tokens">
-                  input {fmtTokens(tokenTotal.i)} · cache {fmtTokens(tokenTotal.cr)} · output {fmtTokens(tokenTotal.o)}
-                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <TokenMetrics input={tokenTotal.i} cache={tokenTotal.cr} output={tokenTotal.o} labels="long" />
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    输入 {activeTokens.input_tokens.toLocaleString()} · 输出{" "}
+                    {activeTokens.output_tokens.toLocaleString()} · 缓存读取{" "}
+                    {activeTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
+                    {activeTokens.cache_write_tokens.toLocaleString()}
+                  </TooltipContent>
+                </Tooltip>
               )}
               {runDuration != null && (
                 <span className="inline-flex items-center gap-1" title="运行时长（首步 → 末步）">
@@ -1673,7 +1543,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       title="发送消息"
                       aria-label="发送消息"
                     >
-                      {sending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}
+                      {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
                     </InputGroupButton>
                   )}
                 </InputGroupAddon>
