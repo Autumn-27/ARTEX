@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -10,14 +11,16 @@ import (
 
 // Task is a row in the task registry (1:1 with an exploration).
 type Task struct {
-	ID            int64  `json:"id"`
-	Description   string `json:"description"`
-	Goal          string `json:"goal"`
-	ExplorationID int64  `json:"exploration_id"`
-	Status        string `json:"status"`
-	Paused        bool   `json:"paused"`
-	Queued        bool   `json:"queued"`
-	LLMProfileID  *int64 `json:"llm_profile_id,omitempty"`
+	ID            int64      `json:"id"`
+	Description   string     `json:"description"`
+	Goal          string     `json:"goal"`
+	ExplorationID int64      `json:"exploration_id"`
+	Status        string     `json:"status"`
+	Paused        bool       `json:"paused"`
+	Queued        bool       `json:"queued"`
+	QueuedAt      *time.Time `json:"queued_at,omitempty"`
+	QueueMode     string     `json:"queue_mode,omitempty"`
+	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
 	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
 	// for ActiveLLMProfileID while older API clients still send one profile id.
 	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
@@ -26,6 +29,7 @@ type Task struct {
 	LLMFailoverState   string     `json:"llm_failover_state,omitempty"`
 	LLMFailoverReason  string     `json:"llm_failover_reason,omitempty"`
 	SourceTaskIDs      []int64    `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64    `json:"company_ids,omitempty"`
 	ParentRef          string     `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
 	CreatedAt          time.Time  `json:"created_at"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"` // 进入终态(done/failed/timeout)的时刻;非终态为 nil
@@ -74,6 +78,40 @@ const MinPlanHeartbeatSeconds = 600
 // multiplying graph and asset-context queries without limit.
 const MaxTaskSourceCount = 8
 
+// MaxTaskCompanyCount bounds the number of company asset scopes attached to a
+// task. Company scopes are prompt context, so an unbounded list would inflate
+// every planner and worker call.
+const MaxTaskCompanyCount = 32
+
+var (
+	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
+	ErrTaskCompanyNotFound   = errors.New("task company not found")
+)
+
+// NormalizeTaskCompanyIDs validates IDs and removes duplicates while retaining
+// the user's first-seen order.
+func NormalizeTaskCompanyIDs(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	seen := make(map[int64]struct{}, min(len(ids), MaxTaskCompanyCount))
+	normalized := make([]int64, 0, min(len(ids), MaxTaskCompanyCount))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("%w: company id must be positive", ErrTaskCompanyIDsInvalid)
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+		if len(normalized) > MaxTaskCompanyCount {
+			return nil, fmt.Errorf("%w: got more than %d unique companies", ErrTaskCompanyIDsInvalid, MaxTaskCompanyCount)
+		}
+	}
+	return normalized, nil
+}
+
 func normalizeHeartbeat(sec int) int {
 	if sec < MinPlanHeartbeatSeconds {
 		return MinPlanHeartbeatSeconds
@@ -95,6 +133,7 @@ func (d *DB) CreateTask(description, goal string, llmProfileID *int64, timeoutSe
 // with the task/exploration row.
 type TaskCreateOptions struct {
 	SourceTaskIDs        []int64
+	CompanyIDs           []int64
 	LLMProfileIDs        []int64
 	TimeoutSeconds       int
 	PlanHeartbeatSeconds int
@@ -106,6 +145,11 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 	if len(opts.SourceTaskIDs) > MaxTaskSourceCount {
 		return nil, fmt.Errorf("too many source tasks: got %d, maximum is %d", len(opts.SourceTaskIDs), MaxTaskSourceCount)
 	}
+	companyIDs, err := NormalizeTaskCompanyIDs(opts.CompanyIDs)
+	if err != nil {
+		return nil, err
+	}
+	opts.CompanyIDs = companyIDs
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -144,6 +188,7 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		LLMProfileID: active, ActiveLLMProfileID: active,
 		LLMProfileIDs:  append([]int64(nil), opts.LLMProfileIDs...),
 		SourceTaskIDs:  append([]int64(nil), opts.SourceTaskIDs...),
+		CompanyIDs:     append([]int64(nil), opts.CompanyIDs...),
 		TimeoutSeconds: opts.TimeoutSeconds, PlanHeartbeatSeconds: opts.PlanHeartbeatSeconds,
 	}
 	if err := tx.QueryRow(`
@@ -155,6 +200,9 @@ RETURNING id, status, paused, created_at`, description, goal, expID, active, opt
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
 		return nil, err
 	}
+	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
+		return nil, err
+	}
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
 		return nil, err
 	}
@@ -164,6 +212,33 @@ RETURNING id, status, paused, created_at`, description, goal, expID, active, opt
 		t.LLMFailoverState = "ready"
 	}
 	return t, tx.Commit()
+}
+
+func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {
+	if len(companyIDs) == 0 {
+		return nil
+	}
+	var inserted int
+	err := tx.QueryRow(`
+WITH requested(company_id, position) AS (
+    SELECT company_id, position
+    FROM unnest($2::bigint[]) WITH ORDINALITY AS requested(company_id, position)
+), inserted AS (
+    INSERT INTO task_scope(task_id, kind, company_id, source, reason)
+    SELECT $1, 'company', companies.id, 'manual', '任务创建时关联企业'
+    FROM requested
+    JOIN companies ON companies.id=requested.company_id
+    ORDER BY requested.position
+    RETURNING company_id
+)
+SELECT count(*) FROM inserted`, taskID, companyIDs).Scan(&inserted)
+	if err != nil {
+		return err
+	}
+	if inserted != len(companyIDs) {
+		return fmt.Errorf("%w: one or more companies do not exist", ErrTaskCompanyNotFound)
+	}
+	return nil
 }
 
 func insertTaskRelations(tx *sql.Tx, taskID int64, sourceIDs []int64) error {
@@ -199,11 +274,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 	return nil
 }
 
-const taskCols = `id, description, goal, exploration_id, status, paused, queued, llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), first_run_at, deadline_at`
+const taskCols = `id, description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -263,9 +338,41 @@ func (d *DB) SetPaused(id int64, paused bool) error {
 	return err
 }
 
-func (d *DB) SetQueued(id int64, queued bool) error {
-	_, err := d.Exec(`UPDATE tasks SET queued=$1 WHERE id=$2`, queued, id)
+// Enqueue places a task at the tail of the persistent admission queue. Repeating
+// the operation while it is already queued keeps its original FIFO position.
+func (d *DB) Enqueue(id int64, mode string) error {
+	if mode != "bootstrap" && mode != "resume" {
+		return fmt.Errorf("invalid queue mode %q", mode)
+	}
+	_, err := d.Exec(`UPDATE tasks
+SET queued=true,
+    queued_at=CASE WHEN queued THEN COALESCE(queued_at, now()) ELSE now() END,
+    queue_mode=CASE
+        WHEN queue_mode='bootstrap' OR $2='bootstrap' THEN 'bootstrap'
+        ELSE 'resume'
+    END
+WHERE id=$1`, id, mode)
 	return err
+}
+
+// Dequeue removes the concurrency hold. clearMode is false when a user pauses a
+// queued task, preserving whether its next admission must bootstrap or resume.
+func (d *DB) Dequeue(id int64, clearMode bool) error {
+	_, err := d.Exec(`UPDATE tasks
+SET queued=false,
+    queued_at=NULL,
+    queue_mode=CASE WHEN $2 THEN '' ELSE queue_mode END
+WHERE id=$1`, id, clearMode)
+	return err
+}
+
+// SetQueued is the compatibility helper used by older callers and tests. New
+// scheduling code should use Enqueue/Dequeue so FIFO metadata is explicit.
+func (d *DB) SetQueued(id int64, queued bool) error {
+	if queued {
+		return d.Enqueue(id, "bootstrap")
+	}
+	return d.Dequeue(id, true)
 }
 
 // SetStatus updates a task's lifecycle status. Entering a terminal state

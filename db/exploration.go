@@ -3,10 +3,16 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
+
+// ErrIntentStateConflict marks a failed compare-and-set transition. Callers use
+// it to distinguish an expected control race (HTTP 409) from a storage failure.
+var ErrIntentStateConflict = errors.New("intent state changed concurrently")
 
 // utf8Clean makes a string safe for a PostgreSQL text column. It (1) replaces
 // invalid UTF-8 byte sequences with U+FFFD and (2) strips NUL (0x00) bytes.
@@ -64,6 +70,17 @@ type Activity struct {
 // TokenUsage is a per-worker token aggregate (TokenStatsByWorker).
 type TokenUsage struct {
 	Worker           string `json:"worker"`
+	InputTokens      int    `json:"input_tokens"`
+	OutputTokens     int    `json:"output_tokens"`
+	CacheReadTokens  int    `json:"cache_read_tokens"`
+	CacheWriteTokens int    `json:"cache_write_tokens"`
+}
+
+// SessionTokenUsage is the authoritative completed-run total for one task UI
+// session. Worker sessions are keyed by intent rather than the reusable work#N
+// executor name, so retries and reassignment remain attached to the same row.
+type SessionTokenUsage struct {
+	Session          string `json:"session"`
 	InputTokens      int    `json:"input_tokens"`
 	OutputTokens     int    `json:"output_tokens"`
 	CacheReadTokens  int    `json:"cache_read_tokens"`
@@ -264,6 +281,21 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, termin
 	return err
 }
 
+// CompareAndSetIntentState transitions one local intent only when its current
+// state still matches expected. It is the state boundary used by pause/resume and
+// worker settlement, so a stale API read cannot overwrite a concurrent finish.
+func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state string) (bool, error) {
+	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state=$1, blocked_reason=NULL, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // IntentCleanup summarizes the blackboard records removed when a user cancels
 // one worker intent. Global assets and traffic are deliberately not part of this
 // operation; exploration anchors disappear only because their owning nodes do.
@@ -295,7 +327,7 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 		return out, err
 	}
 	if state != "running" && state != "paused" {
-		return out, fmt.Errorf("intent state %s cannot be cancelled", state)
+		return out, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
 	}
 
 	if err := tx.QueryRow(`SELECT
@@ -304,14 +336,33 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 	FROM exploration_edges e
 	JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
 	WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
-	  AND n.kind IN ('fact','finding')`, s.expID, id, RelYields).Scan(&out.Facts, &out.Findings); err != nil {
+	  AND n.kind IN ('fact','finding')
+	  AND NOT EXISTS (
+	      SELECT 1 FROM exploration_edges other
+	      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+	        AND other.src_id<>$2
+	  )`, s.expID, id, RelYields).Scan(&out.Facts, &out.Findings); err != nil {
 		return out, err
 	}
 
 	if _, err := tx.Exec(`DELETE FROM findings f USING exploration_edges e, exploration_nodes n
 		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
 		  AND n.id=e.dst_id AND n.exploration_id=e.exploration_id
-		  AND n.kind='finding' AND f.node_id=n.id`, s.expID, id, RelYields); err != nil {
+		  AND n.kind='finding' AND f.node_id=n.id
+		  AND NOT EXISTS (
+		      SELECT 1 FROM exploration_edges other
+		      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+		        AND other.src_id<>$2
+		  )`, s.expID, id, RelYields); err != nil {
+		return out, err
+	}
+	// Activity rows are part of the blackboard cleanup, but their token usage is
+	// irreversible metering data. Fold completed runs plus the latest unfinished
+	// usage frame into detached daily result rows before deleting the conversation.
+	// The rows are excluded from per-intent sessions while whole-task totals and
+	// the original UTC reporting dates remain accurate.
+	tokenBuckets, err := intentTokenRollup(tx, s.expID, id)
+	if err != nil {
 		return out, err
 	}
 	res, err := tx.Exec(`DELETE FROM activity WHERE exploration_id=$1 AND node_id=$2`, s.expID, id)
@@ -319,15 +370,36 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 		return out, err
 	}
 	out.Activities, _ = res.RowsAffected()
+	for _, bucket := range tokenBuckets {
+		metadata, _ := json.Marshal(map[string]any{
+			"cancelled_intent_id": id,
+			"token_day":           bucket.Day.Format(time.DateOnly),
+			"token_rollup":        true,
+		})
+		if _, err := tx.Exec(`INSERT INTO activity(
+			exploration_id, worker, kind, summary, metadata,
+			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
+			VALUES ($1,'token-ledger','result',$2,$3,$4,$5,$6,$7,$8)`,
+			s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", id), metadata,
+			bucket.Usage.InputTokens, bucket.Usage.OutputTokens,
+			bucket.Usage.CacheReadTokens, bucket.Usage.CacheWriteTokens, bucket.Day); err != nil {
+			return out, err
+		}
+	}
 
 	res, err = tx.Exec(`DELETE FROM exploration_nodes
 		WHERE exploration_id=$1 AND (
 			id=$2 OR id IN (
 				SELECT e.dst_id FROM exploration_edges e
 				JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
-				WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
-				  AND n.kind IN ('fact','finding')
-			)
+					WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+					  AND n.kind IN ('fact','finding')
+					  AND NOT EXISTS (
+					      SELECT 1 FROM exploration_edges other
+					      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+					        AND other.src_id<>$2
+					  )
+				)
 		)`, s.expID, id, RelYields)
 	if err != nil {
 		return out, err
@@ -337,6 +409,108 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 	}
 	out.Intents = 1
 	return out, tx.Commit()
+}
+
+type tokenUsageBucket struct {
+	Day   time.Time
+	Usage TokenUsage
+}
+
+// intentTokenRollup returns exactly-once usage grouped by its original UTC day.
+// Each result terminates one run. A result carrying usage is authoritative; an
+// older error/cancel result without usage falls back to the latest cumulative
+// usage frame since the previous result. A trailing frame represents a run that
+// was interrupted before its terminal result could be persisted.
+func intentTokenRollup(tx *sql.Tx, explorationID, intentID int64) ([]tokenUsageBucket, error) {
+	rows, err := tx.Query(`SELECT kind, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at
+		FROM activity
+		WHERE exploration_id=$1 AND node_id=$2 AND kind IN ('usage','result')
+		ORDER BY id`, explorationID, intentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byDay := make(map[time.Time]TokenUsage)
+	add := func(at time.Time, usage TokenUsage) {
+		if usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 {
+			return
+		}
+		utc := at.UTC()
+		day := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+		total := byDay[day]
+		total.add(usage)
+		byDay[day] = total
+	}
+
+	var pending TokenUsage
+	var pendingAt time.Time
+	hasPending := false
+	for rows.Next() {
+		var kind string
+		var input, output, read, write sql.NullInt64
+		var createdAt time.Time
+		if err := rows.Scan(&kind, &input, &output, &read, &write, &createdAt); err != nil {
+			return nil, err
+		}
+		current := TokenUsage{
+			InputTokens:      int(input.Int64),
+			OutputTokens:     int(output.Int64),
+			CacheReadTokens:  int(read.Int64),
+			CacheWriteTokens: int(write.Int64),
+		}
+		hasCurrent := input.Valid || output.Valid || read.Valid || write.Valid
+		if kind == "usage" {
+			if hasCurrent {
+				pending, pendingAt, hasPending = current, createdAt, true
+			}
+			continue
+		}
+
+		if hasCurrent {
+			// Preserve a partially populated legacy terminal row by filling only its
+			// missing dimensions from the latest cumulative usage frame.
+			if hasPending {
+				if !input.Valid {
+					current.InputTokens = pending.InputTokens
+				}
+				if !output.Valid {
+					current.OutputTokens = pending.OutputTokens
+				}
+				if !read.Valid {
+					current.CacheReadTokens = pending.CacheReadTokens
+				}
+				if !write.Valid {
+					current.CacheWriteTokens = pending.CacheWriteTokens
+				}
+			}
+			add(createdAt, current)
+		} else if hasPending {
+			add(createdAt, pending)
+		}
+		pending, pendingAt, hasPending = TokenUsage{}, time.Time{}, false
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if hasPending {
+		add(pendingAt, pending)
+	}
+
+	buckets := make([]tokenUsageBucket, 0, len(byDay))
+	for day, usage := range byDay {
+		buckets = append(buckets, tokenUsageBucket{Day: day, Usage: usage})
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Day.Before(buckets[j].Day) })
+	return buckets, nil
+}
+
+func (u *TokenUsage) add(other TokenUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
 }
 
 const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), created_at`
@@ -754,6 +928,41 @@ func (s *ExplorationStore) TokenStatsByWorker() ([]TokenUsage, error) {
 	for rows.Next() {
 		var u TokenUsage
 		if err := rows.Scan(&u.Worker, &u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// TokenStatsBySession aggregates every persisted completed run, independent of
+// activity-history pagination. Main/planner use fixed keys; Worker executions use
+// their intent node id, even when a different work#N process handled a retry.
+func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
+	rows, err := s.db.Query(`SELECT
+		CASE
+			WHEN COALESCE(a.worker,'')='mainagent' THEN 'main'
+			WHEN COALESCE(a.worker,'')='planner' THEN 'plan'
+			WHEN n.id IS NOT NULL THEN 'intent:' || n.id::text
+			ELSE ''
+		END AS session_key,
+		COALESCE(SUM(a.input_tokens),0), COALESCE(SUM(a.output_tokens),0),
+		COALESCE(SUM(a.cache_read_tokens),0), COALESCE(SUM(a.cache_write_tokens),0)
+	FROM activity a
+	LEFT JOIN exploration_nodes n
+	  ON n.id=a.node_id AND n.exploration_id=a.exploration_id AND n.kind='intent'
+	WHERE a.exploration_id=$1 AND a.kind='result'
+	  AND (COALESCE(a.worker,'') IN ('mainagent','planner') OR n.id IS NOT NULL)
+	GROUP BY session_key
+	ORDER BY session_key`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionTokenUsage{}
+	for rows.Next() {
+		var u SessionTokenUsage
+		if err := rows.Scan(&u.Session, &u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, u)

@@ -392,6 +392,42 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 						e["value"] = r.Net
 					case r.CompanyID != nil:
 						e["company_id"] = *r.CompanyID
+						if t.cs != nil {
+							if company, err := t.cs.GetCompany(*r.CompanyID); err == nil && company != nil {
+								e["company_name"] = company.Name
+							}
+							if rules, err := t.cs.GetScope(*r.CompanyID); err == nil {
+								keywords := make([]string, 0)
+								companyScope := make([]map[string]any, 0, len(rules))
+								for _, rule := range rules {
+									value := rule.Raw
+									if value == "" {
+										switch rule.Kind {
+										case "domain":
+											value = rule.Domain
+										case "ip", "cidr":
+											value = rule.Net
+										default:
+											value = rule.Value
+										}
+									}
+									entry := map[string]any{"kind": rule.Kind, "value": value}
+									if rule.Reason != "" {
+										entry["reason"] = rule.Reason
+									}
+									companyScope = append(companyScope, entry)
+									if rule.Kind == "keyword" && rule.Raw != "" {
+										keywords = append(keywords, rule.Raw)
+									}
+								}
+								if len(companyScope) > 0 {
+									e["company_scope"] = companyScope
+								}
+								if len(keywords) > 0 {
+									e["company_keywords"] = keywords
+								}
+							}
+						}
 					}
 					scope = append(scope, e)
 				}

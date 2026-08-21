@@ -4,17 +4,76 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/publicsuffix"
 )
 
-// ParsedScope is one parsed asset-scope entry. Exactly one of Domain / Net is set.
+// ParsedScope is one parsed asset-scope entry. Its kind selects Domain, Net, or Value.
 // Used internally by ParseScopeLine / ParseScopeLines (passed to CompanyStore).
 type ParsedScope struct {
-	Kind   string // "domain" | "ip" | "cidr"
+	Kind   string // "domain" | "ip" | "cidr" | "icp" | "keyword"
 	Domain string // normalized registrable/root domain (kind=domain)
 	Net    string // normalized CIDR, single IP as /32 or /128 (kind=ip|cidr)
+	Value  string // normalized text (kind=icp|keyword)
 	Raw    string // original input line
+}
+
+// ScopeInput is the structured API form for a company scope rule. Empty Kind
+// preserves the legacy one-line auto detection for domain/IP/CIDR clients.
+type ScopeInput struct {
+	Kind  string `json:"kind,omitempty"`
+	Value string `json:"value"`
+}
+
+// NormalizeICP removes every Unicode whitespace character and folds case. ICP
+// matching intentionally performs no fuzzy or punctuation normalization.
+func NormalizeICP(value string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value)))
+}
+
+func normalizeKeyword(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+// ParseScopeInput validates an explicitly typed rule. Legacy callers can omit
+// Kind and retain the existing domain/IP/CIDR auto-detection behavior.
+func ParseScopeInput(input ScopeInput) (ParsedScope, error) {
+	kind := strings.ToLower(strings.TrimSpace(input.Kind))
+	raw := strings.TrimSpace(input.Value)
+	if kind == "" {
+		return ParseScopeLine(raw)
+	}
+	switch kind {
+	case "domain", "ip", "cidr":
+		rule, err := ParseScopeLine(raw)
+		if err != nil {
+			return rule, err
+		}
+		if rule.Kind != kind {
+			return ParsedScope{Kind: kind, Raw: raw}, fmt.Errorf("%q 不是有效的 %s 范围", raw, kind)
+		}
+		return rule, nil
+	case "icp":
+		value := NormalizeICP(raw)
+		if value == "" {
+			return ParsedScope{Kind: kind, Raw: raw}, fmt.Errorf("ICP 不能为空")
+		}
+		return ParsedScope{Kind: kind, Value: value, Raw: raw}, nil
+	case "keyword":
+		value := normalizeKeyword(raw)
+		if value == "" {
+			return ParsedScope{Kind: kind, Raw: raw}, fmt.Errorf("企业关键词不能为空")
+		}
+		return ParsedScope{Kind: kind, Value: value, Raw: raw}, nil
+	default:
+		return ParsedScope{Kind: kind, Raw: raw}, fmt.Errorf("不支持的范围类型: %s", kind)
+	}
 }
 
 // ParseScopeLine classifies and validates one scope line (root domain / IP /

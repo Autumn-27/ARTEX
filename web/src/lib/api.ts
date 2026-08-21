@@ -13,9 +13,11 @@ import type {
   Asset,
   AssetNode,
   Audit,
+  BatchControlItem,
   ChatAttachment,
   CommandRecord,
   Company,
+  CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
   CoverageAssetRefs,
@@ -25,6 +27,8 @@ import type {
   DeleteTaskResult,
   Edge,
   Finding,
+  FindingDeepenResponse,
+  FindingGroupsPage,
   FindingQuery,
   FindingStats,
   FindingStatus,
@@ -39,21 +43,24 @@ import type {
   LLMTask,
   MCPServer,
   MCPTool,
+  MissingSkill,
   ModelTokenStat,
   PromptVar,
   PromptVersion,
+  SessionTokenUsage,
   Settings,
   Severity,
   SkillCall,
   SkillItem,
-  MissingSkill,
   SSProject,
   SSTask,
   Stats,
   Task,
   TaskAssetView,
+  TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
+  TaskTemplate,
   TokenTotal,
   TokenUsage,
   Tool,
@@ -179,6 +186,7 @@ export const api = {
     goal: string;
     llmProfileIds?: number[];
     sourceTaskIds?: string[];
+    companyIds?: number[];
     timeoutSeconds?: number;
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
@@ -188,10 +196,17 @@ export const api = {
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],
       source_task_ids: input.sourceTaskIds ?? [],
+      company_ids: input.companyIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
     }),
+  taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
+  createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
+    post<TaskTemplate>("/task-templates", input),
+  updateTaskTemplate: (id: number, input: Partial<Pick<TaskTemplate, "name" | "description" | "goal">>) =>
+    patch<TaskTemplate>(`/task-templates/${id}`, input),
+  deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
     put<{
       id: string;
@@ -206,13 +221,21 @@ export const api = {
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
   controlTask: (id: string, action: "pause" | "resume") =>
-    post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),
+    post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+  controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
+    post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
   controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel") =>
     post<{
       id: number;
       state: "paused" | "open" | "cancelled";
       deleted?: { intents: number; facts: number; findings: number; activities: number };
     }>(`/tasks/${taskId}/intents/${intentId}/control`, { action }),
+  controlIntentsBatch: (taskId: string, intentIds: string[], action: "pause" | "resume") =>
+    post<{ items: BatchControlItem[] }>(`/tasks/${taskId}/intents/control/batch`, {
+      intent_ids: intentIds,
+      action,
+    }),
+  taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>
     post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),
@@ -308,38 +331,22 @@ export const api = {
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
-  createCompany: (name: string, logo: string, scope: string) =>
+  createCompany: (name: string, scope: CompanyScopeRule[]) =>
     post<{ id: number; created: boolean; scope_added?: number; scope_invalid?: number; scope_errors?: string[] }>(
       "/companies",
       {
         name,
-        logo,
-        scope: scope.trim()
-          ? scope
-              .split("\n")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : [],
+        scope,
       },
     ),
-  addCompanyScope: (id: number, scope: string, reason = "") =>
+  addCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
     post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
-      scope: scope.trim()
-        ? scope
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : [],
+      scope,
       reason,
     }),
-  updateCompanyScope: (id: number, scope: string, reason = "") =>
+  updateCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
     post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
-      scope: scope.trim()
-        ? scope
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : [],
+      scope,
       reason,
       reset: true,
     }),
@@ -360,6 +367,15 @@ export const api = {
     if (q.task && q.task !== "all") p.set("task_id", q.task);
     if (q.sort) p.set("sort", q.sort);
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
+  },
+  findingGroups: (q: FindingQuery) => {
+    const p = new URLSearchParams({ page: String(q.page), limit: String(q.pageSize) });
+    if (q.severity && q.severity !== "all") p.set("severity", q.severity);
+    if (q.status && q.status !== "all") p.set("status", q.status);
+    if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
+    if (q.task && q.task !== "all") p.set("task_id", q.task);
+    if (q.sort) p.set("sort", q.sort);
+    return get<FindingGroupsPage>(`/exploration/findings/groups?${p.toString()}`);
   },
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
@@ -415,10 +431,15 @@ export const api = {
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // 删除漏洞:移除 findings 记录 + 来源探索节点(从发现列表/任务发现 Tab/探索图一并消失)。
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
+  deepenFinding: (id: string, description: string) =>
+    post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
   tokenStats: (task?: string) =>
-    get<{ workers: TokenUsage[]; total: TokenTotal }>(`/exploration/tokens${tq(task)}`).then((r) => ({
+    get<{ workers: TokenUsage[]; sessions: SessionTokenUsage[]; total: TokenTotal }>(
+      `/exploration/tokens${tq(task)}`,
+    ).then((r) => ({
       workers: arr(r.workers),
+      sessions: arr(r.sessions),
       total: r.total,
     })),
   tokenDaily: (days = 30) => get<DailyTokenBucket[]>(`/tokens/daily?days=${days}`).then(arr),
@@ -505,6 +526,7 @@ export const api = {
   },
   chat: (message: string, task?: string, attachments?: ChatAttachment[]) =>
     post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments }),
+  chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
     if (MOCK)
@@ -619,7 +641,10 @@ export const api = {
   conversations: () => get<{ conversations: Conversation[] }>("/conversations").then((r) => arr(r.conversations)),
   createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
     post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
-  renameConversation: (id: number, title: string) => patch<{ ok: boolean }>(`/conversations/${id}`, { title }),
+  updateConversation: (id: number, input: { title?: string; pinned?: boolean }) =>
+    patch<Conversation>(`/conversations/${id}`, input),
+  renameConversation: (id: number, title: string) => patch<Conversation>(`/conversations/${id}`, { title }),
+  pinConversation: (id: number, pinned: boolean) => patch<Conversation>(`/conversations/${id}`, { pinned }),
   updateConversationProfile: (id: number, llm_profile_id: number | null) =>
     patch<{ ok: boolean }>(`/conversations/${id}/profile`, { llm_profile_id }),
   deleteConversation: (id: number) => del<{ deleted: number }>(`/conversations/${id}`),

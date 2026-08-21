@@ -51,6 +51,7 @@ type TaskDTO struct {
 	LLMFailoverState   string        `json:"llm_failover_state"`
 	LLMFailoverReason  string        `json:"llm_failover_reason,omitempty"`
 	SourceTaskIDs      []string      `json:"source_task_ids"`
+	CompanyIDs         []int64       `json:"company_ids"`
 }
 
 // TokenTotalDTO is a whole-task (all agents) token aggregate.
@@ -71,9 +72,10 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 }
 
 func taskDTO(t *Task, status string) TaskDTO {
+	lifecycle := t.lifecycleSnapshot()
 	llmState := t.llmStateSnapshot()
-	sourceIDs := make([]string, 0, len(t.SourceTaskIDs))
-	for _, id := range t.SourceTaskIDs {
+	sourceIDs := make([]string, 0, len(lifecycle.SourceTaskIDs))
+	for _, id := range lifecycle.SourceTaskIDs {
 		sourceIDs = append(sourceIDs, i64s(id))
 	}
 	profileIDs := append(make([]int64, 0, len(llmState.ProfileIDs)), llmState.ProfileIDs...)
@@ -85,16 +87,17 @@ func taskDTO(t *Task, status string) TaskDTO {
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,
-		CompletedAt:        completedRFC(t.CompletedAt),
-		CompletedUnix:      t.CompletedAt,
-		Paused:             t.Paused,
-		Queued:             t.Queued,
+		CompletedAt:        completedRFC(lifecycle.CompletedAt),
+		CompletedUnix:      lifecycle.CompletedAt,
+		Paused:             lifecycle.Paused,
+		Queued:             lifecycle.Queued,
 		LLMProfileID:       llmState.ProfileID,
 		LLMProfileIDs:      profileIDs,
 		ActiveLLMProfileID: llmState.ActiveID,
 		LLMFailoverState:   llmState.FailoverState,
 		LLMFailoverReason:  llmState.FailoverReason,
 		SourceTaskIDs:      sourceIDs,
+		CompanyIDs:         lifecycle.CompanyIDs,
 	}
 }
 

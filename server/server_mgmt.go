@@ -77,6 +77,44 @@ func canonicalTaskID(raw string) (string, bool) {
 	return strconv.FormatInt(n, 10), true
 }
 
+// beginTaskDelete serializes the delete barrier with pause, resume, admission,
+// and FIFO reconciliation. Every lifecycle path rechecks deleting after taking
+// concMu, so none can commit a contradictory state once this returns.
+func (s *Server) beginTaskDelete(taskID string) bool {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	if s.engine.IsDeleting(taskID) {
+		return false
+	}
+	return s.engine.BeginDelete(taskID)
+}
+
+// abortTaskDelete restores the execution barrier from the committed task row,
+// not from the in-memory state observed before deletion began. Keeping the task
+// paused on an unreadable row is conservative: a later explicit resume can
+// safely recover it without allowing work to escape an uncertain delete.
+func (s *Server) abortTaskDelete(taskID string) {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	keepPaused := true
+	if id, err := strconv.ParseInt(taskID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
+		if persisted, getErr := s.m.pg.GetTask(id); getErr == nil && persisted != nil {
+			keepPaused = persisted.Paused || persisted.Queued
+		} else if task, ok := s.m.Task(taskID); ok {
+			state := task.lifecycleSnapshot()
+			keepPaused = state.Paused || state.Queued
+			if getErr != nil {
+				log.Printf("[task-delete] task %s 读取持久状态失败，使用内存状态恢复屏障: %v", taskID, getErr)
+			}
+		} else if getErr == nil {
+			// The request targeted a task that does not exist. Do not retain a
+			// synthetic pause entry after releasing its temporary delete barrier.
+			keepPaused = false
+		}
+	}
+	s.engine.AbortDelete(taskID, keepPaused)
+}
+
 func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id, ok := canonicalTaskID(r.PathValue("id"))
 	if !ok {
@@ -88,14 +126,14 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	if !s.engine.BeginDelete(id) {
+	if !s.beginTaskDelete(id) {
 		writeErr(w, http.StatusConflict, "任务正在删除")
 		return
 	}
 	deleted := false
 	defer func() {
 		if !deleted {
-			s.engine.AbortDelete(id)
+			s.abortTaskDelete(id)
 		}
 	}()
 
@@ -1754,7 +1792,7 @@ func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {
 				// or clear the explicit chain and restore its Agent/global fallback.
 				// Resume only intents that were blocked by the exhausted chain; a
 				// paused task remains paused and terminal tasks remain immutable.
-				if !isTerminalStatus(task.Status) && s.taskRuntimeAvailable(task, "planner", "worker") {
+				if !isTerminalStatus(task.lifecycleSnapshot().Status) && s.taskRuntimeAvailable(task, "planner", "worker") {
 					if _, reopenErr := task.Store.ReopenIntentsByBlockedReason(db.IntentBlockedLLMQuota); reopenErr != nil {
 						log.Printf("[llm-profile] task %s reopen quota-blocked intents after profile delete: %v", task.ID, reopenErr)
 					}

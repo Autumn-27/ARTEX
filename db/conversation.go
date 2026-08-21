@@ -50,19 +50,32 @@ GROUP BY c.id`)
 // Conversation is one ChatGPT-style chat thread bound to an agent key. It lives
 // independent of the pentest exploration graph — see schema.sql §I.
 type Conversation struct {
-	ID           int64     `json:"id"`
-	AgentKey     string    `json:"agent_key"`
-	Title        string    `json:"title"`
-	LLMProfileID *int64    `json:"llm_profile_id,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           int64      `json:"id"`
+	AgentKey     string     `json:"agent_key"`
+	Title        string     `json:"title"`
+	LLMProfileID *int64     `json:"llm_profile_id,omitempty"`
+	Pinned       bool       `json:"pinned"`
+	PinnedAt     *time.Time `json:"pinned_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
-const convCols = `id, agent_key, title, llm_profile_id, created_at, updated_at`
+// ConversationPatch updates only the fields whose pointers are non-nil.
+type ConversationPatch struct {
+	Title  *string
+	Pinned *bool
+}
+
+const convCols = `id, agent_key, title, llm_profile_id, pinned_at, created_at, updated_at`
 
 func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 	var c Conversation
-	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &c.CreatedAt, &c.UpdatedAt)
+	var pinnedAt sql.NullTime
+	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &pinnedAt, &c.CreatedAt, &c.UpdatedAt)
+	if pinnedAt.Valid {
+		c.Pinned = true
+		c.PinnedAt = &pinnedAt.Time
+	}
 	return c, err
 }
 
@@ -127,7 +140,8 @@ func (d *DB) UpdateConversationProfile(id int64, llmProfileID *int64) error {
 
 // ListConversations returns all threads, most-recently-updated first.
 func (d *DB) ListConversations() ([]*Conversation, error) {
-	rows, err := d.Query(`SELECT ` + convCols + ` FROM conversations ORDER BY updated_at DESC`)
+	rows, err := d.Query(`SELECT ` + convCols + ` FROM conversations
+ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, updated_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +169,31 @@ func (d *DB) GetConversation(id int64) (*Conversation, error) {
 	return &c, nil
 }
 
-// RenameConversation sets a thread's title.
+// UpdateConversation applies a partial title/pin mutation and returns the updated
+// row. Pinning an already-pinned conversation preserves its original pin order.
+func (d *DB) UpdateConversation(id int64, patch ConversationPatch) (*Conversation, error) {
+	c, err := scanConv(d.QueryRow(`UPDATE conversations SET
+	title = CASE WHEN $2::boolean THEN $3 ELSE title END,
+	pinned_at = CASE
+		WHEN $4::boolean IS NULL THEN pinned_at
+		WHEN $4::boolean THEN COALESCE(pinned_at, now())
+		ELSE NULL
+	END
+WHERE id=$1
+RETURNING `+convCols, id, patch.Title != nil, patch.Title, patch.Pinned))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// RenameConversation sets a thread's title. Kept for automatic first-message
+// titles and compatibility with existing callers.
 func (d *DB) RenameConversation(id int64, title string) error {
-	_, err := d.Exec(`UPDATE conversations SET title=$2 WHERE id=$1`, id, title)
+	_, err := d.UpdateConversation(id, ConversationPatch{Title: &title})
 	return err
 }
 

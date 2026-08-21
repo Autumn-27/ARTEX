@@ -1,20 +1,27 @@
 "use client";
 
 import * as React from "react";
-import { toast } from "sonner";
-import { Bot, ChevronDownIcon, Loader2Icon, PaperclipIcon, PlusIcon, SendIcon, Square, Trash2Icon, XIcon, ZapIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Bot,
+  ChevronDownIcon,
+  Loader2Icon,
+  MoreHorizontalIcon,
+  PaperclipIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
+  PlusIcon,
+  SendIcon,
+  Square,
+  Trash2Icon,
+  XIcon,
+  ZapIcon,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { TodoPopover } from "@/components/todo-popover";
+import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,15 +31,21 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Transcript } from "@/components/transcript";
-import { TodoPopover } from "@/components/todo-popover";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -46,8 +59,8 @@ function fmtBytes(n: number): string {
 
 // fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
 function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(n);
 }
 
@@ -65,6 +78,10 @@ function fmtDuration(ms: number): string {
 // then one more page each time the user scrolls to the top. Kept modest so a long
 // thread stays snappy (only ~a page of rows is in the DOM until you scroll up).
 const HISTORY_PAGE = 200;
+
+function conversationIsPinned(conversation: Conversation): boolean {
+  return conversation.pinned ?? Boolean(conversation.pinned_at);
+}
 
 // LiveBadge is the small pulsing "实时" chip reused from the task's main-agent
 // console — shown while a turn is streaming.
@@ -113,7 +130,7 @@ function Composer({
   const atts = attachments ?? [];
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Enter 发送；Shift+Enter 换行。isComposing 时是中文等输入法在选字,不拦截。
-    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     e.preventDefault();
     onSend();
   }
@@ -144,8 +161,8 @@ function Composer({
           ))}
         </div>
       )}
-      <div className="flex items-end gap-2">
-        {leftSlot}
+      <div className="flex flex-wrap items-end gap-2">
+        {leftSlot ? <div className="w-full sm:w-auto">{leftSlot}</div> : null}
         {onPickFiles && (
           <>
             <input
@@ -170,7 +187,7 @@ function Composer({
           </>
         )}
         <Textarea
-          className="max-h-40 min-h-10 flex-1 resize-none"
+          className="max-h-40 min-h-10 min-w-0 flex-1 resize-none"
           rows={1}
           placeholder={placeholder}
           value={value}
@@ -234,7 +251,10 @@ function LLMProfileRow({
           {/* default option */}
           <button
             type="button"
-            onClick={() => { onChange(null); setOpen(false); }}
+            onClick={() => {
+              onChange(null);
+              setOpen(false);
+            }}
             className={cn(
               "flex w-full flex-col rounded px-2 py-1.5 text-left hover:bg-accent",
               selected == null && "bg-accent",
@@ -242,21 +262,28 @@ function LLMProfileRow({
           >
             <span className="text-sm">默认{activeDefault ? `（${activeDefault.name}）` : ""}</span>
             {activeDefault && (
-              <span className="text-muted-foreground text-[11px]">{activeDefault.format} · {activeDefault.model}</span>
+              <span className="text-muted-foreground text-[11px]">
+                {activeDefault.format} · {activeDefault.model}
+              </span>
             )}
           </button>
           {profiles.map((p) => (
             <button
               key={p.id}
               type="button"
-              onClick={() => { onChange(Number(p.id)); setOpen(false); }}
+              onClick={() => {
+                onChange(Number(p.id));
+                setOpen(false);
+              }}
               className={cn(
                 "flex w-full flex-col rounded px-2 py-1.5 text-left hover:bg-accent",
                 selected === Number(p.id) && "bg-accent",
               )}
             >
               <span className="text-sm">{p.name}</span>
-              <span className="text-muted-foreground text-[11px]">{p.format} · {p.model}</span>
+              <span className="text-muted-foreground text-[11px]">
+                {p.format} · {p.model}
+              </span>
             </button>
           ))}
         </PopoverContent>
@@ -326,7 +353,7 @@ function DraftChat({
 
   const agentPicker = (
     <Select value={agentKey} onValueChange={setAgentKey}>
-      <SelectTrigger size="sm" className="w-40 shrink-0">
+      <SelectTrigger size="sm" className="w-full sm:w-40">
         <SelectValue placeholder="选择 Agent…" />
       </SelectTrigger>
       <SelectContent>
@@ -336,7 +363,9 @@ function DraftChat({
               <Bot className="size-3.5" />
               {a.name}
               {!a.builtin && (
-                <Badge variant="outline" className="px-1 py-0 text-[9px]">自定义</Badge>
+                <Badge variant="outline" className="px-1 py-0 text-[9px]">
+                  自定义
+                </Badge>
               )}
             </span>
           </SelectItem>
@@ -353,9 +382,7 @@ function DraftChat({
           <Bot className="text-primary size-6" />
         </div>
         <div className="text-sm font-medium">开始和「{agent?.name ?? "Agent"}」对话</div>
-        {agent?.description && (
-          <p className="text-muted-foreground max-w-md text-xs">{agent.description}</p>
-        )}
+        {agent?.description && <p className="text-muted-foreground max-w-md text-xs">{agent.description}</p>}
       </div>
 
       <Composer
@@ -424,10 +451,7 @@ function ChatView({
   }
 
   // conversation-scoped detail fetcher for the reused Transcript renderer.
-  const fetchDetail = React.useCallback(
-    (seq: number) => api.conversationMsgDetail(conv.id, seq),
-    [conv.id],
-  );
+  const fetchDetail = React.useCallback((seq: number) => api.conversationMsgDetail(conv.id, seq), [conv.id]);
 
   // seq of the most-recent TodoWrite tool call (for the Todo popover); null if none.
   const latestTodoSeq = React.useMemo(() => {
@@ -462,7 +486,9 @@ function ChatView({
         setHasMore(r.hasMore);
         setRunning(r.running);
       })
-      .catch(() => {});
+      .catch(() => {
+        /* The empty state remains usable when history loading fails. */
+      });
     return () => {
       live = false;
     };
@@ -497,9 +523,7 @@ function ChatView({
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const atBottomRef = React.useRef(true);
   const viewport = React.useCallback(
-    () =>
-      (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ??
-      null,
+    () => (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ?? null,
     [],
   );
   // Scroll-up loads one older page and prepends it, preserving the visual position
@@ -543,6 +567,7 @@ function ChatView({
     return () => vp.removeEventListener("scroll", onScroll);
   }, [viewport, loadEarlier]);
   // open/switch a conversation → jump to the latest (bottom)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing conversations intentionally retriggers the scroll reset.
   React.useLayoutEffect(() => {
     const vp = viewport();
     if (vp) {
@@ -551,6 +576,7 @@ function ChatView({
     }
   }, [conv.id, viewport]);
   // new activity → stick to bottom only if the user is already pinned there
+  // biome-ignore lint/correctness/useExhaustiveDependencies: message and running changes intentionally retrigger bottom anchoring.
   React.useLayoutEffect(() => {
     if (!atBottomRef.current) return;
     const vp = viewport();
@@ -560,8 +586,12 @@ function ChatView({
   // Per-conversation token total, live — same accounting as the main-agent
   // console: completed runs' `result` sum + the in-progress run's latest `usage`.
   const tokenTotal = React.useMemo(() => {
-    let i = 0, o = 0, cr = 0;
-    let li = 0, lo = 0, lcr = 0;
+    let i = 0,
+      o = 0,
+      cr = 0;
+    let li = 0,
+      lo = 0,
+      lcr = 0;
     let turns = 0; // agent 循环轮次 = 模型调用次数（每次一条 kind='usage'）
     for (const a of messages) {
       if (a.kind === "result") {
@@ -576,7 +606,9 @@ function ChatView({
         lcr = a.cache_read_tokens ?? 0;
       }
     }
-    const I = i + li, O = o + lo, CR = cr + lcr;
+    const I = i + li,
+      O = o + lo,
+      CR = cr + lcr;
     return { i: I, o: O, cr: CR, turns, any: I + O + CR > 0 };
   }, [messages]);
 
@@ -636,10 +668,10 @@ function ChatView({
   return (
     <>
       {/* header: which agent + live + token meta */}
-      <div className="flex items-center gap-2 border-b px-4 py-2.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <Bot className="text-muted-foreground size-4 shrink-0" />
-        <span className="shrink-0 text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
-        <span className="text-muted-foreground shrink-0 font-mono text-xs">{conv.agent_key}</span>
+        <span className="min-w-0 max-w-48 truncate text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
+        <span className="text-muted-foreground hidden shrink-0 font-mono text-xs sm:inline">{conv.agent_key}</span>
         {agent && !agent.builtin && (
           <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
             自定义
@@ -649,14 +681,14 @@ function ChatView({
           <span className="text-muted-foreground min-w-0 truncate text-xs">{agent.description}</span>
         )}
         {running && <LiveBadge />}
-        <div className="text-muted-foreground ml-auto flex shrink-0 items-center gap-3 text-xs">
+        <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">
               {tokenTotal.turns} 轮
             </span>
           )}
           {tokenTotal.any && (
-            <span title="input / cache(read) / output tokens" className="tabular-nums">
+            <span title="input / cache(read) / output tokens" className="min-w-0 truncate tabular-nums">
               input {fmtTokens(tokenTotal.i)} · cache {fmtTokens(tokenTotal.cr)} · output {fmtTokens(tokenTotal.o)}
             </span>
           )}
@@ -664,10 +696,7 @@ function ChatView({
       </div>
 
       {/* messages */}
-      <ScrollArea
-        type="auto"
-        className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
-      >
+      <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
           {messages.length === 0 && !running ? (
             <div className="text-muted-foreground py-10 text-center text-sm">
@@ -676,9 +705,7 @@ function ChatView({
           ) : (
             <>
               {hasMore && (
-                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">
-                  向上滚动加载更早的消息…
-                </div>
+                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
               <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
             </>
@@ -711,8 +738,8 @@ function ChatView({
   );
 }
 
-// ConversationItem is one row in the left rail — status-ish icon, title + agent
-// subtitle, inline rename, hover delete. Modeled on the console's SessionItem.
+// ConversationItem is one row in the left rail: title, agent subtitle, inline
+// rename, pin marker, and a compact action menu.
 function ConversationItem({
   conv,
   agent,
@@ -723,6 +750,8 @@ function ConversationItem({
   onStartRename,
   onRenameText,
   onCommitRename,
+  onCancelRename,
+  onTogglePinned,
   onDelete,
 }: {
   conv: Conversation;
@@ -734,8 +763,22 @@ function ConversationItem({
   onStartRename: () => void;
   onRenameText: (v: string) => void;
   onCommitRename: () => void;
+  onCancelRename: () => void;
+  onTogglePinned: () => void;
   onDelete: () => void;
 }) {
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const renameInputRef = React.useRef<HTMLInputElement>(null);
+  const cancelRenameRef = React.useRef(false);
+  const pinned = conversationIsPinned(conv);
+
+  React.useEffect(() => {
+    if (!renaming) return;
+    cancelRenameRef.current = false;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [renaming]);
+
   return (
     <div
       className={cn(
@@ -745,13 +788,19 @@ function ConversationItem({
     >
       {renaming ? (
         <input
-          autoFocus
+          ref={renameInputRef}
           value={renameText}
           onChange={(e) => onRenameText(e.target.value)}
-          onBlur={onCommitRename}
+          onBlur={() => {
+            if (!cancelRenameRef.current) onCommitRename();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") onCommitRename();
-            if (e.key === "Escape") onCommitRename();
+            if (e.key === "Escape") {
+              e.preventDefault();
+              cancelRenameRef.current = true;
+              onCancelRename();
+            }
           }}
           className="border-input bg-background min-w-0 flex-1 rounded-md border px-2 py-1 text-sm"
         />
@@ -763,26 +812,58 @@ function ConversationItem({
           title="双击重命名"
           className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
         >
-          <div className="truncate text-sm">{conv.title || "新对话"}</div>
+          <div className="flex min-w-0 items-center gap-1.5">
+            {pinned && <PinIcon className="text-primary size-3 shrink-0" aria-label="已置顶" />}
+            <div className="truncate text-sm">{conv.title || "新对话"}</div>
+          </div>
           <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
             <Bot className="size-3 shrink-0" />
             <span className="min-w-0 truncate">{agent?.name ?? conv.agent_key}</span>
             <span className="shrink-0">·</span>
-            <span className="shrink-0">{new Date(conv.created_at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+            <span className="shrink-0">
+              {new Date(conv.created_at).toLocaleDateString("zh-CN", {
+                month: "numeric",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
             <span className="shrink-0 opacity-60">#{conv.id}</span>
           </div>
         </button>
       )}
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-muted-foreground hover:text-destructive shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+            className="text-muted-foreground shrink-0"
+            aria-label={`管理对话「${conv.title || "新对话"}」`}
           >
-            <Trash2Icon className="size-3.5" />
+            <MoreHorizontalIcon />
           </Button>
-        </AlertDialogTrigger>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuGroup>
+            <DropdownMenuItem onSelect={onStartRename}>
+              <PencilIcon />
+              重命名
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTogglePinned}>
+              {pinned ? <PinOffIcon /> : <PinIcon />}
+              {pinned ? "取消置顶" : "置顶"}
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuGroup>
+            <DropdownMenuItem variant="destructive" onSelect={() => setDeleteOpen(true)}>
+              <Trash2Icon />
+              删除
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>删除对话「{conv.title || "新对话"}」？</AlertDialogTitle>
@@ -813,11 +894,24 @@ export default function ChatPage() {
   >({});
 
   const reloadConvs = React.useCallback(() => {
-    api.conversations().then(setConvs).catch(() => setConvs([]));
+    api
+      .conversations()
+      .then(setConvs)
+      .catch(() => setConvs([]));
   }, []);
   React.useEffect(() => {
-    api.agents().then(setAgents).catch(() => {});
-    api.llmProfiles().then(setProfiles).catch(() => {});
+    api
+      .agents()
+      .then(setAgents)
+      .catch(() => {
+        /* Agent metadata is optional for rendering an existing conversation. */
+      });
+    api
+      .llmProfiles()
+      .then(setProfiles)
+      .catch(() => {
+        /* The conversation remains usable without profile labels. */
+      });
     reloadConvs();
   }, [reloadConvs]);
 
@@ -856,6 +950,16 @@ export default function ChatPage() {
     }
   }
 
+  async function togglePinned(conversation: Conversation) {
+    const pinned = conversationIsPinned(conversation);
+    try {
+      await api.pinConversation(conversation.id, !pinned);
+      reloadConvs();
+    } catch (e) {
+      toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(e as Error).message}`);
+    }
+  }
+
   function startRename(c: Conversation) {
     setRenamingId(c.id);
     setRenameText(c.title || "");
@@ -876,9 +980,9 @@ export default function ChatPage() {
   return (
     <div
       data-content-padding="false"
-      className="flex h-[calc(100svh-3rem)] flex-col overflow-hidden p-4 md:h-[calc(100svh-4rem)] md:p-6"
+      className="flex h-[calc(100svh-3rem)] min-w-0 flex-col overflow-hidden p-3 sm:p-4 md:h-[calc(100svh-4rem)] md:p-6"
     >
-      <div className="grid min-h-0 flex-1 grid-cols-[18rem_1fr] grid-rows-[minmax(0,1fr)] gap-4">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(10rem,15rem)_minmax(0,1fr)] gap-3 md:grid-cols-[18rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:gap-4">
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
           <div className="border-b p-2">
@@ -888,9 +992,7 @@ export default function ChatPage() {
           </div>
           <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
-              {convs.length === 0 && (
-                <p className="text-muted-foreground px-2 py-6 text-center text-xs">暂无对话</p>
-              )}
+              {convs.length === 0 && <p className="text-muted-foreground px-2 py-6 text-center text-xs">暂无对话</p>}
               {convs.map((c) => (
                 <ConversationItem
                   key={c.id}
@@ -903,6 +1005,8 @@ export default function ChatPage() {
                   onStartRename={() => startRename(c)}
                   onRenameText={setRenameText}
                   onCommitRename={commitRename}
+                  onCancelRename={() => setRenamingId(null)}
+                  onTogglePinned={() => void togglePinned(c)}
                   onDelete={() => del(c.id)}
                 />
               ))}
@@ -931,7 +1035,12 @@ export default function ChatPage() {
                 // it on this render (switching to ChatView right away, before the
                 // async reloadConvs lands); reloadConvs then reconciles titles etc.
                 if (pending) setPendingByConv((p) => ({ ...p, [c.id]: pending }));
-                setConvs((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+                setConvs((prev) => {
+                  if (prev.some((item) => item.id === c.id)) return prev;
+                  const firstUnpinned = prev.findIndex((item) => !conversationIsPinned(item));
+                  const insertAt = firstUnpinned < 0 ? prev.length : firstUnpinned;
+                  return [...prev.slice(0, insertAt), c, ...prev.slice(insertAt)];
+                });
                 setSelectedId(c.id);
                 reloadConvs();
               }}

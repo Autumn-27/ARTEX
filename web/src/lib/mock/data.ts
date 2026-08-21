@@ -7,8 +7,8 @@ import type {
   Activity, Agent, AgentDetail, Asset, Audit, Company, Conversation,
   ConvTokenSummary, DailyTokenBucket, Edge, Finding, InterceptApprovalRow,
   InterceptPending, InterceptRule, LLMPoolStatus, LLMProfile, MCPServer, MCPTool, PromptVar,
-  PromptVersion, Settings, SkillCall, SkillItem, MissingSkill, Stats, TaskNode, Task, TokenTotal,
-  TokenUsage, Tool, TrafficResp, TrafficDetail, TrafficHost, LLMTask,
+  PromptVersion, Settings, SessionTokenUsage, SkillCall, SkillItem, MissingSkill, Stats, TaskNode, Task, TokenTotal,
+  TaskTemplate, TokenUsage, Tool, TrafficResp, TrafficDetail, TrafficHost, LLMTask,
 } from "@/lib/types";
 
 const T = (iso: string) => iso; // readability helper for timestamps
@@ -90,6 +90,25 @@ export const tasks: Task[] = [
     llm_failover_state: "ready",
     source_task_ids: [],
     tokens: { input_tokens: 512000, output_tokens: 40100, cache_read_tokens: 300000, cache_write_tokens: 41000 },
+  },
+];
+
+export const taskTemplates: TaskTemplate[] = [
+  {
+    id: 1,
+    name: "外部 Web 渗透",
+    description: "对目标互联网暴露面开展黑盒渗透测试，覆盖站点、接口和常见管理入口。",
+    goal: "识别并验证可造成未授权访问、敏感数据泄露或服务器失陷的安全问题。",
+    created_at: T("2026-07-20T08:00:00Z"),
+    updated_at: T("2026-07-25T08:00:00Z"),
+  },
+  {
+    id: 2,
+    name: "API 越权专项",
+    description: "围绕目标 API 的身份认证、对象级授权和角色边界开展专项测试。",
+    goal: "确认是否存在 IDOR、水平越权、垂直越权及批量数据访问风险。",
+    created_at: T("2026-07-19T08:00:00Z"),
+    updated_at: T("2026-07-24T08:00:00Z"),
   },
 ];
 
@@ -516,6 +535,33 @@ export const tokenWorkers: TokenUsage[] = [
   { worker: "work#13", input_tokens: 144000, output_tokens: 9200, cache_read_tokens: 96000, cache_write_tokens: 14000 },
 ];
 
+// Mirrors TokenStatsBySession: completed usage is keyed by the stable UI session
+// (main | plan | intent:<id>) instead of the reusable work#N executor name.
+export const tokenSessions: SessionTokenUsage[] = (() => {
+  const totals = new Map<string, SessionTokenUsage>();
+  for (const item of activity) {
+    if (item.kind !== "result") continue;
+    let session = "";
+    if (item.worker === "mainagent") session = "main";
+    else if (item.worker === "planner") session = "plan";
+    else if (item.intent_id) session = `intent:${item.intent_id}`;
+    if (!session) continue;
+    const current = totals.get(session) ?? {
+      session,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    };
+    current.input_tokens += item.input_tokens ?? 0;
+    current.output_tokens += item.output_tokens ?? 0;
+    current.cache_read_tokens += item.cache_read_tokens ?? 0;
+    current.cache_write_tokens += item.cache_write_tokens ?? 0;
+    totals.set(session, current);
+  }
+  return [...totals.values()];
+})();
+
 export const tokenTotal: TokenTotal = grandTotal;
 
 export const dailyTokens: DailyTokenBucket[] = Array.from({ length: 30 }, (_, i) => {
@@ -755,7 +801,7 @@ export const interceptHistory: InterceptApprovalRow[] = [
 
 // ── Conversations (chat) ─────────────────────────────────────────────────────
 export const conversations: Conversation[] = [
-  { id: 1, agent_key: "mainagent", title: "acme 后台切入点讨论", llm_profile_id: 1, created_at: T("2026-07-25T10:00:00Z"), updated_at: T("2026-07-26T03:40:00Z") },
+  { id: 1, agent_key: "mainagent", title: "acme 后台切入点讨论", llm_profile_id: 1, pinned: true, pinned_at: T("2026-07-26T04:00:00Z"), created_at: T("2026-07-25T10:00:00Z"), updated_at: T("2026-07-26T03:40:00Z") },
   { id: 2, agent_key: "mainagent", title: "API 越权面梳理", llm_profile_id: 2, created_at: T("2026-07-24T16:00:00Z"), updated_at: T("2026-07-24T17:20:00Z") },
   { id: 3, agent_key: "mainagent", title: "内网横向 · DMZ→域控攻击路径规划", llm_profile_id: 1, created_at: T("2026-07-25T15:45:00Z"), updated_at: T("2026-07-26T00:25:00Z") },
 ];

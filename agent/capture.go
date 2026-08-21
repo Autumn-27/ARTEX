@@ -66,6 +66,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		tbuf.WriteString(text)
 	}
 	lastTool := &runTrace{startedAt: time.Now()}
+	var lastUsage *llm.Usage
 
 	var finalText string
 	var rerr error
@@ -74,10 +75,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			flush()
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
-				rec(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail})
+				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
 				return finalText, reason, ctx.Err()
 			}
-			rec(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()})
+			rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()}, lastUsage))
 			return finalText, reason, err
 		}
 		switch ev.Kind {
@@ -111,6 +112,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			// buffered final-answer text must stay for the KindResult de-dup.
 			if ev.Usage != nil {
 				u := *ev.Usage
+				lastUsage = &u
 				rec(db.Activity{Kind: "usage",
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})
@@ -143,6 +145,18 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
 	return finalText, reason, rerr
+}
+
+func activityWithUsage(activity db.Activity, usage *llm.Usage) db.Activity {
+	if usage == nil {
+		return activity
+	}
+	u := *usage
+	activity.InputTokens = &u.InputTokens
+	activity.OutputTokens = &u.OutputTokens
+	activity.CacheReadTokens = &u.CacheReadTokens
+	activity.CacheWriteTokens = &u.CacheWriteTokens
+	return activity
 }
 
 // blocksText concatenates the text of a tool-result's content blocks.

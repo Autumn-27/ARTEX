@@ -4,7 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
-
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -238,26 +238,32 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
+		lifecycle := t.lifecycleSnapshot()
 		// clear stale 'running' intents from a prior crash/restart (no live worker
 		// owns them) so they re-claim instead of spinning forever in the UI.
 		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
 		}
-		if t.Paused {
+		if lifecycle.Paused {
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
-		if !isTerminalStatus(t.Status) {
+		if !isTerminalStatus(lifecycle.Status) {
 			s.engine.startDeadlineCoordinator(ctx, t)
 		}
 	}
-	// resume the active task's engine; other tasks resume when opened (setActive).
-	// (a restored-paused task's loops still start but idle until resumed.)
-	// 排队中的任务不在此启动——留给 reconcileConcurrency 按空位补位。
-	if t := m.ActiveTask(); t != nil && !t.Queued {
-		s.engine.Run(ctx, t)
+	// Restore every task that had already been admitted before shutdown. Starting
+	// only the active UI task left other non-queued tasks counted as concurrency
+	// occupants without live loops, which could permanently block the persistent
+	// FIFO. Paused loops remain idle; queued tasks are admitted below as slots allow.
+	for _, t := range m.List() {
+		lifecycle := t.lifecycleSnapshot()
+		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
+			s.engine.Run(ctx, t)
+		}
 	}
+	go s.reconcileConcurrency()
 	return s
 }
 
@@ -636,7 +642,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	mux.HandleFunc("GET /api/task-templates", s.pgListTaskTemplates)
+	mux.HandleFunc("POST /api/task-templates", s.pgCreateTaskTemplate)
+	mux.HandleFunc("PATCH /api/task-templates/{id}", s.pgUpdateTaskTemplate)
+	mux.HandleFunc("DELETE /api/task-templates/{id}", s.pgDeleteTaskTemplate)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
+	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
@@ -654,7 +665,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
+	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
+	mux.HandleFunc("POST /api/tasks/{id}/intents/control/batch", s.controlIntentsBatch)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)    // 重跑单条 blocked/exhausted/stopped 意图
 	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked) // 批量重跑本任务全部 blocked 意图
 	mux.HandleFunc("POST /api/active", s.setActive)
@@ -679,10 +692,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
+	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
@@ -715,6 +730,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
+	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
 
 	// --- 管理后台 API (PostgreSQL 数据源; 新版数据库与管理后台方案) ---
@@ -948,12 +964,13 @@ func (s *Server) resolvedTaskStatus(t *Task) string {
 	if t == nil {
 		return "created"
 	}
+	lifecycle := t.lifecycleSnapshot()
 	switch {
-	case isTerminalStatus(t.Status):
-		return t.Status
-	case t.Queued:
+	case isTerminalStatus(lifecycle.Status):
+		return lifecycle.Status
+	case lifecycle.Queued:
 		return "queued"
-	case t.Paused || s.engine.IsPaused(t.ID):
+	case lifecycle.Paused || s.engine.IsPaused(t.ID):
 		return "paused"
 	case t.llmStateSnapshot().FailoverState == "chain_exhausted" && s.engine.Started(t.ID):
 		// LLM readiness is an execution dependency, not lifecycle state. Keeping
@@ -980,7 +997,7 @@ func (s *Server) setActive(w http.ResponseWriter, r *http.Request) {
 	}
 	// resume the engine for the opened task (idempotent — no-op if already running).
 	// 排队中的任务:仅设为活跃可查看,不启动引擎(维持并发上限,由 reconcile 补位)。
-	if t, ok := s.m.Task(req.ID); ok && !t.Queued {
+	if t, ok := s.m.Task(req.ID); ok && !t.lifecycleSnapshot().Queued {
 		s.engine.Run(s.ctx, t)
 	}
 	writeJSON(w, 200, map[string]any{"active": req.ID})
@@ -1000,28 +1017,16 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	switch req.Action {
-	case "pause":
-		s.engine.Pause(t.ID, agent.AbortPausedByUser)
-		// Main Agent turns run outside Engine's planner/worker context so they need
-		// their own cancellation: pausing terminates the CURRENTLY running turn. New
-		// turns are still allowed while paused — the main-agent console is independent
-		// of task pause (the chat handler no longer rejects on IsPaused).
-		s.cancelTaskChat(t.ID, agent.AbortChatPausedWithTask)
-	case "resume":
-		s.engine.Run(s.ctx, t) // ensure loops are alive, then un-pause + nudge
-		s.engine.Resume(t)
-	default:
+	if req.Action != "pause" && req.Action != "resume" {
 		writeErr(w, 400, "action must be pause|resume")
 		return
 	}
-	paused := s.engine.IsPaused(t.ID)
-	t.Paused = paused                                       // keep the in-memory task (shown in /api/tasks) in sync
-	if err := s.m.SetTaskPaused(t.ID, paused); err != nil { // persist (survives restart)
-		log.Printf("[control] persist paused %s: %v", t.ID, err)
+	result, err := s.applyTaskControl(t, req.Action)
+	if err != nil {
+		writeErr(w, 409, err.Error())
+		return
 	}
-	log.Printf("[task] #%s %s", t.ID, map[bool]string{true: "已暂停", false: "已恢复"}[paused])
-	writeJSON(w, 200, map[string]any{"id": t.ID, "paused": paused})
+	writeJSON(w, 200, result)
 }
 
 // controlIntent pauses, resumes, or cancels one local worker intent. A running
@@ -1056,70 +1061,27 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node, err := t.Store.GetNode(iid)
+	result, err := s.applyIntentControl(r.Context(), t, iid, req.Action)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 409, err.Error())
 		return
 	}
-	if node == nil {
-		if inherited, sourceErr := t.Store.GetNodeWithSources(iid); sourceErr == nil && inherited != nil && inherited.Inherited {
-			writeErr(w, 409, "继承意图为只读，不能控制")
-		} else {
-			writeErr(w, 404, "intent not found")
-		}
-		return
-	}
-	if node.Kind != db.KindIntent {
-		writeErr(w, 409, "node is not an intent")
-		return
-	}
-
-	switch req.Action {
-	case "pause":
-		if node.State != "running" {
-			writeErr(w, 409, "仅运行中的意图可以暂停")
-			return
-		}
-		if err := s.engine.ControlWork(iid, "pause"); err != nil {
-			writeErr(w, 409, err.Error())
-			return
-		}
-		writeJSON(w, 200, map[string]any{"id": iid, "state": "paused"})
-	case "resume":
-		if node.State != "paused" {
-			writeErr(w, 409, "仅已暂停的意图可以恢复")
-			return
-		}
-		if err := t.Store.SetIntentState(iid, "open"); err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		t.Notify()
-		writeJSON(w, 200, map[string]any{"id": iid, "state": "open"})
-	case "cancel":
-		if node.State != "running" && node.State != "paused" {
-			writeErr(w, 409, "仅运行中或已暂停的意图可以取消")
-			return
-		}
-		if node.State == "running" {
-			if err := s.engine.ControlWork(iid, "cancel"); err != nil {
-				writeErr(w, 409, err.Error())
-				return
-			}
-		}
-		deleted, err := t.Store.CancelIntent(iid)
-		if err != nil {
-			writeErr(w, 409, err.Error())
-			return
-		}
-		t.Notify()
-		writeJSON(w, 200, map[string]any{"id": iid, "state": "cancelled", "deleted": deleted})
-	}
+	writeJSON(w, 200, result)
 }
 
 // rerunIntent 重跑一条没跑成功的意图(blocked/exhausted/stopped):把它置回 open,worker
 // 会重新认领、从头再跑(已写回图谱的 fact/finding/asset 保留);若任务已终态/暂停则顺带复活。
 // 用于「出错的 work 点击继续运行」——网络/LLM 抖动导致 blocked 后可一键重试。
+func restoreRerunIntent(t *Task, before *db.Node) error {
+	if t == nil || before == nil {
+		return fmt.Errorf("missing intent rollback snapshot")
+	}
+	if before.State == "blocked" && before.BlockedReason != "" {
+		return t.Store.SetIntentBlockedReason(before.ID, before.BlockedReason)
+	}
+	return t.Store.SetIntentState(before.ID, before.State)
+}
+
 func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
@@ -1131,6 +1093,16 @@ func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad intent id")
 		return
 	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		writeErr(w, 409, "任务正在删除，无法重跑意图")
+		return
+	}
+	defer s.engine.decInflight(t.ID)
+	before, err := t.Store.GetNode(iid)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	reopened, err := t.Store.ReopenIntent(iid)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -1140,9 +1112,16 @@ func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "该意图不是可重跑状态(仅 blocked/exhausted/stopped 可重跑)")
 		return
 	}
-	s.reviveTask(t) // 终态/暂停 → 拉回 running,确保 worker 循环存活并重新认领
+	queued, err := s.admitTask(t, "resume")
+	if err != nil {
+		if rollbackErr := restoreRerunIntent(t, before); rollbackErr != nil {
+			err = fmt.Errorf("%w; restore intent %d after admission failure: %v", err, iid, rollbackErr)
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
 	log.Printf("[task] #%s 意图 #%d 已重开(重跑)", t.ID, iid)
-	writeJSON(w, 200, map[string]any{"id": t.ID, "reopened": iid})
+	writeJSON(w, 200, map[string]any{"id": t.ID, "reopened": iid, "queued": queued})
 }
 
 // rerunBlocked 批量重跑本任务全部 blocked 意图(适合一次网络/LLM 断连导致多条 blocked 后
@@ -1153,16 +1132,47 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		writeErr(w, 409, "任务正在删除，无法重跑意图")
+		return
+	}
+	defer s.engine.decInflight(t.ID)
+	intents, err := t.Store.ListByKind(db.KindIntent, 1000000)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	before := make([]*db.Node, 0)
+	for _, intent := range intents {
+		if intent.State == "blocked" {
+			copy := *intent
+			before = append(before, &copy)
+		}
+	}
 	n, err := t.Store.ReopenBlockedIntents()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	queued := false
 	if n > 0 {
-		s.reviveTask(t)
+		queued, err = s.admitTask(t, "resume")
+		if err != nil {
+			rollbackErrors := make([]string, 0)
+			for _, intent := range before {
+				if rollbackErr := restoreRerunIntent(t, intent); rollbackErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Sprintf("intent %d: %v", intent.ID, rollbackErr))
+				}
+			}
+			if len(rollbackErrors) > 0 {
+				err = fmt.Errorf("%w; restore blocked intents after admission failure: %s", err, strings.Join(rollbackErrors, "; "))
+			}
+			writeErr(w, 500, err.Error())
+			return
+		}
 		log.Printf("[task] #%s 批量重开 %d 条 blocked 意图", t.ID, n)
 	}
-	writeJSON(w, 200, map[string]any{"id": t.ID, "reopened": n})
+	writeJSON(w, 200, map[string]any{"id": t.ID, "reopened": n, "queued": queued})
 }
 
 // getLLM returns the current LLM config (key never exposed).
@@ -1294,6 +1304,7 @@ type createTaskReq struct {
 	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
 	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
 	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
+	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业资产范围;不复制资产或强制生成意图
 	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
@@ -1337,11 +1348,21 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		seenSources[id] = true
 		sourceIDs = append(sourceIDs, id)
 	}
+	companyIDs, err := db.NormalizeTaskCompanyIDs(req.CompanyIDs)
+	if err != nil {
+		writeErr(w, 400, fmt.Sprintf("关联企业无效：最多选择 %d 个有效企业", db.MaxTaskCompanyCount))
+		return
+	}
+	req.CompanyIDs = companyIDs
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
-		SourceTaskIDs: sourceIDs, LLMProfileIDs: req.LLMProfileIDs,
+		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrTaskCompanyIDsInvalid) || errors.Is(err, db.ErrTaskCompanyNotFound) {
+			writeErr(w, 400, "关联企业不存在或无效")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -1372,7 +1393,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if isTerminalStatus(t.Status) {
+	if isTerminalStatus(t.lifecycleSnapshot().Status) {
 		writeErr(w, 409, "已结束的任务不能修改 LLM 配置")
 		return
 	}
@@ -1403,8 +1424,11 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Profile edits affect only subsequent LLM calls. Existing in-flight calls
-	// retain their provider; a nudge lets an idle running task resume promptly.
+	// retain their provider. Concurrency reconciliation treats ActiveLLMCalls as a
+	// live slot and postpones an unavailable task's pause/queue transition until
+	// the call returns; a nudge lets an idle running task resume promptly.
 	t.Notify()
+	go s.reconcileConcurrency()
 	llmState := t.llmStateSnapshot()
 	result := map[string]any{
 		"id": t.ID, "llm_profile_ids": llmState.ProfileIDs,
@@ -1737,8 +1761,8 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, out)
 			return
 		}
-		page := atoiDefault(q.Get("page"), 1)
-		limit := min(atoiDefault(q.Get("limit"), 20), 200)
+		page := findingPaginationParam(q.Get("page"), 1, 0)
+		limit := findingPaginationParam(q.Get("limit"), 20, 200)
 		filter := db.FindingFilter{
 			Severity:  normFilter(q.Get("severity")),
 			Status:    normFilter(q.Get("status")),
@@ -2023,7 +2047,7 @@ func findingProvenanceInTask(contextTask *Task, findingTaskID *int64) (sourceTas
 	if *findingTaskID == contextID {
 		return "", false, true
 	}
-	for _, sourceID := range contextTask.SourceTaskIDs {
+	for _, sourceID := range contextTask.lifecycleSnapshot().SourceTaskIDs {
 		if sourceID == *findingTaskID {
 			return i64s(sourceID), true, true
 		}
@@ -2498,7 +2522,11 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) tokenStats(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
-		writeJSON(w, 200, map[string]any{"workers": []any{}})
+		writeJSON(w, 200, map[string]any{
+			"workers":  []db.TokenUsage{},
+			"sessions": []db.SessionTokenUsage{},
+			"total":    tokenTotalDTO(db.TokenUsage{}),
+		})
 		return
 	}
 	stats, err := t.Store.TokenStatsByWorker()
@@ -2506,8 +2534,17 @@ func (s *Server) tokenStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	total, _ := t.Store.TokenTotal() // whole-task total (all agents)
-	writeJSON(w, 200, map[string]any{"workers": stats, "total": tokenTotalDTO(total)})
+	sessions, err := t.Store.TokenStatsBySession()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	total, err := t.Store.TokenTotal() // whole-task total (all agents)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"workers": stats, "sessions": sessions, "total": tokenTotalDTO(total)})
 }
 
 // tokenDailyStats returns global token consumption aggregated by calendar day
@@ -3210,6 +3247,21 @@ func (s *Server) finishTaskChat(taskID string, cancel context.CancelCauseFunc) {
 	delete(s.chatBusy, taskID)
 	delete(s.chatCancel, taskID)
 	s.chatMu.Unlock()
+}
+
+// taskChatStatus reports the authoritative state of the task's main-agent turn.
+// Activity timestamps are not a reliable proxy because a tool or LLM call may run
+// for minutes without emitting an intermediate frame.
+func (s *Server) taskChatStatus(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.PathValue("id"))
+	if t == nil {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	s.chatMu.Lock()
+	running := s.chatBusy[t.ID]
+	s.chatMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]bool{"running": running})
 }
 
 // stopChat aborts the in-flight main-agent turn for a task (manual stop button).

@@ -71,11 +71,24 @@ func (e *Engine) taskDeadline(t *Task) int64 {
 	if v, ok := e.deadline.Load(t.ID); ok {
 		return v.(int64)
 	}
-	if t.DeadlineAt > 0 {
-		e.deadline.Store(t.ID, t.DeadlineAt)
-		return t.DeadlineAt
+	deadlineAt := t.lifecycleSnapshot().DeadlineAt
+	if deadlineAt > 0 {
+		e.deadline.Store(t.ID, deadlineAt)
+		return deadlineAt
 	}
 	return 0
+}
+
+// resetTimeoutRevival clears only the per-run timeout state after PostgreSQL has
+// atomically committed timeout -> running and reset first_run_at/deadline_at. The
+// configured TimeoutSeconds remains on Task, so the next real Planner/Worker run
+// stamps a fresh full budget. coordStarted is reset because the coordinator that
+// produced the timeout has already completed (or is in its final return path).
+func (e *Engine) resetTimeoutRevival(taskID string) {
+	e.settling.Delete(taskID)
+	e.deadline.Delete(taskID)
+	e.stamped.Delete(taskID)
+	e.coordStarted.Delete(taskID)
 }
 
 // stampFirstRun records first_run_at + deadline_at on the FIRST real run (LLM ready)
