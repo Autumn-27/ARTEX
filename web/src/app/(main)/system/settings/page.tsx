@@ -12,12 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
-import {
-  CHAT_SEND_MODE_OPTIONS,
-  type ChatSendMode,
-  setChatSendMode,
-  useChatSendMode,
-} from "@/lib/chat-send-mode";
+import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Settings } from "@/lib/types";
 
 export default function SystemSettingsPage() {
@@ -82,7 +77,11 @@ export default function SystemSettingsPage() {
   };
   const detectPython = () => {
     setSaving(true);
-    api.detectPython().then((r) => setPyInterp(r.python_interpreter)).catch(() => undefined).finally(() => setSaving(false));
+    api
+      .detectPython()
+      .then((r) => setPyInterp(r.python_interpreter))
+      .catch(() => undefined)
+      .finally(() => setSaving(false));
   };
 
   React.useEffect(() => {
@@ -189,280 +188,293 @@ export default function SystemSettingsPage() {
         <p className="text-muted-foreground text-sm">全局运行时开关</p>
       </div>
 
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <RadioTowerIcon className="size-4" />
-            流量捕获
-          </CardTitle>
-          <CardDescription>
-            开启后，所有 Agent 的 HTTP 流量经记录代理全量落库，并向 Agent 注入 traffic_search / traffic_get
-            工具与代理配置（提示词含代理说明）。
-            <br />
-            关闭（默认）时不记录任何流量：Agent
-            <b>不会</b>拿到代理配置与流量工具，提示词也<b>不含</b>代理相关内容。切换后会即时重建 Agent 生效。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex items-center justify-between gap-4">
-          <Label htmlFor="traffic-capture" className="text-sm font-normal text-muted-foreground">
-            {trafficCapture ? "已开启 · 正在记录流量并注入代理" : "已关闭 · 不记录、不注入代理"}
-          </Label>
-          <Switch
-            id="traffic-capture"
-            checked={trafficCapture}
-            disabled={!loaded || saving}
-            onCheckedChange={toggleTraffic}
-          />
-        </CardContent>
-      </Card>
-
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <SearchIcon className="size-4" />
-            网络搜索
-          </CardTitle>
-          <CardDescription>
-            这是网络搜索的<b>总开关 + 来源配置</b>。开启后，才能在<b>每个 Agent 的配置</b>里单独选择是否启用
-            <b>web_search</b>（仅返回标题/链接/摘要，不抓取正文；抓取由 WebFetch 负责）。网络搜索<b>不走</b>记录代理，独立于流量捕获。
-            <br />
-            来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）或 <b>Tavily</b>（需填写 Tavily API Key）。总开关关闭时，各 Agent 的网络搜索开关不可用。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="web-search" className="text-sm font-normal text-muted-foreground">
-              {webSearch ? "总开关已开启 · 可在各 Agent 配置里单独启用" : "已关闭 · 各 Agent 无法启用网络搜索"}
+      {/* 多列而非 grid：网络搜索卡片比其余高数倍，且高度随所选后端变化（brave/tavily
+          的 key 输入是条件渲染）。grid 会按最高的一张撑满整行、在旁边留下大片空白，
+          多列则自动按内容高度平衡填充。卡片间距靠 mb 而非 gap——多列布局下
+          column-gap 只管列间距，行间距要由子元素自己给。 */}
+      <div className="columns-1 gap-4 md:gap-6 lg:columns-2">
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
+              流量捕获
+            </CardTitle>
+            <CardDescription>
+              开启后，所有 Agent 的 HTTP 流量经记录代理全量落库，并向 Agent 注入 traffic_search / traffic_get
+              工具与代理配置（提示词含代理说明）。
+              <br />
+              关闭（默认）时不记录任何流量：Agent
+              <b>不会</b>拿到代理配置与流量工具，提示词也<b>不含</b>代理相关内容。切换后会即时重建 Agent 生效。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="traffic-capture" className="text-sm font-normal text-muted-foreground">
+              {trafficCapture ? "已开启 · 正在记录流量并注入代理" : "已关闭 · 不记录、不注入代理"}
             </Label>
             <Switch
-              id="web-search"
-              checked={webSearch}
+              id="traffic-capture"
+              checked={trafficCapture}
               disabled={!loaded || saving}
-              onCheckedChange={(v) => {
-                setWebSearch(v); // optimistic
-                saveWebSearch({ web_search_enabled: v });
-              }}
+              onCheckedChange={toggleTraffic}
             />
-          </div>
+          </CardContent>
+        </Card>
 
-          {webSearch && (
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <SearchIcon className="size-4" />
+              网络搜索
+            </CardTitle>
+            <CardDescription>
+              这是网络搜索的<b>总开关 + 来源配置</b>。开启后，才能在<b>每个 Agent 的配置</b>里单独选择是否启用
+              <b>web_search</b>（仅返回标题/链接/摘要，不抓取正文；抓取由 WebFetch 负责）。网络搜索<b>不走</b>
+              记录代理，独立于流量捕获。
+              <br />
+              来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）或{" "}
+              <b>Tavily</b>（需填写 Tavily API Key）。总开关关闭时，各 Agent 的网络搜索开关不可用。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
             <div className="flex items-center justify-between gap-4">
-              <Label className="text-sm font-normal text-muted-foreground">搜索来源</Label>
-              <Select
-                value={backend}
+              <Label htmlFor="web-search" className="text-sm font-normal text-muted-foreground">
+                {webSearch ? "总开关已开启 · 可在各 Agent 配置里单独启用" : "已关闭 · 各 Agent 无法启用网络搜索"}
+              </Label>
+              <Switch
+                id="web-search"
+                checked={webSearch}
                 disabled={!loaded || saving}
-                onValueChange={(v) => {
-                  setBackend(v); // optimistic
-                  saveWebSearch({ web_search_backend: v });
+                onCheckedChange={(v) => {
+                  setWebSearch(v); // optimistic
+                  saveWebSearch({ web_search_enabled: v });
                 }}
-              >
-                <SelectTrigger className="w-48 shrink-0">
-                  <SelectValue placeholder="选择来源" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ddgs">DuckDuckGo（ddgs · 免费无 Key）</SelectItem>
-                  <SelectItem value="brave-free">Brave（免费版 · 需 Key）</SelectItem>
-                  <SelectItem value="tavily">Tavily（需 Key）</SelectItem>
-                </SelectContent>
-              </Select>
+              />
             </div>
-          )}
 
-          {webSearch && backend === "brave-free" && (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="brave-key" className="text-sm font-normal text-muted-foreground">
-                Brave Search API Key
-                {braveKeySet && <span className="ml-2 text-xs text-emerald-500">已配置</span>}
-              </Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="brave-key"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={braveKeySet ? "已配置（留空则不变）" : "输入 Brave API Key"}
-                  value={braveKeyInput}
-                  disabled={!loaded || savingKey}
-                  onChange={(e) => setBraveKeyInput(e.target.value)}
-                />
+            {webSearch && (
+              <div className="flex items-center justify-between gap-4">
+                <Label className="text-sm font-normal text-muted-foreground">搜索来源</Label>
+                <Select
+                  value={backend}
+                  disabled={!loaded || saving}
+                  onValueChange={(v) => {
+                    setBackend(v); // optimistic
+                    saveWebSearch({ web_search_backend: v });
+                  }}
+                >
+                  <SelectTrigger className="w-48 shrink-0">
+                    <SelectValue placeholder="选择来源" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ddgs">DuckDuckGo（ddgs · 免费无 Key）</SelectItem>
+                    <SelectItem value="brave-free">Brave（免费版 · 需 Key）</SelectItem>
+                    <SelectItem value="tavily">Tavily（需 Key）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {webSearch && backend === "brave-free" && (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="brave-key" className="text-sm font-normal text-muted-foreground">
+                  Brave Search API Key
+                  {braveKeySet && <span className="ml-2 text-xs text-emerald-500">已配置</span>}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="brave-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={braveKeySet ? "已配置（留空则不变）" : "输入 Brave API Key"}
+                    value={braveKeyInput}
+                    disabled={!loaded || savingKey}
+                    onChange={(e) => setBraveKeyInput(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    onClick={saveBraveKey}
+                    disabled={!loaded || savingKey || braveKeyInput.trim() === ""}
+                  >
+                    保存
+                  </Button>
+                </div>
+                {braveNeedsKey && (
+                  <p className="text-xs text-amber-500">
+                    已选择 Brave 但尚未配置 Key —— 在保存 Key 之前，搜索工具不会启用。
+                  </p>
+                )}
+                <p className="text-muted-foreground text-xs">
+                  免费版额度约 2,000 次/月。前往 https://brave.com/search/api/ 获取 Key。
+                </p>
+              </div>
+            )}
+
+            {webSearch && backend === "tavily" && (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="tavily-key" className="text-sm font-normal text-muted-foreground">
+                  Tavily Search API Key
+                  {tavilyKeySet && <span className="ml-2 text-xs text-emerald-500">已配置</span>}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="tavily-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={tavilyKeySet ? "已配置（留空则不变）" : "输入 Tavily API Key（tvly-…）"}
+                    value={tavilyKeyInput}
+                    disabled={!loaded || savingTavilyKey}
+                    onChange={(e) => setTavilyKeyInput(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    onClick={saveTavilyKey}
+                    disabled={!loaded || savingTavilyKey || tavilyKeyInput.trim() === ""}
+                  >
+                    保存
+                  </Button>
+                </div>
+                {webSearch && backend === "tavily" && !tavilyKeySet && (
+                  <p className="text-xs text-amber-500">
+                    已选择 Tavily 但尚未配置 Key —— 在保存 Key 之前，搜索工具不会启用。
+                  </p>
+                )}
+                <p className="text-muted-foreground text-xs">前往 https://tavily.com 注册并获取 API Key。</p>
+              </div>
+            )}
+
+            {webSearch && (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="ws-proxy" className="text-sm font-normal text-muted-foreground">
+                  出口代理（可选）
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="ws-proxy"
+                    autoComplete="off"
+                    placeholder="http://host:port 或 socks5://host:port（留空=直连）"
+                    value={proxyInput}
+                    disabled={!loaded || savingProxy}
+                    onChange={(e) => setProxyInput(e.target.value)}
+                  />
+                  <Button type="button" onClick={saveProxy} disabled={!loaded || savingProxy}>
+                    保存
+                  </Button>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与记录流量的 MITM 代理无关；网络不通时经此代理访问。
+                </p>
+              </div>
+            )}
+
+            {webSearch && (
+              <div className="flex items-center justify-between gap-4 border-t pt-4">
+                <p className="text-muted-foreground text-xs">
+                  用当前配置（来源 + 代理 + Key）实际搜索一次「test」，验证是否可用。
+                </p>
                 <Button
                   type="button"
-                  onClick={saveBraveKey}
-                  disabled={!loaded || savingKey || braveKeyInput.trim() === ""}
+                  variant="outline"
+                  onClick={runTest}
+                  disabled={!loaded || testing}
+                  className="shrink-0"
                 >
-                  保存
+                  {testing ? "测试中…" : "测试搜索"}
                 </Button>
               </div>
-              {braveNeedsKey && (
-                <p className="text-xs text-amber-500">
-                  已选择 Brave 但尚未配置 Key —— 在保存 Key 之前，搜索工具不会启用。
-                </p>
-              )}
-              <p className="text-muted-foreground text-xs">
-                免费版额度约 2,000 次/月。前往 https://brave.com/search/api/ 获取 Key。
-              </p>
-            </div>
-          )}
+            )}
+          </CardContent>
+        </Card>
 
-          {webSearch && backend === "tavily" && (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="tavily-key" className="text-sm font-normal text-muted-foreground">
-                Tavily Search API Key
-                {tavilyKeySet && <span className="ml-2 text-xs text-emerald-500">已配置</span>}
-              </Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="tavily-key"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={tavilyKeySet ? "已配置（留空则不变）" : "输入 Tavily API Key（tvly-…）"}
-                  value={tavilyKeyInput}
-                  disabled={!loaded || savingTavilyKey}
-                  onChange={(e) => setTavilyKeyInput(e.target.value)}
-                />
-                <Button
-                  type="button"
-                  onClick={saveTavilyKey}
-                  disabled={!loaded || savingTavilyKey || tavilyKeyInput.trim() === ""}
-                >
-                  保存
-                </Button>
-              </div>
-              {webSearch && backend === "tavily" && !tavilyKeySet && (
-                <p className="text-xs text-amber-500">
-                  已选择 Tavily 但尚未配置 Key —— 在保存 Key 之前，搜索工具不会启用。
-                </p>
-              )}
-              <p className="text-muted-foreground text-xs">
-                前往 https://tavily.com 注册并获取 API Key。
-              </p>
-            </div>
-          )}
-
-          {webSearch && (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="ws-proxy" className="text-sm font-normal text-muted-foreground">
-                出口代理（可选）
-              </Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="ws-proxy"
-                  autoComplete="off"
-                  placeholder="http://host:port 或 socks5://host:port（留空=直连）"
-                  value={proxyInput}
-                  disabled={!loaded || savingProxy}
-                  onChange={(e) => setProxyInput(e.target.value)}
-                />
-                <Button type="button" onClick={saveProxy} disabled={!loaded || savingProxy}>
-                  保存
-                </Button>
-              </div>
-              <p className="text-muted-foreground text-xs">
-                独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与记录流量的 MITM 代理无关；网络不通时经此代理访问。
-              </p>
-            </div>
-          )}
-
-          {webSearch && (
-            <div className="flex items-center justify-between gap-4 border-t pt-4">
-              <p className="text-muted-foreground text-xs">
-                用当前配置（来源 + 代理 + Key）实际搜索一次「test」，验证是否可用。
-              </p>
-              <Button type="button" variant="outline" onClick={runTest} disabled={!loaded || testing} className="shrink-0">
-                {testing ? "测试中…" : "测试搜索"}
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
+              自定义脚本 · Python 解释器
+            </CardTitle>
+            <CardDescription>
+              自定义 <b>script</b> 类型工具用它跑 Python。开机会自动检测（python3 优先）；此处可手填 venv /
+              特定版本的绝对路径，留空则运行时自动检测。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Input
+                className="font-mono text-sm"
+                placeholder="/usr/bin/python3（留空=自动检测）"
+                value={pyInterp}
+                disabled={!loaded || saving}
+                onChange={(e) => setPyInterp(e.target.value)}
+              />
+              <Button variant="outline" onClick={detectPython} disabled={!loaded || saving}>
+                重新检测
+              </Button>
+              <Button onClick={savePython} disabled={!loaded || saving}>
+                保存
               </Button>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
 
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <RadioTowerIcon className="size-4" />
-            自定义脚本 · Python 解释器
-          </CardTitle>
-          <CardDescription>
-            自定义 <b>script</b> 类型工具用它跑 Python。开机会自动检测（python3 优先）；此处可手填 venv /
-            特定版本的绝对路径，留空则运行时自动检测。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Input
-              className="font-mono text-sm"
-              placeholder="/usr/bin/python3（留空=自动检测）"
-              value={pyInterp}
-              disabled={!loaded || saving}
-              onChange={(e) => setPyInterp(e.target.value)}
-            />
-            <Button variant="outline" onClick={detectPython} disabled={!loaded || saving}>
-              重新检测
-            </Button>
-            <Button onClick={savePython} disabled={!loaded || saving}>
-              保存
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <CpuIcon className="size-4" />
+              工作并发 · Work Agent 数
+            </CardTitle>
+            <CardDescription>
+              每个任务并发运行的工作 agent 数量（默认 3）。数值越大并发探测越多、消耗也越高。修改后
+              <b>对之后启动的任务生效</b>，正在运行的任务不受影响。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                className="w-32 font-mono text-sm"
+                placeholder="3"
+                value={workers}
+                disabled={!loaded || savingWorkers}
+                onChange={(e) => setWorkers(e.target.value)}
+              />
+              <Button onClick={saveWorkers} disabled={!loaded || savingWorkers}>
+                保存
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <CpuIcon className="size-4" />
-            工作并发 · Work Agent 数
-          </CardTitle>
-          <CardDescription>
-            每个任务并发运行的工作 agent 数量（默认 3）。数值越大并发探测越多、消耗也越高。修改后<b>对之后启动的任务生效</b>，正在运行的任务不受影响。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={1}
-              className="w-32 font-mono text-sm"
-              placeholder="3"
-              value={workers}
-              disabled={!loaded || savingWorkers}
-              onChange={(e) => setWorkers(e.target.value)}
-            />
-            <Button onClick={saveWorkers} disabled={!loaded || savingWorkers}>
-              保存
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <KeyboardIcon className="size-4" />
-            会话输入框发送键位
-          </CardTitle>
-          <CardDescription>
-            对话页与任务详情的主 Agent 会话输入框共用此设置，选择后立即生效、无需保存。
-            <br />
-            该偏好<b>只存在本浏览器</b>，不随账号同步，换浏览器或清理站点数据后需重新设置。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex items-center justify-between gap-4">
-          <Label htmlFor="chat-send-mode" className="text-sm font-normal text-muted-foreground">
-            发送方式
-          </Label>
-          <Select value={sendMode} onValueChange={(v) => setChatSendMode(v as ChatSendMode)}>
-            <SelectTrigger id="chat-send-mode" className="w-72">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CHAT_SEND_MODE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <KeyboardIcon className="size-4" />
+              会话输入框发送键位
+            </CardTitle>
+            <CardDescription>
+              对话页与任务详情的主 Agent 会话输入框共用此设置，选择后立即生效、无需保存。
+              <br />
+              该偏好<b>只存在本浏览器</b>，不随账号同步，换浏览器或清理站点数据后需重新设置。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="chat-send-mode" className="text-sm font-normal text-muted-foreground">
+              发送方式
+            </Label>
+            <Select value={sendMode} onValueChange={(v) => setChatSendMode(v as ChatSendMode)}>
+              <SelectTrigger id="chat-send-mode" className="w-72">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHAT_SEND_MODE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
