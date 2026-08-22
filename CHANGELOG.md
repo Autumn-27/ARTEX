@@ -4,7 +4,10 @@
 
 ## [Unreleased]
 
-暂无未发布变更。
+### Build
+
+- `build.sh --release` 支持一次构建 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64，并生成带 `skills/`、配置示例和 README 的 zip 发布包。
+- 使用 Go linker 去除调试信息，并在可用时使用 UPX 压缩二进制；Release Workflow 将 UPX 压缩结果和 `SHA256SUMS` 发布到 GitHub Release。
 
 ## [0.3.3] - 2026-08-21
 

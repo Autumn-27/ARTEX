@@ -48,36 +48,32 @@ jobs:
         with:
           name: web-dist
           path: server/webui/dist
-      - name: Build
+      - name: Install UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+      - name: Build and package with build.sh
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          ARTEX_TARGET_OS: ${{ matrix.goos }}
+          ARTEX_TARGET_ARCH: ${{ matrix.goarch }}
+          ARTEX_BUILD_VERSION: ${{ github.ref_name }}
+          ARTEX_SKIP_FRONTEND: "1"
+          ARTEX_SKIP_NPM_CI: "1"
+          ARTEX_COMPRESS: required
+          ARTEX_PACKAGE: "1"
+          ARTEX_PACKAGE_DIR: dist
         run: |
-          BIN=artex
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ "$GOOS" = "windows" ] && BIN=artex.exe
-          go build -tags embedui -trimpath \
-            -ldflags "-s -w -X main.version=${VERSION}" \
-            -o "$BIN" ./cmd/artex
-      - name: Package
-        run: |
-          NAME="artex-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          mkdir -p "$NAME"
-          cp -r skills "$NAME"/
-          cp config.example.json "$NAME"/
-          if [ "${{ matrix.goos }}" = "windows" ]; then cp artex.exe "$NAME"/; else cp artex "$NAME"/; fi
-          zip -r "$NAME.zip" "$NAME"
+          ./build.sh --target "${ARTEX_TARGET_OS}/${ARTEX_TARGET_ARCH}"
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: "*.zip"
+          path: "dist/*.zip"
       # Linux 生二进制单独上传，供 docker job 复用（免在镜像里重编前端+Go）
       - if: matrix.goos == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: bin-linux-${{ matrix.goarch }}
-          path: artex
+          path: dist/artex-linux-${{ matrix.goarch }}/artex
 
   # ③ 汇总所有 zip → 创建 GitHub Release
   release:
@@ -89,9 +85,14 @@ jobs:
           pattern: pkg-*
           merge-multiple: true
           path: dist
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
           generate_release_notes: true
 
   # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
