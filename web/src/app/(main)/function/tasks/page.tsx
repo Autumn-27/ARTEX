@@ -6,6 +6,7 @@ import Link from "next/link";
 
 import {
   ChevronRightIcon,
+  EyeIcon,
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
@@ -198,6 +199,17 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "timeout", label: "已超时" },
 ];
 
+// 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
+// (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
+// 两边不会出现一个可点、另一个不可点的分歧。
+const PAUSABLE_STATUSES = new Set<TaskStatus>(["created", "queued", "running"]);
+
+function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
+  if (status === "paused") return "resume";
+  if (PAUSABLE_STATUSES.has(status)) return "pause";
+  return null;
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [query, setQuery] = React.useState("");
@@ -332,6 +344,27 @@ export default function TasksPage() {
     [load],
   );
 
+  // controlTask 是行内暂停/继续:批量走 controlTasksBatch,单行走单任务接口,省去
+  // 「先勾选再点批量」。清空 lastRef 让下一次轮询即使负载相同也照单接收,否则状态
+  // 回写会被去重挡掉、按钮看起来没反应。
+  const controlTask = React.useCallback(
+    async (id: string, action: "pause" | "resume") => {
+      try {
+        const result = await api.controlTask(id, action);
+        toast.success(
+          action === "pause" ? `任务 #${id} 已暂停` : `任务 #${id} 已继续${result.queued ? "，已进入队列" : ""}`,
+        );
+      } catch (e) {
+        toast.error(`${action === "pause" ? "暂停" : "继续"}失败：${(e as Error).message}`);
+      } finally {
+        // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
+        lastRef.current = "";
+        load();
+      }
+    },
+    [load],
+  );
+
   // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
   // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
   const deleteTasks = React.useCallback(
@@ -393,14 +426,11 @@ export default function TasksPage() {
 
   const selectedTasks = React.useMemo(() => tasks.filter((task) => selectedIds.has(task.id)), [tasks, selectedIds]);
   const pausableTaskIDs = React.useMemo(
-    () =>
-      selectedTasks
-        .filter((task) => task.status === "created" || task.status === "queued" || task.status === "running")
-        .map((task) => task.id),
+    () => selectedTasks.filter((task) => taskControlAction(task.status) === "pause").map((task) => task.id),
     [selectedTasks],
   );
   const resumableTaskIDs = React.useMemo(
-    () => selectedTasks.filter((task) => task.status === "paused").map((task) => task.id),
+    () => selectedTasks.filter((task) => taskControlAction(task.status) === "resume").map((task) => task.id),
     [selectedTasks],
   );
 
@@ -566,6 +596,7 @@ export default function TasksPage() {
                   // 带来的整表重渲染,只让在跑的那几行走时长。
                   nowSec={task.status === "running" ? nowSec : 0}
                   onDelete={deleteTask}
+                  onControl={controlTask}
                   selected={selectedIds.has(task.id)}
                   onSelectedChange={toggleSelected}
                 />
@@ -682,12 +713,14 @@ const TaskRow = React.memo(function TaskRow({
   task,
   nowSec,
   onDelete,
+  onControl,
   selected,
   onSelectedChange,
 }: {
   task: Task;
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
+  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
   selected: boolean;
   onSelectedChange: (id: string, checked: boolean) => void;
 }) {
@@ -761,13 +794,60 @@ const TaskRow = React.memo(function TaskRow({
         )}
       </TableCell>
       <TableCell className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))] group-hover:bg-muted/50">
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end gap-0.5">
+          <Button size="icon" variant="ghost" asChild aria-label="查看任务详情" title="查看任务详情">
+            <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}>
+              <EyeIcon />
+            </Link>
+          </Button>
+          <TaskControlButton task={task} onControl={onControl} />
           <DeleteTaskDialog task={task} onDelete={onDelete} />
         </div>
       </TableCell>
     </TableRow>
   );
 });
+
+// 三态图标分开写而非嵌套三元:仓库 Biome 基线禁 noNestedTernary。
+function taskControlIcon(pending: boolean, action: "pause" | "resume" | null) {
+  if (pending) return <Loader2Icon className="animate-spin" />;
+  if (action === "resume") return <PlayIcon />;
+  return <PauseIcon />;
+}
+
+// TaskControlButton 是行内的暂停/继续开关。终态任务渲染为 disabled 而不是隐藏,
+// 这样各行操作列宽度一致,按钮位置不会随状态跳动。
+function TaskControlButton({
+  task,
+  onControl,
+}: {
+  task: Task;
+  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+}) {
+  const [pending, setPending] = React.useState(false);
+  const action = taskControlAction(task.status);
+  const label = action === "resume" ? "继续任务" : "暂停任务";
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      aria-label={label}
+      title={action ? label : "该状态不可暂停或继续"}
+      disabled={!action || pending}
+      onClick={async () => {
+        if (!action) return;
+        setPending(true);
+        try {
+          await onControl(task.id, action);
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      {taskControlIcon(pending, action)}
+    </Button>
+  );
+}
 
 const emptyDeleteOptions = (): DeleteTaskOptions => ({
   delete_assets: false,
