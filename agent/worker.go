@@ -269,6 +269,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	base = append(base, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
 
 	// 意图 + 全局态势改放【启动 user 消息】(见下方 input)，system 只留静态角色正文

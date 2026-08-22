@@ -186,6 +186,60 @@ func (t *ToolSet) DropCoverageTools(tools []actool.CoreTool) []actool.CoreTool {
 	return out
 }
 
+// StripCoverageParams hides coverage-only parameters (currently insert_assets'
+// per-item `related`, which only decides whether an asset enters the coverage
+// denominator) from the model-facing schema when coverage is disabled — the param
+// has no effect then, so showing it just pollutes the prompt. MUST run on the FINAL
+// tool list (after AugmentTools/ToolResolve): the DB tools table is authoritative on
+// schema, so stripping the code schema earlier would be overwritten. No-op when
+// enabled or when the list has no insert_assets. The schema is deep-copied before
+// editing so the shared/DB schema map is never mutated.
+func (t *ToolSet) StripCoverageParams(tools []actool.CoreTool) []actool.CoreTool {
+	if !t.coverageDisabled {
+		return tools
+	}
+	for i, tool := range tools {
+		if tool.Name() != "insert_assets" {
+			continue
+		}
+		schema := deepCopyJSONMap(tool.InputSchema())
+		if props, ok := nestedMap(schema, "properties", "assets", "items", "properties"); ok {
+			delete(props, "related")
+		}
+		tools[i] = DecorateTool(tool, tool.Description(), schema)
+	}
+	return tools
+}
+
+// deepCopyJSONMap returns a JSON round-trip deep copy of a schema map so callers can
+// edit it without touching the original (which may be shared/cached). Falls back to
+// the input on any marshal error (edits then become best-effort no-ops upstream).
+func deepCopyJSONMap(m map[string]any) map[string]any {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return m
+	}
+	var out map[string]any
+	if json.Unmarshal(b, &out) != nil {
+		return m
+	}
+	return out
+}
+
+// nestedMap walks a chain of string keys through nested map[string]any values,
+// returning the final map and whether the whole path resolved to one.
+func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
+	cur := m
+	for _, k := range keys {
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
 // Cross-task reuse: exported accessors returning the per-task tool logic bound to
 // THIS ToolSet's store. Host-side orchestration tools build a ToolSet for an
 // arbitrary task, then Call these — so cross-task reads/hint reuse the exact

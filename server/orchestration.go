@@ -462,7 +462,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v5_spawn_seed_intent"
+	const flag = "tool_schema_refresh_v6_insert_assets_related"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -473,10 +473,14 @@ func (s *Server) refreshBuiltinToolSchemas() {
 			log.Printf("[tools] refresh %s schema failed: %v", t.Name(), err)
 		}
 	}
-	// 同时把 planner 的 goal_met 描述刷成代码默认：旧库 seed 的描述带“结束本轮规划”的
-	// 误导，会让 planner 把 goal_met 当成“结束空轮”的手段、刚开跑就误判整个任务完成。
+	// 同时把部分内置 agent 工具刷成代码默认：
+	//   - goal_met：旧库 seed 的描述带“结束本轮规划”的误导，会让 planner 把它当成
+	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
+	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
+	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
-		if sd.Key != "goal_met" {
+		if !refreshBuiltin[sd.Key] {
 			continue
 		}
 		schema, _ := json.Marshal(sd.Schema)

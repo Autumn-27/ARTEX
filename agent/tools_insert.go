@@ -62,6 +62,13 @@ type assetInputItem struct {
 	// ---- endpoint ----
 	Method string           `json:"method"`
 	Params []map[string]any `json:"params"`
+
+	// Related marks whether this asset is relevant to the CURRENT test task and
+	// should therefore auto-enter the coverage system (task_scope denominator).
+	// nil = default true (relevant → auto-scoped). false = insert into the shared
+	// asset库 but keep it OUT of this task's coverage. Only consulted when the task
+	// has the coverage feature enabled; ignored (no auto-scope either way) when off.
+	Related *bool `json:"related"`
 }
 
 // insertAssets is the unified insert_assets agent tool.
@@ -149,6 +156,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						"type":        "array",
 						"description": "请求参数列表，每条含 location(query/body/header/path)/name/value/type（可选，追加不覆盖）",
 						"items":       map[string]any{"type": "object"},
+					},
+					// 覆盖度相关：该资产是否与当前测试任务有关。
+					"related": map[string]any{
+						"type":        "boolean",
+						"description": "该资产是否与【当前测试任务】相关：true(默认)才自动纳入资产覆盖度(测试范围分母)；false 则只入库、不计入本任务覆盖度(如顺带发现的旁站/无关资产)。仅在任务开启资产覆盖度功能时生效。",
 					},
 				}, "type"),
 			},
@@ -274,8 +286,10 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				t.anchorOwner(id)
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
-				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
-				if !t.coverageDisabled {
+				// 资产覆盖度功能关闭时不再累积测试范围(分母)；related=false(与当前任务无关)
+				// 的资产也只入库、不计入覆盖度。related 省略/null 视为 true(默认纳入)。
+				related := item.Related == nil || *item.Related
+				if !t.coverageDisabled && related {
 					svcIP := item.ServiceIP
 					if svcIP == "" {
 						svcIP = item.IP
