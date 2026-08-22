@@ -60,6 +60,11 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 		return err
 	}
 	t.SourceTaskIDs = sources
+	companies, err := d.TaskCompanyIDs(t.ID)
+	if err != nil {
+		return err
+	}
+	t.CompanyIDs = companies
 	t.LLMProfileIDs = make([]int64, 0, len(chain))
 	t.LLMFailoverState = "default"
 	var latest *TaskLLMProfile
@@ -157,6 +162,28 @@ ORDER BY p.position NULLS LAST`, taskID)
 
 func (d *DB) TaskSourceIDs(taskID int64) ([]int64, error) {
 	rows, err := d.Query(`SELECT source_task_id FROM task_relations WHERE task_id=$1 ORDER BY created_at, source_task_id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// TaskCompanyIDs returns the companies whose asset scopes are available to the
+// task. The task_scope rows remain the single source of truth.
+func (d *DB) TaskCompanyIDs(taskID int64) ([]int64, error) {
+	rows, err := d.Query(`
+SELECT company_id FROM task_scope
+WHERE task_id=$1 AND kind='company' AND company_id IS NOT NULL
+ORDER BY id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -339,13 +366,17 @@ ORDER BY position LIMIT 1`, taskID, position).Scan(&next)
 	case nil:
 		out.Advanced = true
 		out.NextProfileID = &next
-		if _, err := tx.Exec(`UPDATE tasks SET active_llm_profile_id=$2, llm_profile_id=$2 WHERE id=$1`, taskID, next); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks
+				SET active_llm_profile_id=$2, llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
+				WHERE id=$1`, taskID, next); err != nil {
 			return out, err
 		}
 	case sql.ErrNoRows:
 		out.Advanced = true
 		out.ChainExhausted = true
-		if _, err := tx.Exec(`UPDATE tasks SET active_llm_profile_id=NULL, llm_profile_id=NULL WHERE id=$1`, taskID); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks
+				SET active_llm_profile_id=NULL, llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
+				WHERE id=$1`, taskID); err != nil {
 			return out, err
 		}
 	default:

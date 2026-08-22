@@ -1,37 +1,19 @@
 "use client";
 
 import * as React from "react";
-import {
-  TerminalIcon,
-  SearchIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  Loader2Icon,
-  XIcon,
-} from "lucide-react";
 
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, SearchIcon, TerminalIcon } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import type { CommandRecord } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -50,7 +32,9 @@ function toolInput(raw: string): string {
     const obj = JSON.parse(raw);
     if (obj && typeof obj.command === "string") return obj.command;
     return JSON.stringify(obj, null, 2);
-  } catch { /* not JSON */ }
+  } catch {
+    /* not JSON */
+  }
   return raw;
 }
 
@@ -75,7 +59,7 @@ export default function CommandsPage() {
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
 
-  // Inline detail panel (like traffic page, not a dialog)
+  // Selected execution is rendered in a right-side detail sheet.
   const [selected, setSelected] = React.useState<CommandRecord | null>(null);
 
   // Debounce search input.
@@ -85,6 +69,7 @@ export default function CommandsPage() {
   }, [query]);
 
   // Reset page on filter change.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: every filter change intentionally resets pagination.
   React.useEffect(() => {
     setPage(0);
   }, [queryQ, taskFilter, size]);
@@ -100,9 +85,15 @@ export default function CommandsPage() {
         setCommands(r.commands ?? []);
         setTotal(r.total ?? 0);
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!alive) return;
+        setCommands([]);
+        setTotal(0);
+      })
       .finally(() => alive && setLoading(false));
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [page, size, queryQ, taskFilter]);
 
   const totalPages = Math.max(1, Math.ceil(total / size));
@@ -178,8 +169,8 @@ export default function CommandsPage() {
         </div>
       </div>
 
-      {/* History table + inline detail (Burp-style split) */}
-      <div className="flex h-[calc(100vh-13rem)] min-h-0 flex-col gap-3">
+      {/* History table */}
+      <div className="flex h-[calc(100vh-13rem)] min-h-0 flex-col">
         <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
           <div className="min-h-0 flex-1 overflow-auto">
             <Table>
@@ -210,18 +201,13 @@ export default function CommandsPage() {
                   commands.map((cmd) => (
                     <TableRow
                       key={cmd.id}
-                      className={cn(
-                        "cursor-pointer",
-                        selected?.id === cmd.id && "bg-accent hover:bg-accent",
-                      )}
+                      className={cn("cursor-pointer", selected?.id === cmd.id && "bg-accent hover:bg-accent")}
                       onClick={() => setSelected(cmd)}
                     >
                       <TableCell className="text-xs text-muted-foreground tabular-nums">
                         {fmtTime(cmd.created_at)}
                       </TableCell>
-                      <TableCell className="text-xs font-mono text-muted-foreground">
-                        #{cmd.exploration_id}
-                      </TableCell>
+                      <TableCell className="text-xs font-mono text-muted-foreground">#{cmd.exploration_id}</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs font-mono">
                           {cmd.worker || "-"}
@@ -239,9 +225,13 @@ export default function CommandsPage() {
                       </TableCell>
                       <TableCell>
                         {cmd.is_error ? (
-                          <Badge variant="destructive" className="text-xs">失败</Badge>
+                          <Badge variant="destructive" className="text-xs">
+                            失败
+                          </Badge>
                         ) : (
-                          <Badge variant="secondary" className="text-xs text-emerald-600">成功</Badge>
+                          <Badge variant="secondary" className="text-xs text-emerald-600">
+                            成功
+                          </Badge>
                         )}
                       </TableCell>
                     </TableRow>
@@ -251,67 +241,63 @@ export default function CommandsPage() {
             </Table>
           </div>
         </Card>
-
-        {/* Inline detail panel */}
-        {selected && (
-          <Card className="flex h-[42%] min-h-0 flex-col overflow-hidden py-0">
-            {/* Detail header */}
-            <div className="flex items-center gap-2 border-b px-3 py-2">
-              <Badge variant="outline" className="text-xs font-mono">
-                #{selected.exploration_id}
-              </Badge>
-              <Badge variant="outline" className="text-xs font-mono">
-                {selected.worker || "-"}
-              </Badge>
-              <Badge variant="secondary" className="text-xs font-mono">
-                {selected.tool || "-"}
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                {fmtTime(selected.created_at)}
-              </span>
-              {selected.is_error ? (
-                <Badge variant="destructive" className="text-xs">失败</Badge>
-              ) : (
-                <Badge variant="secondary" className="text-xs text-emerald-600">成功</Badge>
-              )}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="ml-auto size-7 shrink-0"
-                onClick={() => setSelected(null)}
-              >
-                <XIcon />
-              </Button>
-            </div>
-            {/* Input / Output split */}
-            <div className="grid min-h-0 flex-1 grid-cols-2 divide-x">
-              <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="border-b px-3 py-1 text-[11px] font-medium text-muted-foreground">
-                  输入 Input
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <pre className="p-3 font-mono text-xs break-all whitespace-pre-wrap">
-                    {toolInput(selected.command)}
-                  </pre>
-                </div>
-              </div>
-              <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="border-b px-3 py-1 text-[11px] font-medium text-muted-foreground">
-                  输出 Output
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <pre className={cn(
-                    "p-3 font-mono text-xs break-all whitespace-pre-wrap",
-                    selected.is_error && "text-red-600 dark:text-red-400",
-                  )}>
-                    {selected.output || "（空）"}
-                  </pre>
-                </div>
-              </div>
-            </div>
-          </Card>
-        )}
       </div>
+
+      <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
+        <SheetContent className="w-full! max-w-none! gap-0 p-0 sm:w-[46rem]! sm:max-w-[46rem]!">
+          {selected && (
+            <>
+              <SheetHeader className="border-b px-5 py-4">
+                <SheetTitle className="pr-8">工具执行详情</SheetTitle>
+                <SheetDescription>{fmtTime(selected.created_at)}</SheetDescription>
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <Badge variant="outline" className="text-xs font-mono">
+                    #{selected.exploration_id}
+                  </Badge>
+                  <Badge variant="outline" className="text-xs font-mono">
+                    {selected.worker || "-"}
+                  </Badge>
+                  <Badge variant="secondary" className="text-xs font-mono">
+                    {selected.tool || "-"}
+                  </Badge>
+                  {selected.is_error ? (
+                    <Badge variant="destructive" className="text-xs">
+                      失败
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary" className="text-xs text-emerald-600">
+                      成功
+                    </Badge>
+                  )}
+                </div>
+              </SheetHeader>
+              <div className="grid min-h-0 flex-1 grid-rows-2 divide-y">
+                <div className="flex min-h-0 min-w-0 flex-col">
+                  <div className="border-b px-5 py-2 text-xs font-medium text-muted-foreground">输入 Input</div>
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    <pre className="p-5 font-mono text-xs break-all whitespace-pre-wrap">
+                      {toolInput(selected.command)}
+                    </pre>
+                  </div>
+                </div>
+                <div className="flex min-h-0 min-w-0 flex-col">
+                  <div className="border-b px-5 py-2 text-xs font-medium text-muted-foreground">输出 Output</div>
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    <pre
+                      className={cn(
+                        "p-5 font-mono text-xs break-all whitespace-pre-wrap",
+                        selected.is_error && "text-red-600 dark:text-red-400",
+                      )}
+                    >
+                      {selected.output || "（空）"}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

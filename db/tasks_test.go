@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -277,6 +278,7 @@ func TestTaskRelationsAndLLMFailoverChain(t *testing.T) {
 	if got.LLMChainRevision <= initialRevision || got.ActiveLLMProfileID == nil || *got.ActiveLLMProfileID != profileIDs[0] {
 		t.Fatalf("replacement revision/cursor not preserved: %+v", got)
 	}
+	replacementRevision := got.LLMChainRevision
 
 	transition, err := d.MarkTaskLLMProfileQuotaExhausted(child.ID, profileIDs[0], "insufficient_quota")
 	if err != nil {
@@ -284,6 +286,13 @@ func TestTaskRelationsAndLLMFailoverChain(t *testing.T) {
 	}
 	if !transition.Advanced || transition.ChainExhausted || transition.NextProfileID == nil || *transition.NextProfileID != profileIDs[1] {
 		t.Fatalf("unexpected first transition: %+v", transition)
+	}
+	got, err = d.GetTask(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LLMChainRevision != replacementRevision+1 {
+		t.Fatalf("automatic cursor advance did not increment revision: before=%d after=%d", replacementRevision, got.LLMChainRevision)
 	}
 	late, err := d.MarkTaskLLMProfileQuotaExhausted(child.ID, profileIDs[0], "late duplicate")
 	if err != nil {
@@ -481,5 +490,76 @@ func TestTaskContextRejectsDuplicatesAndTerminalEdits(t *testing.T) {
 	}
 	if err := d.ReplaceTaskLLMProfiles(task.ID, nil, 0); err == nil {
 		t.Fatal("terminal task LLM edit should be rejected")
+	}
+}
+
+func TestCreateTaskWithCompanyScopes(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+
+	suffix := time.Now().UnixNano()
+	companyA, _, err := d.Companies().UpsertCompany(fmt.Sprintf("Task Company A %d", suffix), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	companyB, _, err := d.Companies().UpsertCompany(fmt.Sprintf("Task Company B %d", suffix), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM companies WHERE id IN ($1,$2)`, companyA, companyB)
+	})
+
+	task, err := d.CreateTaskWithOptions("company-scoped task", "use company scope", TaskCreateOptions{
+		CompanyIDs: []int64{companyA, companyB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	if fmt.Sprint(task.CompanyIDs) != fmt.Sprint([]int64{companyA, companyB}) {
+		t.Fatalf("creation result company IDs=%v", task.CompanyIDs)
+	}
+	got, err := d.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got.CompanyIDs) != fmt.Sprint([]int64{companyA, companyB}) {
+		t.Fatalf("hydrated company IDs=%v", got.CompanyIDs)
+	}
+	var scopeCount int
+	if err := d.QueryRow(`SELECT count(*) FROM task_scope WHERE task_id=$1 AND kind='company'`, task.ID).Scan(&scopeCount); err != nil {
+		t.Fatal(err)
+	}
+	if scopeCount != 2 {
+		t.Fatalf("company task scope rows=%d want 2", scopeCount)
+	}
+
+	duplicateTask, err := d.CreateTaskWithOptions("duplicate company scope", "deduplicate", TaskCreateOptions{
+		CompanyIDs: []int64{companyA, companyA, companyB, companyA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(duplicateTask.CompanyIDs) != fmt.Sprint([]int64{companyA, companyB}) {
+		t.Fatalf("company IDs were not normalized: %v", duplicateTask.CompanyIDs)
+	}
+	if err := d.DeleteTask(duplicateTask.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	badDescription := fmt.Sprintf("invalid-company-%d", suffix)
+	if _, err := d.CreateTaskWithOptions(badDescription, "rollback", TaskCreateOptions{CompanyIDs: []int64{companyA, 1 << 62}}); !errors.Is(err, ErrTaskCompanyNotFound) {
+		t.Fatalf("missing company error=%v, want %v", err, ErrTaskCompanyNotFound)
+	}
+	var leaked int
+	if err := d.QueryRow(`SELECT count(*) FROM explorations WHERE description=$1`, badDescription).Scan(&leaked); err != nil {
+		t.Fatal(err)
+	}
+	if leaked != 0 {
+		t.Fatalf("failed company association leaked %d exploration rows", leaked)
 	}
 }

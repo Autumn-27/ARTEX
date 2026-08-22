@@ -122,7 +122,7 @@ func TestTaskLLMStateSnapshotIsConcurrentAndDetached(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
 				id := int64(offset*1000 + i + 1)
-				task.setLLMState(&id, &id, []int64{id, id + 1}, "ready", "")
+				task.setLLMState(&id, &id, []int64{id, id + 1}, int64(i), "ready", "")
 			}
 		}(writer)
 	}
@@ -143,6 +143,24 @@ func TestTaskLLMStateSnapshotIsConcurrentAndDetached(t *testing.T) {
 	state := task.llmStateSnapshot()
 	if len(state.ProfileIDs) != 2 || state.ProfileIDs[0] <= 0 {
 		t.Fatalf("snapshot mutation leaked into task state: %+v", state)
+	}
+}
+
+func TestTaskLLMStateRejectsOlderRevision(t *testing.T) {
+	t.Parallel()
+	task := &Task{ID: "7"}
+	current := int64(22)
+	stale := int64(11)
+	if !task.setLLMState(&current, &current, []int64{current}, 2, "ready", "") {
+		t.Fatal("initial LLM state was rejected")
+	}
+	if task.setLLMState(&stale, &stale, []int64{stale}, 1, "ready", "stale") {
+		t.Fatal("older LLM snapshot was accepted")
+	}
+	state := task.llmStateSnapshot()
+	if state.ChainRevision != 2 || state.ActiveID == nil || *state.ActiveID != current ||
+		len(state.ProfileIDs) != 1 || state.ProfileIDs[0] != current || state.FailoverReason != "" {
+		t.Fatalf("older LLM snapshot overwrote current state: %+v", state)
 	}
 }
 
@@ -381,7 +399,7 @@ func TestResolvedTaskStatusKeepsExhaustedStartedTaskRunning(t *testing.T) {
 	engine.started.Store("7", true)
 	task := &Task{ID: "7", Status: "running"}
 	profileID := int64(11)
-	task.setLLMState(&profileID, nil, []int64{profileID}, "chain_exhausted", "quota exhausted")
+	task.setLLMState(&profileID, nil, []int64{profileID}, 1, "chain_exhausted", "quota exhausted")
 	s := &Server{engine: engine}
 	if got := s.resolvedTaskStatus(task); got != "running" {
 		t.Fatalf("exhausted started status=%q, want running", got)
@@ -389,6 +407,33 @@ func TestResolvedTaskStatusKeepsExhaustedStartedTaskRunning(t *testing.T) {
 	task.Paused = true
 	if got := s.resolvedTaskStatus(task); got != "paused" {
 		t.Fatalf("paused exhausted status=%q, want paused", got)
+	}
+}
+
+// A role with no Agent binding falls through to the task chain, then to global —
+// and an exhausted chain stays a hard stop instead of silently borrowing global.
+func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
+	t.Parallel()
+	// A nil pg means effectiveProfileForAgent finds no binding for any role, so
+	// every role here resolves through the chain/global levels.
+	s := &Server{m: &Manager{}}
+	task := &Task{ID: "7"}
+
+	if s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("no binding, no chain and no global provider must not be runnable")
+	}
+	s.llmOn, s.llmProv = true, &scriptedLLMProvider{}
+	if !s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("global provider must serve a role with no binding and no chain")
+	}
+	if s.taskRuntimeAvailable(task) {
+		t.Fatal("a task with no roles requested must not report as runnable")
+	}
+
+	profileID := int64(11)
+	task.setLLMState(&profileID, nil, []int64{profileID}, 1, "chain_exhausted", "quota exhausted")
+	if s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("exhausted chain must not fall back to the global provider")
 	}
 }
 

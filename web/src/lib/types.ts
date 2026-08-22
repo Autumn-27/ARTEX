@@ -30,6 +30,16 @@ export interface Task {
   llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
   llm_failover_reason?: string;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
+  company_ids?: number[]; // associated company asset scopes available as task context
+}
+
+export interface TaskTemplate {
+  id: number;
+  name: string;
+  description: string;
+  goal: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DeleteTaskOptions {
@@ -237,13 +247,22 @@ export interface TaskScopeRow {
   reason?: string;
 }
 
+export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
+
+// 新增企业时提交的结构化资产范围规则。
+export interface CompanyScopeRule {
+  kind: CompanyScopeKind;
+  value: string;
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;
   company_id: number;
-  kind: "domain" | "ip" | "cidr";
+  kind: CompanyScopeKind;
   domain?: string; // kind=domain 时有值
   net?: string; // kind=ip|cidr 时有值
+  value?: string; // kind=icp|keyword 时可能由后端直接返回
   raw: string; // 原始用户输入，用于显示和回填
   reason?: string;
 }
@@ -254,13 +273,13 @@ export interface Company {
   name: string;
   logo?: string; // 远程图标 URL；空则前端用名称首字母
   asset_count: number;
-  scope: ScopeRow[];
+  scope?: ScopeRow[];
 }
 
 // ---- Exploration graph (per task) ----
 export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint";
 export type GoalState = "open" | "met" | "abandoned";
-export type IntentState = "open" | "running" | "done" | "blocked" | "exhausted" | "stopped";
+export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves";
@@ -326,6 +345,33 @@ export interface FindingsPage {
   page_size: number;
 }
 
+export interface FindingGroup {
+  task_id: string | number | null;
+  task_description: string;
+  task_status: string;
+  count: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  last_found_at: string;
+}
+
+export interface FindingGroupsPage {
+  items: FindingGroup[];
+  total: number;
+  finding_total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface FindingDeepenResponse {
+  task_id: string;
+  intent_id: string;
+  state: IntentState;
+  queued: boolean;
+}
+
 // FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
 export interface FindingStats {
   total: number;
@@ -341,7 +387,7 @@ export interface FindingStats {
 // FindingTaskOption 是发现页「按任务」筛选下拉的一项:有漏洞的任务(描述为空表示任务已删除,
 // 前端回退展示 id)及其漏洞条数。
 export interface FindingTaskOption {
-  id: number;
+  id: string | number;
   description: string;
   count: number;
 }
@@ -417,6 +463,22 @@ export interface LLMTransition {
   next?: LLMAuditProfile;
 }
 
+export interface TaskLLMResolution {
+  profile_id?: number;
+  name: string;
+  format: string;
+  model: string;
+  source: "task_chain" | "agent_binding" | "global_profile" | "environment" | "global";
+  available: boolean;
+  reason?: string;
+}
+
+export interface TaskLLMResolutions {
+  mainagent: TaskLLMResolution;
+  planner: TaskLLMResolution;
+  worker: TaskLLMResolution;
+}
+
 // ---- Agent triggers (P3 调度，仅自定义 agent) ----
 export interface AgentTrigger {
   id: number;
@@ -444,6 +506,8 @@ export interface Conversation {
   agent_key: string;
   title: string;
   llm_profile_id?: number;
+  pinned?: boolean;
+  pinned_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -477,6 +541,22 @@ export interface TokenUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+export interface SessionTokenUsage {
+  session: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+export interface BatchControlItem {
+  id: string;
+  ok: boolean;
+  status?: string;
+  queued?: boolean;
+  error?: string;
 }
 
 // Whole-task (all agents) token aggregate.

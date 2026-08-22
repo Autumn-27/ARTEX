@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,21 +27,28 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ID                 string  `json:"id"`
-	ExpID              int64   `json:"exploration_id"`
-	Description        string  `json:"description"`
-	Goal               string  `json:"goal"`
-	CreatedAt          int64   `json:"created_at"`
-	CompletedAt        int64   `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused             bool    `json:"paused"`
-	Queued             bool    `json:"queued"`                   // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	ID          string `json:"id"`
+	ExpID       int64  `json:"exploration_id"`
+	Description string `json:"description"`
+	Goal        string `json:"goal"`
+	CreatedAt   int64  `json:"created_at"`
+	CompletedAt int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused      bool   `json:"paused"`
+	Queued      bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
+	// finer than CreatedAt so several tasks enqueued in the same second retain
+	// their real FIFO order.
+	QueuedAt           int64   `json:"queued_at,omitempty"`
+	QueueMode          string  `json:"queue_mode,omitempty"`
 	ParentRef          string  `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
 	LLMProfileID       *int64  `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
 	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
 	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64   `json:"-"`
 	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
 	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
 	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64 `json:"company_ids,omitempty"`
 	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
@@ -50,6 +58,7 @@ type Task struct {
 	Store                *pgdb.ExplorationStore `json:"-"`
 	Guard                *guard.Guard           `json:"-"`
 	notify               chan struct{}
+	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
@@ -59,10 +68,72 @@ type Task struct {
 	pendingTriggers []agent.TriggerEvent
 }
 
+// taskLifecycleState is an internally consistent view of the mutable task
+// lifecycle and inherited-scope context. Callers must use lifecycleSnapshot and
+// updateLifecycle instead of reading or writing the corresponding Task fields
+// directly after the task has been published by Manager.
+type taskLifecycleState struct {
+	Status        string
+	Paused        bool
+	Queued        bool
+	QueuedAt      int64
+	QueueMode     string
+	CompletedAt   int64
+	FirstRunAt    int64
+	DeadlineAt    int64
+	SourceTaskIDs []int64
+	CompanyIDs    []int64
+}
+
+func (t *Task) lifecycleSnapshot() taskLifecycleState {
+	if t == nil {
+		return taskLifecycleState{}
+	}
+	t.lifecycleMu.RLock()
+	defer t.lifecycleMu.RUnlock()
+	return t.lifecycleSnapshotLocked()
+}
+
+func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
+	return taskLifecycleState{
+		Status:        t.Status,
+		Paused:        t.Paused,
+		Queued:        t.Queued,
+		QueuedAt:      t.QueuedAt,
+		QueueMode:     t.QueueMode,
+		CompletedAt:   t.CompletedAt,
+		FirstRunAt:    t.FirstRunAt,
+		DeadlineAt:    t.DeadlineAt,
+		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
+	}
+}
+
+func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
+	if t == nil || update == nil {
+		return
+	}
+	t.lifecycleMu.Lock()
+	state := t.lifecycleSnapshotLocked()
+	update(&state)
+	t.Status = state.Status
+	t.Paused = state.Paused
+	t.Queued = state.Queued
+	t.QueuedAt = state.QueuedAt
+	t.QueueMode = state.QueueMode
+	t.CompletedAt = state.CompletedAt
+	t.FirstRunAt = state.FirstRunAt
+	t.DeadlineAt = state.DeadlineAt
+	t.SourceTaskIDs = append(t.SourceTaskIDs[:0], state.SourceTaskIDs...)
+	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
+	t.lifecycleMu.Unlock()
+}
+
 type taskLLMState struct {
 	ProfileID      *int64
 	ProfileIDs     []int64
 	ActiveID       *int64
+	ChainRevision  int64
 	FailoverState  string
 	FailoverReason string
 }
@@ -82,19 +153,25 @@ func (t *Task) llmStateSnapshot() taskLLMState {
 		ProfileID:      cloneInt64Ptr(t.LLMProfileID),
 		ProfileIDs:     append(make([]int64, 0, len(t.LLMProfileIDs)), t.LLMProfileIDs...),
 		ActiveID:       cloneInt64Ptr(t.ActiveLLMProfileID),
+		ChainRevision:  t.LLMChainRevision,
 		FailoverState:  t.LLMFailoverState,
 		FailoverReason: t.LLMFailoverReason,
 	}
 }
 
-func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, state, reason string) {
+func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revision int64, state, reason string) bool {
 	t.llmMu.Lock()
+	defer t.llmMu.Unlock()
+	if revision < t.LLMChainRevision {
+		return false
+	}
 	t.LLMProfileID = cloneInt64Ptr(profileID)
 	t.ActiveLLMProfileID = cloneInt64Ptr(activeID)
 	t.LLMProfileIDs = append(t.LLMProfileIDs[:0], profileIDs...)
+	t.LLMChainRevision = revision
 	t.LLMFailoverState = state
 	t.LLMFailoverReason = reason
-	t.llmMu.Unlock()
+	return true
 }
 
 // DeleteTaskOptions controls cleanup of data stored outside the task's own
@@ -129,11 +206,16 @@ type Manager struct {
 	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
 	interceptor *intercept.Interceptor // user-configured tool-call interception rules
 
-	mu        sync.RWMutex
-	tasks     map[string]*Task
-	active    string
-	trafficOn bool // 流量捕获开关（默认关；settings.traffic_capture）
-	llmRecOn  bool // LLM 录制开关（默认关；settings.llm_record）
+	companyMu sync.Mutex // serializes task/company-scope commits with live handle registration
+	// taskStateMu preserves commit order between PostgreSQL lifecycle writes and
+	// their in-memory mirrors. lifecycleMu makes snapshots race-free, but without
+	// this outer write lock an older request could commit first and publish last.
+	taskStateMu sync.Mutex
+	mu          sync.RWMutex
+	tasks       map[string]*Task
+	active      string
+	trafficOn   bool // 流量捕获开关（默认关；settings.traffic_capture）
+	llmRecOn    bool // LLM 录制开关（默认关；settings.llm_record）
 	// 联网搜索开关与来源（默认关；settings.web_search_*）。brave-free 需要 braveKey；tavily 需要 tavilyKey。
 	// webSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关。
 	webSearchOn      bool
@@ -594,15 +676,25 @@ func unixOrZero(t *time.Time) int64 {
 	return t.Unix()
 }
 
+func unixNanoOrZero(t *time.Time) int64 {
+	if t == nil {
+		return 0
+	}
+	return t.UnixNano()
+}
+
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
+		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
 		LLMProfileIDs: append([]int64(nil), pt.LLMProfileIDs...), ActiveLLMProfileID: pt.ActiveLLMProfileID,
+		LLMChainRevision: pt.LLMChainRevision,
 		LLMFailoverState: pt.LLMFailoverState, LLMFailoverReason: pt.LLMFailoverReason,
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
+		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
@@ -622,6 +714,10 @@ func (m *Manager) CreateTask(description, goal string, llmProfileID *int64, time
 }
 
 func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.TaskCreateOptions) (*Task, error) {
+	if len(opts.CompanyIDs) > 0 {
+		m.companyMu.Lock()
+		defer m.companyMu.Unlock()
+	}
 	pt, err := m.pg.CreateTaskWithOptions(description, goal, opts)
 	if err != nil {
 		return nil, err
@@ -632,6 +728,33 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 	m.active = t.ID
 	m.mu.Unlock()
 	return t, nil
+}
+
+// DeleteCompanyWithAssets keeps the database cascade and live task handles in
+// one manager-level critical section. This closes the gap where a task could
+// commit its company scope immediately before registration and miss the
+// post-delete in-memory sweep.
+func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, error) {
+	m.companyMu.Lock()
+	defer m.companyMu.Unlock()
+	assetsDeleted, err := m.pg.Companies().DeleteCompanyWithAssets(id, deleteAssets)
+	if err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	for _, task := range m.tasks {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			companyIDs := make([]int64, 0, len(state.CompanyIDs))
+			for _, companyID := range state.CompanyIDs {
+				if companyID != id {
+					companyIDs = append(companyIDs, companyID)
+				}
+			}
+			state.CompanyIDs = companyIDs
+		})
+	}
+	m.mu.Unlock()
+	return assetsDeleted, nil
 }
 
 // ReplaceTaskLLMProfiles resets a non-terminal task's ordered provider chain and
@@ -650,7 +773,7 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 	}
 	m.mu.Lock()
 	if task := m.tasks[id]; task != nil {
-		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
 	}
 	m.mu.Unlock()
 	if task, ok := m.Task(id); ok {
@@ -701,26 +824,212 @@ func (m *Manager) LoadExisting() []*Task {
 
 // SetTaskPaused persists a task's paused state.
 func (m *Manager) SetTaskPaused(id string, paused bool) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return err
 	}
-	return m.pg.SetPaused(n, paused)
-}
-
-// SetTaskQueued persists a task's queued (concurrency-hold) state and syncs the
-// in-memory handle so listTasks/占位统计 see it immediately.
-func (m *Manager) SetTaskQueued(id string, queued bool) error {
-	n, err := strconv.ParseInt(id, 10, 64)
-	if err != nil {
-		return err
-	}
-	if err := m.pg.SetQueued(n, queued); err != nil {
+	if err := m.pg.SetPaused(n, paused); err != nil {
 		return err
 	}
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
-		t.Queued = queued
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Paused = paused
+		})
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// ApplyTaskAdmission atomically commits the lifecycle fields controlled by the
+// concurrency scheduler. Keeping status, paused and queue metadata in one UPDATE
+// prevents a failed resume from leaving a task half-revived (for example running
+// but still user-paused, or dequeued without an Engine start).
+//
+// preservePosition applies only when the row is already queued. A repeated
+// admission keeps its FIFO timestamp; a task that was explicitly paused and is
+// now re-queued receives a fresh tail position.
+func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	if queued {
+		if mode != "bootstrap" && mode != "resume" {
+			return fmt.Errorf("invalid queue mode %q", mode)
+		}
+	} else {
+		mode = ""
+	}
+
+	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
+	var committedMode string
+	err = m.pg.QueryRow(`UPDATE tasks
+	SET status=$2,
+	    completed_at=CASE
+	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
+	        ELSE NULL
+	    END,
+	    paused=false,
+	    queued=$3,
+	    queued_at=CASE
+	        WHEN NOT $3 THEN NULL
+	        WHEN $5 AND queued THEN COALESCE(queued_at, now())
+	        ELSE now()
+	    END,
+	    queue_mode=CASE
+	        WHEN NOT $3 THEN ''
+	        WHEN ($5 AND queued AND queue_mode='bootstrap') OR $4='bootstrap' THEN 'bootstrap'
+	        ELSE 'resume'
+	    END,
+	    first_run_at=CASE
+	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        ELSE first_run_at
+	    END,
+	    deadline_at=CASE
+	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        ELSE deadline_at
+	    END
+	WHERE id=$1 AND deleted_at IS NULL AND status=$6
+	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus).
+		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
+	}
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = status
+			state.Paused = false
+			state.Queued = queued
+			state.QueueMode = committedMode
+			state.QueuedAt = 0
+			if queuedAt.Valid {
+				state.QueuedAt = queuedAt.Time.UnixNano()
+			}
+			state.CompletedAt = 0
+			if completedAt.Valid {
+				state.CompletedAt = completedAt.Time.Unix()
+			}
+			state.FirstRunAt = 0
+			if firstRunAt.Valid {
+				state.FirstRunAt = firstRunAt.Time.Unix()
+			}
+			state.DeadlineAt = 0
+			if deadlineAt.Valid {
+				state.DeadlineAt = deadlineAt.Time.Unix()
+			}
+		})
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// ApplyTaskPause atomically removes a task from the admission queue and records
+// the user pause. queue_mode is intentionally retained so resuming a never-run
+// bootstrap task still performs goal decomposition, but the next enqueue receives
+// a new queued_at timestamp and therefore moves to the FIFO tail.
+func (m *Manager) ApplyTaskPause(id string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	var mode string
+	err = m.pg.QueryRow(`UPDATE tasks
+		SET paused=true, queued=false, queued_at=NULL
+		WHERE id=$1 AND deleted_at IS NULL AND paused=false
+		  AND status NOT IN ('done','failed','timeout')
+		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task %s is unavailable for pause", id)
+	}
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Paused = true
+			state.Queued = false
+			state.QueuedAt = 0
+			state.QueueMode = mode
+		})
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// EnqueueTask persists the concurrency hold and syncs the in-memory handle.
+func (m *Manager) EnqueueTask(id, mode string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	if mode != "bootstrap" && mode != "resume" {
+		return fmt.Errorf("invalid queue mode %q", mode)
+	}
+	var queuedAt time.Time
+	var committedMode string
+	err = m.pg.QueryRow(`UPDATE tasks
+		SET queued=true,
+		    queued_at=CASE WHEN queued THEN COALESCE(queued_at, now()) ELSE now() END,
+		    queue_mode=CASE
+		        WHEN queue_mode='bootstrap' OR $2='bootstrap' THEN 'bootstrap'
+		        ELSE 'resume'
+		    END
+		WHERE id=$1 AND deleted_at IS NULL
+		RETURNING queued_at, queue_mode`, n, mode).Scan(&queuedAt, &committedMode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task %s is unavailable for enqueue", id)
+	}
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.QueuedAt = queuedAt.UnixNano()
+			state.Queued = true
+			state.QueueMode = committedMode
+		})
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+// DequeueTask removes the concurrency hold. clearMode=false is used when a user
+// pauses a queued task so a later resume still knows whether bootstrap is needed.
+func (m *Manager) DequeueTask(id string, clearMode bool) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return err
+	}
+	if err := m.pg.Dequeue(n, clearMode); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Queued = false
+			state.QueuedAt = 0
+			if clearMode {
+				state.QueueMode = ""
+			}
+		})
 	}
 	m.mu.Unlock()
 	return nil
@@ -731,7 +1040,7 @@ func (m *Manager) TaskStatus(id string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if t := m.tasks[id]; t != nil {
-		return t.Status
+		return t.lifecycleSnapshot().Status
 	}
 	return ""
 }
@@ -739,6 +1048,8 @@ func (m *Manager) TaskStatus(id string) string {
 // StampTaskFirstRun stamps first_run_at + deadline_at on the first real run (idempotent
 // in DB) and mirrors deadline_at on the live handle. Returns the deadline unix (0 = 不限).
 func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return 0, err
@@ -759,10 +1070,12 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 	}
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
-		if t.FirstRunAt == 0 {
-			t.FirstRunAt = time.Now().Unix()
-		}
-		t.DeadlineAt = dlUnix
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			if state.FirstRunAt == 0 {
+				state.FirstRunAt = time.Now().Unix()
+			}
+			state.DeadlineAt = dlUnix
+		})
 	}
 	m.mu.Unlock()
 	return dlUnix, nil
@@ -772,6 +1085,8 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 // (resolves the completed↔timeout race — first terminal writer wins). Reflects the
 // won status on the live handle. won=false means another terminal already stuck.
 func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return false, err
@@ -782,10 +1097,12 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	}
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
-		t.Status = status
-		if t.CompletedAt == 0 {
-			t.CompletedAt = time.Now().Unix()
-		}
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = status
+			if state.CompletedAt == 0 {
+				state.CompletedAt = time.Now().Unix()
+			}
+		})
 	}
 	m.mu.Unlock()
 	return true, nil
@@ -794,6 +1111,8 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 // SetTaskStatus persists a task's lifecycle status (e.g. "done") and reflects it
 // on the in-memory handle so the derived DTO status shows it without a reload.
 func (m *Manager) SetTaskStatus(id, status string) error {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return err
@@ -803,16 +1122,18 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	}
 	m.mu.Lock()
 	if t := m.tasks[id]; t != nil {
-		t.Status = status
-		// mirror the DB's completed_at stamp on the live handle so the DTO shows the
-		// finish time without a reload (terminal → stamp once; else clear).
-		if pgdb.IsTerminal(status) {
-			if t.CompletedAt == 0 {
-				t.CompletedAt = time.Now().Unix()
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = status
+			// Mirror the DB's completed_at stamp on the live handle so the DTO shows
+			// the finish time without a reload (terminal -> stamp once; else clear).
+			if pgdb.IsTerminal(status) {
+				if state.CompletedAt == 0 {
+					state.CompletedAt = time.Now().Unix()
+				}
+			} else {
+				state.CompletedAt = 0
 			}
-		} else {
-			t.CompletedAt = 0
-		}
+		})
 	}
 	m.mu.Unlock()
 	return nil
@@ -927,13 +1248,15 @@ func (m *Manager) forgetTask(id string, numericID int64) {
 	m.mu.Lock()
 	delete(m.tasks, id)
 	for _, task := range m.tasks {
-		kept := task.SourceTaskIDs[:0]
-		for _, sourceID := range task.SourceTaskIDs {
-			if sourceID != numericID {
-				kept = append(kept, sourceID)
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			kept := make([]int64, 0, len(state.SourceTaskIDs))
+			for _, sourceID := range state.SourceTaskIDs {
+				if sourceID != numericID {
+					kept = append(kept, sourceID)
+				}
 			}
-		}
-		task.SourceTaskIDs = kept
+			state.SourceTaskIDs = kept
+		})
 	}
 	if m.active == id {
 		m.active = ""

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -147,6 +148,11 @@ type FindingFilter struct {
 	Sort      string // "severity" | "time"
 }
 
+// FindingUnassignedTask is the task filter sentinel for findings whose task is
+// absent. That includes rows created without a task and rows retained after their
+// originating task was deleted (the findings FK is ON DELETE SET NULL).
+const FindingUnassignedTask = "__unassigned__"
+
 // where builds the WHERE clause (shared by the page and count queries) plus its
 // positional args. Only equality filters, all parameterized.
 func (f FindingFilter) where() (string, []any) {
@@ -163,7 +169,9 @@ func (f FindingFilter) where() (string, []any) {
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
 	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
-	if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
+	if f.TaskID == FindingUnassignedTask {
+		conds = append(conds, "(f.task_id IS NULL OR t.id IS NULL)")
+	} else if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
 		args = append(args, tid)
 		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
 	}
@@ -185,14 +193,19 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	where, args := f.where()
 
 	var total int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM findings f`+where, args...).Scan(&total); err != nil {
+	if err := d.QueryRow(`SELECT COUNT(*) FROM findings f LEFT JOIN tasks t ON f.task_id=t.id`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	// Avoid overflowing (page-1)*pageSize for an arbitrarily large page number.
+	// Once the requested page is beyond the exact count, no data query is needed.
+	if total == 0 || page > (total-1)/pageSize+1 {
+		return []*DBFinding{}, total, nil
+	}
 
-	order := "f.created_at DESC"
+	order := "f.created_at DESC, f.id DESC"
 	if f.Sort == "severity" {
 		// critical > high > medium > low > 其它, then newest first.
-		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
+		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	q := fmt.Sprintf(`
@@ -208,6 +221,189 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	defer rows.Close()
 	out, err := scanFindings(rows)
 	return out, total, err
+}
+
+// FindingGroup is one task-level bucket in the global findings view. TaskID is
+// nil for both findings that never had a task and findings retained after task
+// deletion; those records intentionally share one "unassigned/deleted" bucket.
+type FindingGroup struct {
+	TaskID          *int64    `json:"task_id"`
+	TaskDescription string    `json:"task_description"`
+	TaskStatus      string    `json:"task_status"`
+	Count           int       `json:"count"`
+	Critical        int       `json:"critical"`
+	High            int       `json:"high"`
+	Medium          int       `json:"medium"`
+	Low             int       `json:"low"`
+	LastFoundAt     time.Time `json:"last_found_at"`
+}
+
+// ListFindingGroups returns a page of task groups matching the same filters as
+// ListFindingsPage. The group count and finding count are independent totals so
+// clients can page groups without losing the exact export/selection count.
+func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGroup, int, int, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	where, args := f.where()
+	grouped := ` FROM findings f LEFT JOIN tasks t ON f.task_id=t.id` + where +
+		` GROUP BY t.id, t.description, t.status, t.paused, t.queued`
+
+	var groupTotal, findingTotal int
+	countQuery := `SELECT COUNT(*), COALESCE(SUM(finding_count),0) FROM (` +
+		`SELECT COUNT(*) AS finding_count` + grouped + `) grouped_findings`
+	if err := d.QueryRow(countQuery, args...).Scan(&groupTotal, &findingTotal); err != nil {
+		return nil, 0, 0, err
+	}
+	if groupTotal == 0 || page > (groupTotal-1)/pageSize+1 {
+		return []FindingGroup{}, groupTotal, findingTotal, nil
+	}
+
+	order := "MAX(f.created_at) DESC, t.id DESC NULLS LAST"
+	if f.Sort == "severity" {
+		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC, MAX(f.created_at) DESC, t.id DESC NULLS LAST`
+	}
+	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
+	query := fmt.Sprintf(`SELECT t.id, COALESCE(t.description,''), COALESCE(
+		CASE
+			WHEN t.status IN ('done','failed','timeout') THEN t.status
+			WHEN t.queued THEN 'queued'
+			WHEN t.paused THEN 'paused'
+			ELSE t.status
+		END, ''),
+		COUNT(*),
+		COUNT(*) FILTER (WHERE f.severity='critical'),
+		COUNT(*) FILTER (WHERE f.severity='high'),
+		COUNT(*) FILTER (WHERE f.severity='medium'),
+		COUNT(*) FILTER (WHERE f.severity='low'),
+		MAX(f.created_at)%s
+		ORDER BY %s LIMIT $%d OFFSET $%d`, grouped, order, len(args)+1, len(args)+2)
+	rows, err := d.Query(query, pageArgs...)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	groups := []FindingGroup{}
+	for rows.Next() {
+		var group FindingGroup
+		var taskID sql.NullInt64
+		if err := rows.Scan(&taskID, &group.TaskDescription, &group.TaskStatus, &group.Count,
+			&group.Critical, &group.High, &group.Medium, &group.Low, &group.LastFoundAt); err != nil {
+			return nil, 0, 0, err
+		}
+		if taskID.Valid {
+			id := taskID.Int64
+			group.TaskID = &id
+		}
+		groups = append(groups, group)
+	}
+	return groups, groupTotal, findingTotal, rows.Err()
+}
+
+// ErrFindingOriginUnavailable means a retained finding no longer has a live
+// owning task and finding node from which a follow-up intent can be derived.
+var ErrFindingOriginUnavailable = errors.New("finding origin is no longer available")
+
+// AddFindingFollowUpIntent atomically creates a priority-10 human intent from a
+// live finding node, copies that finding's asset anchors, records the
+// finding --derived_from--> intent lineage edge, and persists its audit activity.
+// The returned activity is the committed row and can be broadcast as-is without
+// calling AppendActivity again.
+func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int64, description string, audit Activity) (int64, Activity, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, Activity{}, err
+	}
+	defer tx.Rollback()
+
+	var liveNodeID int64
+	err = tx.QueryRow(`SELECT n.id
+		FROM findings f
+		JOIN tasks t ON t.id=f.task_id
+		JOIN exploration_nodes n ON n.id=f.node_id AND n.exploration_id=t.exploration_id
+		WHERE f.id=$1 AND f.node_id=$2 AND t.exploration_id=$3 AND n.kind='finding'
+		FOR SHARE OF f, t, n`, findingID, findingNodeID, s.expID).Scan(&liveNodeID)
+	if err == sql.ErrNoRows {
+		return 0, Activity{}, ErrFindingOriginUnavailable
+	}
+	if err != nil {
+		return 0, Activity{}, err
+	}
+
+	anchors := []int64{}
+	anchorRows, err := tx.Query(`SELECT asset_id FROM exploration_anchors WHERE node_id=$1 ORDER BY asset_id`, liveNodeID)
+	if err != nil {
+		return 0, Activity{}, err
+	}
+	for anchorRows.Next() {
+		var assetID int64
+		if err := anchorRows.Scan(&assetID); err != nil {
+			anchorRows.Close()
+			return 0, Activity{}, err
+		}
+		anchors = append(anchors, assetID)
+	}
+	if err := anchorRows.Err(); err != nil {
+		anchorRows.Close()
+		return 0, Activity{}, err
+	}
+	if err := anchorRows.Close(); err != nil {
+		return 0, Activity{}, err
+	}
+
+	payload := map[string]any{
+		"summary":                description,
+		"source_finding_id":      findingID,
+		"source_finding_node_id": liveNodeID,
+	}
+	if len(anchors) > 0 {
+		payload["asset_ids"] = anchors
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, Activity{}, err
+	}
+	var intentID int64
+	if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
+		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, raw).Scan(&intentID); err != nil {
+		return 0, Activity{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id)
+		SELECT $1, asset_id FROM exploration_anchors WHERE node_id=$2
+		ON CONFLICT DO NOTHING`, intentID, liveNodeID); err != nil {
+		return 0, Activity{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id)
+		VALUES ($1,$2,$3,$4)`, s.expID, liveNodeID, RelDerivedFrom, intentID); err != nil {
+		return 0, Activity{}, err
+	}
+
+	audit.NodeID = &intentID
+	if summary := strings.TrimSpace(audit.Summary); summary != "" {
+		audit.Summary = fmt.Sprintf("%s #%d", summary, intentID)
+	} else {
+		audit.Summary = ""
+	}
+	metadata := audit.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	if err := tx.QueryRow(`
+INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14)
+RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8Clean(audit.Kind), utf8Clean(audit.Tool), utf8Clean(audit.ToolUseID), audit.IsError,
+		utf8Clean(audit.Summary), utf8Clean(audit.Detail), metadata, audit.InputTokens, audit.OutputTokens, audit.CacheReadTokens, audit.CacheWriteTokens).
+		Scan(&audit.ID, &audit.CreatedAt); err != nil {
+		return 0, Activity{}, err
+	}
+	audit.Metadata = metadata
+	if err := tx.Commit(); err != nil {
+		return 0, Activity{}, err
+	}
+	return intentID, audit, nil
 }
 
 // ListFindingsForExport returns findings for the 发现 page 导出功能，携带完整

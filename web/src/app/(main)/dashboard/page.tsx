@@ -10,7 +10,6 @@ import {
   BugIcon,
   ClockIcon,
   NetworkIcon,
-  PlusIcon,
   ShieldCheckIcon,
   TargetIcon,
   ZapIcon,
@@ -177,7 +176,7 @@ export default function DashboardPage() {
         /* transient errors — next poll retries */
       }
     };
-    load();
+    void load();
     const t = setInterval(load, 5000);
     return () => {
       alive = false;
@@ -213,7 +212,7 @@ export default function DashboardPage() {
         /* transient errors */
       }
     };
-    load();
+    void load();
     const t = setInterval(load, 15000);
     return () => {
       alive = false;
@@ -461,17 +460,11 @@ export default function DashboardPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 pb-6">
       {/* ── Header ── */}
-      <div className="flex items-center justify-between">
+      <div>
         <div>
           <h1 className="text-lg font-semibold tracking-tight">总览</h1>
           <p className="text-xs text-muted-foreground">系统全局状态 · 实时刷新</p>
         </div>
-        <Link href="/function/tasks">
-          <button className="flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background transition-opacity hover:opacity-90">
-            <PlusIcon className="size-3.5" />
-            新建任务
-          </button>
-        </Link>
       </div>
 
       {/* ── Row 1: 5 stat cards ── */}
@@ -575,6 +568,7 @@ export default function DashboardPage() {
                 ] as const
               ).map(({ v, label }) => (
                 <button
+                  type="button"
                   key={v}
                   onClick={() => setTokenVersion(v)}
                   title={
@@ -600,6 +594,7 @@ export default function DashboardPage() {
           {/* Profile tabs */}
           <div className="flex flex-wrap items-center gap-1">
             <button
+              type="button"
               onClick={() => setTokenTab("all")}
               className={cn(
                 "rounded-md px-2.5 py-1 text-[10px] font-medium transition-colors",
@@ -616,6 +611,7 @@ export default function DashboardPage() {
               const resolvedKey = tokenByProfile.has(key) ? key : p.is_default ? defaultProfileId : key;
               return (
                 <button
+                  type="button"
                   key={p.id}
                   onClick={() => setTokenTab(resolvedKey)}
                   className={cn(
@@ -745,6 +741,7 @@ export default function DashboardPage() {
                   ] as const
                 ).map(({ days, label }) => (
                   <button
+                    type="button"
                     key={days}
                     onClick={() => setTokenDays(days)}
                     className={cn(
@@ -993,7 +990,7 @@ export default function DashboardPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 tabular-nums">
-                      {(t.in_flight ?? 0 > 0) ? (
+                      {(t.in_flight ?? 0) > 0 ? (
                         <span className="font-semibold">{t.in_flight}</span>
                       ) : (
                         <span className="text-muted-foreground">—</span>

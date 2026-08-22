@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS assets (
                         'root_domain','ip','subdomain','app','service','endpoint'
                     )),
     company_id      BIGINT REFERENCES companies(id) ON DELETE SET NULL,
+    -- explicit: caller/user selected the company; scope: derived from company_scope.
+    -- Existing installations are conservatively migrated as explicit so a scope
+    -- rebuild can never erase a historical manual association.
+    company_source  TEXT NOT NULL DEFAULT 'explicit'
+                    CHECK (company_source IN ('explicit','scope')),
     task_ids        BIGINT[] NOT NULL DEFAULT '{}',
     domain          TEXT,
     root_domain     TEXT,
@@ -84,6 +89,13 @@ CREATE INDEX IF NOT EXISTS idx_av2_bound_domains ON assets USING GIN(bound_domai
 CREATE INDEX IF NOT EXISTS idx_av2_open_ports   ON assets USING GIN(open_ports)    WHERE type = 'ip';
 CREATE INDEX IF NOT EXISTS idx_av2_last_seen    ON assets(last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_av2_type_seen    ON assets(type, last_seen DESC);
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS company_source TEXT;
+UPDATE assets SET company_source = 'explicit' WHERE company_source IS NULL;
+ALTER TABLE assets ALTER COLUMN company_source SET DEFAULT 'explicit';
+ALTER TABLE assets ALTER COLUMN company_source SET NOT NULL;
+ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_company_source_check;
+ALTER TABLE assets ADD CONSTRAINT assets_company_source_check
+    CHECK (company_source IN ('explicit','scope'));
 DROP TRIGGER IF EXISTS trg_av2_upd ON assets;
 CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -91,17 +103,36 @@ CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
 CREATE TABLE IF NOT EXISTS company_scope (
     id         BIGSERIAL PRIMARY KEY,
     company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL CHECK (kind IN ('domain','ip','cidr')),
+    kind       TEXT NOT NULL CHECK (kind IN ('domain','ip','cidr','icp','keyword')),
     domain     TEXT,
     net        CIDR,
+    value      TEXT,
     raw        TEXT NOT NULL,
     reason     TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_sv2_domain UNIQUE (company_id, domain),
-    CONSTRAINT uq_sv2_net    UNIQUE (company_id, net)
+    CONSTRAINT uq_sv2_net    UNIQUE (company_id, net),
+    CONSTRAINT ck_company_scope_payload CHECK (
+        (kind = 'domain' AND domain IS NOT NULL AND net IS NULL AND value IS NULL)
+        OR (kind IN ('ip','cidr') AND domain IS NULL AND net IS NOT NULL AND value IS NULL)
+        OR (kind IN ('icp','keyword') AND domain IS NULL AND net IS NULL AND value IS NOT NULL)
+    )
+);
+-- Existing installations need the new text payload and expanded kind check.
+ALTER TABLE company_scope ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE company_scope DROP CONSTRAINT IF EXISTS company_scope_kind_check;
+ALTER TABLE company_scope ADD CONSTRAINT company_scope_kind_check
+    CHECK (kind IN ('domain','ip','cidr','icp','keyword'));
+ALTER TABLE company_scope DROP CONSTRAINT IF EXISTS ck_company_scope_payload;
+ALTER TABLE company_scope ADD CONSTRAINT ck_company_scope_payload CHECK (
+    (kind = 'domain' AND domain IS NOT NULL AND net IS NULL AND value IS NULL)
+    OR (kind IN ('ip','cidr') AND domain IS NULL AND net IS NOT NULL AND value IS NULL)
+    OR (kind IN ('icp','keyword') AND domain IS NULL AND net IS NULL AND value IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_sv2_domain  ON company_scope(domain)   WHERE kind = 'domain';
 CREATE INDEX IF NOT EXISTS idx_sv2_net     ON company_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sv2_value ON company_scope(company_id, kind, value) WHERE kind IN ('icp','keyword');
+CREATE INDEX IF NOT EXISTS idx_sv2_icp ON company_scope(value) WHERE kind = 'icp';
 CREATE INDEX IF NOT EXISTS idx_sv2_company ON company_scope(company_id);
 
 -- =====================================================================
@@ -301,6 +332,8 @@ CREATE TABLE IF NOT EXISTS tasks (
                      CHECK (status IN ('created','running','paused','done','failed','timeout')),
     paused         BOOLEAN NOT NULL DEFAULT false,
     queued         BOOLEAN NOT NULL DEFAULT false,
+    queued_at      TIMESTAMPTZ,
+    queue_mode     TEXT NOT NULL DEFAULT '',
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
     active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
     llm_chain_revision BIGINT NOT NULL DEFAULT 0,
@@ -324,8 +357,29 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
 -- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
+-- queued_at makes admission FIFO reflect the actual enqueue order rather than the
+-- task creation order. queue_mode distinguishes first bootstrap from resuming an
+-- exploration that already owns goals/history.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queue_mode TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+
+-- Reusable task description/goal presets. nkey is the normalized, case-insensitive
+-- identity used to reject visually equivalent duplicate names.
+CREATE TABLE IF NOT EXISTS task_templates (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    nkey        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL,
+    goal        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_templates_updated ON task_templates(updated_at DESC, id DESC);
+DROP TRIGGER IF EXISTS trg_task_templates_upd ON task_templates;
+CREATE TRIGGER trg_task_templates_upd BEFORE UPDATE ON task_templates
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- Direct, read-only task context inheritance. Relations are intentionally not
 -- recursive: a task sees only the source tasks explicitly chosen at creation.
@@ -573,10 +627,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     agent_key      TEXT NOT NULL,
     title          TEXT NOT NULL DEFAULT '',
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    pinned_at      TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_conversations_llm_profile ON conversations(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_pinned ON conversations(pinned_at DESC) WHERE pinned_at IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_conversations_upd ON conversations;
 CREATE TRIGGER trg_conversations_upd BEFORE UPDATE ON conversations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 )
 
 // testSetup opens a DB and returns both stores. Skips if no PG.
@@ -894,5 +895,54 @@ func TestNormalizeURL(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizeURL(%q): want %q, got %q", tc.raw, tc.want, got)
 		}
+	}
+}
+
+func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	taskID := stamp
+	marker := fmt.Sprintf("stable-page-%d", stamp)
+	sharedSeen := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
+	ids := make([]int64, 0, 5)
+	for i := 0; i < 5; i++ {
+		var id int64
+		domain := fmt.Sprintf("%s-%d.invalid", marker, i)
+		if err := d.QueryRow(`INSERT INTO assets(type,domain,root_domain,task_ids,last_seen)
+			VALUES ('root_domain',$1,$1,ARRAY[$2]::bigint[],$3) RETURNING id`,
+			domain, taskID, sharedSeen).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	defer func() { _, _ = d.Exec(`DELETE FROM assets WHERE id=ANY($1::bigint[])`, ids) }()
+
+	want := slices.Clone(ids)
+	slices.Reverse(want)
+	collect := func(query func(limit, offset int) ([]*Asset, error)) []int64 {
+		t.Helper()
+		var got []int64
+		for offset := 0; offset < len(ids); offset += 2 {
+			page, err := query(2, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, asset := range page {
+				got = append(got, asset.ID)
+			}
+		}
+		return got
+	}
+	if got := collect(func(limit, offset int) ([]*Asset, error) {
+		return assets.QueryByTask(taskID, "root_domain", limit, offset)
+	}); !slices.Equal(got, want) {
+		t.Fatalf("task pagination order=%v want=%v", got, want)
+	}
+	if got := collect(func(limit, offset int) ([]*Asset, error) {
+		return assets.QueryDSL(marker, "root_domain", limit, offset)
+	}); !slices.Equal(got, want) {
+		t.Fatalf("DSL pagination order=%v want=%v", got, want)
 	}
 }

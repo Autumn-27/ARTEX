@@ -33,14 +33,10 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	if seedFirstIntent {
 		s.seedFirstIntent(t)
 	}
-	if s.queueIfAtCapacity(t) {
-		s.engine.decInflight(t.ID)
-		return
+	s.engine.decInflight(t.ID)
+	if _, err := s.admitTask(t, "bootstrap"); err != nil {
+		log.Printf("[concurrency] task %s 启动失败: %v", t.ID, err)
 	}
-	go func() {
-		defer s.engine.decInflight(t.ID)
-		s.startTaskEngine(t)
-	}()
 }
 
 func (s *Server) startTaskEngine(t *Task) {
@@ -70,7 +66,21 @@ func (s *Server) startTaskEngine(t *Task) {
 }
 
 func (s *Server) occupiesConcurrencySlot(t *Task) bool {
-	return t != nil && !t.Queued && !t.Paused && !s.engine.IsPaused(t.ID) && !isTerminalStatus(t.Status)
+	if t == nil {
+		return false
+	}
+	lifecycle := t.lifecycleSnapshot()
+	if lifecycle.Queued || lifecycle.Paused || isTerminalStatus(lifecycle.Status) {
+		return false
+	}
+	// Deletion temporarily pauses the Engine but has not committed yet. Preserve
+	// the task's slot until PostgreSQL deletion succeeds; otherwise FIFO promotion
+	// during the drain window could over-admit if deletion later aborts and the
+	// persisted running task is restored.
+	if s.engine.IsDeleting(t.ID) {
+		return true
+	}
+	return !s.engine.IsPaused(t.ID) && (s.engine.ReadyFor(t) || s.engine.ActiveLLMCalls(t.ID) > 0)
 }
 
 func (s *Server) runningTaskCount(excludeID string) int {
@@ -83,58 +93,255 @@ func (s *Server) runningTaskCount(excludeID string) int {
 	return count
 }
 
-func (s *Server) queueIfAtCapacity(t *Task) bool {
+// admitTask is the single admission path for new, resumed, rerun and follow-up
+// work. It atomically either starts the task or appends it to the persistent FIFO
+// queue. mode is bootstrap for a freshly-created task and resume otherwise.
+func (s *Server) admitTask(t *Task, mode string) (queued bool, err error) {
+	return s.admitTaskWhen(t, mode, false)
+}
+
+// admitPausedTask is the task-control resume path. The paused precondition is
+// checked under the same scheduler lock as admission so a concurrent pause,
+// dequeue or FIFO promotion cannot leave database and Engine state divergent.
+func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
+	return s.admitTaskWhen(t, "resume", true)
+}
+
+func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+	if t == nil {
+		return false, fmt.Errorf("task not found")
+	}
+	if mode != "bootstrap" {
+		mode = "resume"
+	}
 	s.concMu.Lock()
 	defer s.concMu.Unlock()
+	// Delete installs its barrier under concMu as well. Re-resolve after acquiring
+	// the lock so a request that captured a task pointer before successful deletion
+	// cannot revive that stale handle after StopTask clears its Engine maps.
+	current, exists := s.m.Task(t.ID)
+	if !exists || current != t || s.engine.IsDeleting(t.ID) {
+		return false, fmt.Errorf("task is being deleted")
+	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		return false, fmt.Errorf("task is being deleted")
+	}
+	defer s.engine.decInflight(t.ID)
+	lifecycle := t.lifecycleSnapshot()
+	if requirePaused {
+		if isTerminalStatus(lifecycle.Status) {
+			return false, fmt.Errorf("终态任务不能执行继续")
+		}
+		if !lifecycle.Paused {
+			return false, fmt.Errorf("仅已暂停的任务可以继续")
+		}
+		mode = s.resumeAdmissionMode(t)
+	}
+	wasTerminal := isTerminalStatus(lifecycle.Status)
+	wasPaused := lifecycle.Paused || s.engine.IsPaused(t.ID)
+	wasQueued := lifecycle.Queued
+	engineWasPaused := s.engine.IsPaused(t.ID)
 	enabled, limit := s.m.ConcurrencyLimit()
-	if !enabled || s.runningTaskCount(t.ID) < limit {
-		return false
+	ready := s.engine.ReadyFor(t)
+
+	// Work added to a task that is already admitted only needs a wake-up. This
+	// matters when the configured limit was lowered below the current running
+	// count: an existing task must not suddenly mark itself queued while its
+	// planner/workers are still live. Still compare-and-commit the persisted
+	// status: a concurrent terminal transition must win instead of being silently
+	// reported as a successful follow-up admission.
+	if !wasTerminal && !wasPaused && !wasQueued && s.engine.Started(t.ID) && (!enabled || ready) {
+		if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, lifecycle.Status, false, "resume", false); err != nil {
+			return false, err
+		}
+		s.startAdmittedTask(t, "resume")
+		return false, nil
 	}
-	if err := s.m.SetTaskQueued(t.ID, true); err != nil {
-		log.Printf("[concurrency] task %s 置排队失败: %v", t.ID, err)
-		return false
+
+	// Preserve the original first-run mode across repeated admissions. Legacy
+	// queued rows have an empty queue_mode, so infer bootstrap from their graph.
+	if wasQueued {
+		switch lifecycle.QueueMode {
+		case "bootstrap":
+			mode = "bootstrap"
+		case "":
+			mode = s.resumeAdmissionMode(t)
+		}
 	}
-	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-		Summary: fmt.Sprintf("已排队：达到并发上限 %d，等待空位后自动开始", limit)})
-	return true
+
+	readyBacklog := enabled && s.hasReadyQueuedTask(t.ID)
+	atCapacity := enabled && s.runningTaskCount(t.ID) >= limit
+	shouldQueue := enabled && (!ready || readyBacklog || atCapacity)
+
+	// Install the execution barrier before reviving a terminal/paused task. Without
+	// this ordering, its already-running worker loops can claim the newly-opened
+	// intent in the gap between status=running and queued=true.
+	if shouldQueue || wasTerminal || wasPaused || wasQueued {
+		s.engine.Pause(t.ID, agent.Causef("queued_for_admission", "任务等待运行准入",
+			"任务正在等待并发队列或准入状态提交，本次执行已停止；只有获得运行槽后才会重新领取意图"))
+	}
+
+	status := lifecycle.Status
+	if wasTerminal {
+		status = "running"
+	}
+	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+		if !engineWasPaused && !wasPaused && !wasQueued {
+			s.engine.Resume(t)
+		}
+		return false, err
+	}
+	if lifecycle.Status == "timeout" && status == "running" {
+		// ApplyTaskAdmission reset this timed-out run's persisted clock. Clear the
+		// matching Engine gates before either parking it in FIFO or starting work;
+		// otherwise the old settling flag would make every worker skip forever.
+		s.engine.resetTimeoutRevival(t.ID)
+	}
+	if shouldQueue {
+		if !wasQueued {
+			summary := fmt.Sprintf("已排队：达到并发上限 %d，等待空位后自动开始", limit)
+			switch {
+			case !ready:
+				summary = "已排队：当前没有可运行的 LLM 配置，配置恢复后自动开始"
+			case readyBacklog:
+				summary = "已排队：已有更早的任务等待运行，将按 FIFO 顺序自动开始"
+			}
+			s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
+		}
+		return true, nil
+	}
+	s.startAdmittedTask(t, mode)
+	return false, nil
+}
+
+func (s *Server) hasReadyQueuedTask(excludeID string) bool {
+	for _, task := range s.m.List() {
+		lifecycle := task.lifecycleSnapshot()
+		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) startAdmittedTask(t *Task, mode string) {
+	if mode == "bootstrap" {
+		if !s.engine.beginTaskOperation(t.ID) {
+			return
+		}
+		// A first-run task may have kept the Engine pause barrier while waiting
+		// in the concurrency queue. Clear it only after operation admission, or
+		// startTaskEngine's first execContextFor call would return a cancelled
+		// context and silently strand the dequeued task.
+		if s.engine.IsPaused(t.ID) {
+			s.engine.Resume(t)
+		}
+		go func() {
+			defer s.engine.decInflight(t.ID)
+			s.startTaskEngine(t)
+		}()
+		return
+	}
+	s.engine.Run(s.ctx, t)
+	s.engine.Resume(t)
+	// Run returns early for an already-started task. Explicitly ensure a timeout
+	// coordinator exists after resume; resetTimeoutRevival cleared the completed
+	// coordinator's marker and the next real call will stamp a fresh deadline.
+	s.engine.startDeadlineCoordinator(s.ctx, t)
 }
 
 func (s *Server) reconcileConcurrency() {
 	s.concMu.Lock()
 	defer s.concMu.Unlock()
-	queued := []*Task{}
-	for _, task := range s.m.List() {
-		if task.Queued && !isTerminalStatus(task.Status) {
-			queued = append(queued, task)
+	enabled, limit := s.m.ConcurrencyLimit()
+
+	// A task whose provider chain becomes unavailable cannot do useful work and
+	// must not reserve a limited running slot forever. Park it persistently so a
+	// later profile edit/recovery can re-enter through the same FIFO path.
+	if enabled {
+		for _, task := range s.m.List() {
+			lifecycle := task.lifecycleSnapshot()
+			if lifecycle.Queued || lifecycle.Paused || s.engine.IsPaused(task.ID) || s.engine.IsDeleting(task.ID) ||
+				isTerminalStatus(lifecycle.Status) || s.engine.ReadyFor(task) || s.engine.ActiveLLMCalls(task.ID) > 0 {
+				continue
+			}
+			mode := s.resumeAdmissionMode(task)
+			s.engine.Pause(task.ID, agent.Causef("llm_unavailable_queued", "LLM 不可用，任务进入等待队列",
+				"任务当前无法解析可运行的 Planner/Worker LLM，已释放并发槽；配置恢复后按队列顺序继续"))
+			if err := s.m.EnqueueTask(task.ID, mode); err != nil {
+				s.engine.Resume(task)
+				log.Printf("[concurrency] task %s 因 LLM 不可用入队失败: %v", task.ID, err)
+				continue
+			}
+			s.engine.emitActivity(task, db.Activity{Worker: "system", Kind: "text",
+				Summary: "已排队：当前没有可运行的 LLM 配置，配置恢复后自动开始"})
 		}
 	}
-	sort.Slice(queued, func(i, j int) bool { return queued[i].CreatedAt < queued[j].CreatedAt })
-	enabled, limit := s.m.ConcurrencyLimit()
+
+	type queuedTask struct {
+		task      *Task
+		lifecycle taskLifecycleState
+	}
+	queued := []queuedTask{}
+	for _, task := range s.m.List() {
+		lifecycle := task.lifecycleSnapshot()
+		if lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
+			queued = append(queued, queuedTask{task: task, lifecycle: lifecycle})
+		}
+	}
+	sort.SliceStable(queued, func(i, j int) bool {
+		left, right := queued[i].lifecycle.QueuedAt, queued[j].lifecycle.QueuedAt
+		if left == 0 {
+			left = queued[i].task.CreatedAt * int64(1e9)
+		}
+		if right == 0 {
+			right = queued[j].task.CreatedAt * int64(1e9)
+		}
+		if left != right {
+			return left < right
+		}
+		// Old rows may not have queued_at and task creation timestamps are only
+		// kept to second precision in memory. Task ids are monotonic, providing a
+		// deterministic oldest-first fallback for those ties.
+		leftID, leftErr := strconv.ParseInt(queued[i].task.ID, 10, 64)
+		rightID, rightErr := strconv.ParseInt(queued[j].task.ID, 10, 64)
+		if leftErr == nil && rightErr == nil {
+			return leftID < rightID
+		}
+		return queued[i].task.ID < queued[j].task.ID
+	})
 	slots := len(queued)
 	if enabled {
 		slots = limit - s.runningTaskCount("")
 	}
-	for _, task := range queued {
+	for _, entry := range queued {
 		if slots <= 0 {
 			break
 		}
+		task := entry.task
+		lifecycle := task.lifecycleSnapshot()
 		// Keep FIFO order, but do not consume a concurrency slot for a task
 		// whose explicit chain/global provider is unavailable. It will be retried
 		// after the user configures or resets its LLM chain.
-		if task.Paused || !s.engine.ReadyFor(task) {
+		if lifecycle.Paused || (enabled && !s.engine.ReadyFor(task)) {
 			continue
+		}
+		mode := lifecycle.QueueMode
+		if mode != "bootstrap" && mode != "resume" {
+			mode = s.resumeAdmissionMode(task)
+		}
+		if mode != "bootstrap" {
+			mode = "resume"
 		}
 		if !s.engine.beginTaskOperation(task.ID) {
 			continue
 		}
-		if err := s.m.SetTaskQueued(task.ID, false); err != nil {
+		if err := s.m.ApplyTaskAdmission(task.ID, lifecycle.Status, lifecycle.Status, false, mode, false); err != nil {
 			s.engine.decInflight(task.ID)
 			continue
 		}
-		go func(t *Task) {
-			defer s.engine.decInflight(t.ID)
-			s.startTaskEngine(t)
-		}(task)
+		s.startAdmittedTask(task, mode)
+		s.engine.decInflight(task.ID)
 		slots--
 	}
 }
@@ -149,25 +356,8 @@ func (s *Server) reviveTask(t *Task) {
 	if t == nil {
 		return
 	}
-	if t.Queued {
-		return
-	}
-	// 终态 → 拉回 running(SetTaskStatus 会清 completed_at 并同步内存 handle 的 Status,
-	// 使 planner/worker 循环的终态门放行)。
-	if isTerminalStatus(t.Status) {
-		if err := s.m.SetTaskStatus(t.ID, "running"); err != nil {
-			log.Printf("[revive] task %s 置 running 失败: %v", t.ID, err)
-		}
-	}
-	// 确保引擎循环存活:已 started 只会 Notify;未 started(重启后未恢复的终态任务)则重起循环。
-	s.engine.Run(s.ctx, t)
-	// 暂停中 → 解除暂停(清引擎内存态 + Notify),并持久化 paused=false(存活过重启)。
-	if t.Paused || s.engine.IsPaused(t.ID) {
-		s.engine.Resume(t)
-		t.Paused = false
-		if err := s.m.SetTaskPaused(t.ID, false); err != nil {
-			log.Printf("[revive] task %s 解除暂停失败: %v", t.ID, err)
-		}
+	if _, err := s.admitTask(t, "resume"); err != nil {
+		log.Printf("[revive] task %s 恢复失败: %v", t.ID, err)
 	}
 }
 

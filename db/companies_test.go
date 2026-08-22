@@ -1,7 +1,11 @@
 package db
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // cleanup helpers to remove test data
@@ -54,6 +58,70 @@ func TestCompanyUpsertAndGet(t *testing.T) {
 	}
 	if c2.ID != id {
 		t.Errorf("GetCompanyByName id mismatch: %d vs %d", c2.ID, id)
+	}
+}
+
+func TestCreateCompanyWithScopeRejectsNormalizedDuplicate(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v)", err)
+	}
+	defer d.Close()
+	cs := d.Companies()
+
+	stamp := time.Now().UnixNano()
+	name := fmt.Sprintf("Strict Company %d", stamp)
+	id, added, _, _, validationErrors, err := cs.CreateCompanyWithScope(name, "", []ScopeInput{
+		{Kind: "domain", Value: fmt.Sprintf("strict-%d.example", stamp)},
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupCompany(d, id)
+	if added != 1 || len(validationErrors) != 0 {
+		t.Fatalf("initial scope: added=%d errors=%v", added, validationErrors)
+	}
+
+	_, _, _, _, _, err = cs.CreateCompanyWithScope(
+		"  "+strings.ToUpper(strings.ReplaceAll(name, " ", "   "))+"  ",
+		"",
+		[]ScopeInput{{Kind: "domain", Value: fmt.Sprintf("replacement-%d.example", stamp)}},
+		"test",
+	)
+	if !errors.Is(err, ErrCompanyNameConflict) {
+		t.Fatalf("duplicate create error=%v want ErrCompanyNameConflict", err)
+	}
+	scope, err := cs.GetScope(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].Domain != fmt.Sprintf("strict-%d.example", stamp) {
+		t.Fatalf("duplicate create changed existing scope: %+v", scope)
+	}
+}
+
+func TestCreateCompanyWithScopeRollsBackOnScopeWriteFailure(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v)", err)
+	}
+	defer d.Close()
+	cs := d.Companies()
+
+	name := fmt.Sprintf("Atomic Create %d", time.Now().UnixNano())
+	_, _, _, _, _, err = cs.CreateCompanyWithScope(name, "", []ScopeInput{
+		{Kind: "keyword", Value: "invalid\x00postgres-text"},
+	}, "test")
+	if err == nil {
+		t.Fatal("expected scope database write to fail")
+	}
+	company, getErr := cs.GetCompanyByName(name)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if company != nil {
+		defer cleanupCompany(d, company.ID)
+		t.Fatalf("company row survived failed initial scope transaction: %+v", company)
 	}
 }
 
@@ -187,6 +255,58 @@ func TestUpdateScope(t *testing.T) {
 	if len(scope) != 1 || scope[0].Domain != "new-domain.com" {
 		t.Errorf("UpdateScope: expected new-domain.com only, got %+v", scope)
 	}
+
+	// Invalid replacement input must not turn a partial validation response into
+	// a destructive replacement of the existing rules.
+	added, invalid, validationErrors, err := cs.UpdateScopeInputsChecked(id, []ScopeInput{
+		{Kind: "domain", Value: "co.uk"},
+	}, "invalid replacement")
+	var validationErr *CompanyScopeValidationError
+	if added != 0 || invalid != 1 || len(validationErrors) != 1 || !errors.As(err, &validationErr) {
+		t.Fatalf("invalid replacement: added=%d invalid=%d validation=%v err=%v", added, invalid, validationErrors, err)
+	}
+	scope, err = cs.GetScope(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].Domain != "new-domain.com" {
+		t.Fatalf("invalid replacement changed existing scope: %+v", scope)
+	}
+}
+
+func TestUpdateScopeRollsBackOnInsertFailure(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v)", err)
+	}
+	defer d.Close()
+	cs := d.Companies()
+
+	name := fmt.Sprintf("Atomic Scope Update %d", time.Now().UnixNano())
+	id, _, err := cs.UpsertCompany(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupCompany(d, id)
+	oldDomain := fmt.Sprintf("old-%d.example", time.Now().UnixNano())
+	added, _, invalid, addErrors := cs.AddScopeInputs(id, []ScopeInput{{Kind: "domain", Value: oldDomain}}, "initial")
+	if added != 1 || invalid != 0 || len(addErrors) != 0 {
+		t.Fatalf("seed scope: added=%d invalid=%d errors=%v", added, invalid, addErrors)
+	}
+
+	added, invalid, updateErrors := cs.UpdateScopeInputs(id, []ScopeInput{
+		{Kind: "keyword", Value: "invalid\x00postgres-text"},
+	}, "replacement")
+	if added != 0 || invalid != 0 || len(updateErrors) == 0 {
+		t.Fatalf("failed update result: added=%d invalid=%d errors=%v", added, invalid, updateErrors)
+	}
+	scope, err := cs.GetScope(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) != 1 || scope[0].Domain != oldDomain {
+		t.Fatalf("failed replacement did not preserve old scope: %+v", scope)
+	}
 }
 
 func TestDeleteCompany(t *testing.T) {
@@ -214,6 +334,53 @@ func TestDeleteCompany(t *testing.T) {
 	scope, _ := cs.GetScope(id)
 	if len(scope) != 0 {
 		t.Errorf("expected scope cascade-deleted, got %d rules", len(scope))
+	}
+}
+
+func TestDeleteCompanyWithAssetsDeletesBoth(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v)", err)
+	}
+	defer d.Close()
+	cs := d.Companies()
+
+	stamp := time.Now().UnixNano()
+	id, _, err := cs.UpsertCompany(fmt.Sprintf("Delete Assets Company %d", stamp), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupCompany(d, id)
+	var assetID int64
+	domain := fmt.Sprintf("delete-assets-%d.example", stamp)
+	if err := d.QueryRow(`
+INSERT INTO assets(type, domain, root_domain, company_id, company_source)
+VALUES ('root_domain', $1, $1, $2, 'explicit')
+RETURNING id`, domain, id).Scan(&assetID); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM assets WHERE id = $1`, assetID) //nolint:errcheck
+
+	deleted, err := cs.DeleteCompanyWithAssets(id, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("assets deleted=%d want 1", deleted)
+	}
+	company, err := cs.GetCompany(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if company != nil {
+		t.Fatalf("company still exists: %+v", company)
+	}
+	var assetsRemaining int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM assets WHERE id = $1`, assetID).Scan(&assetsRemaining); err != nil {
+		t.Fatal(err)
+	}
+	if assetsRemaining != 0 {
+		t.Fatalf("asset %d survived company deletion", assetID)
 	}
 }
 

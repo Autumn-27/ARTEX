@@ -293,14 +293,14 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 func (t *ToolSet) addCompanyScope() actool.CoreTool {
 	return writeTool(
 		"add_company_scope",
-		"把根域名/IP/IP段(CIDR)加入某公司的【资产范围】——加入后系统自动认领所有命中的资产(现有+未来)。\n"+
+		"把域名/IP/CIDR/ICP备案/企业关键词加入某公司的【资产范围】——域名、网络和ICP会自动认领命中的资产，关键词只提供给Agent作为范围提示。\n"+
 			"公司名唯一：company 不存在则新建，已存在则复用(只把范围并进去)。\n"+
-			"scope 一行一条，支持：根域名 / 单个 IP / CIDR 网段(如 1.2.3.0/24)。\n"+
+			"scope 一行一条，系统自动识别：根域名 / URL / 单个 IP / CIDR 网段 / ICP备案 / 企业关键词。\n"+
 			"务必给 reason 说明归属依据(whois/证书/ASN 等)。\n"+
-			"护栏：拒绝裸 TLD 与过宽网段(IPv4<=/16、IPv6<=/32)，非法行会被跳过并在 errors 返回。",
+			"护栏：拒绝裸 TLD 与过宽网段(IPv4前缀需为/16-/32、IPv6前缀需为/32-/128)，非法行会被跳过并在 errors 返回。",
 		obj(map[string]any{
 			"company": str("公司名(不存在则新建、存在则复用；名称唯一)"),
-			"scope":   str("资产范围，一行一条：根域名 / IP / CIDR"),
+			"scope":   str("资产范围，一行一条：域名 / URL / IP / CIDR / ICP备案 / 企业关键词"),
 			"reason":  str("归属依据(证据/来源)，务必填写"),
 			"logo":    str("公司图标 URL(可选；仅新建公司时生效)"),
 		}, "company", "scope"),

@@ -302,11 +302,13 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 				TaskID string `json:"task_id"`
 			}
 			_ = json.Unmarshal(in, &a)
-			if _, ok := s.m.Task(a.TaskID); !ok {
+			t, ok := s.m.Task(a.TaskID)
+			if !ok {
 				return actool.Errorf("task 不存在: " + a.TaskID), nil
 			}
-			s.engine.Pause(a.TaskID, agent.AbortPausedByOrchestrator)
-			s.cancelTaskChat(a.TaskID, agent.AbortChatPausedWithTask)
+			if _, err := s.applyTaskControlWithCause(t, "pause", agent.AbortPausedByOrchestrator); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			return actool.Text("task paused: " + a.TaskID), nil
 		})
 }
@@ -416,10 +418,11 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 
 // deriveTaskStatus mirrors listTasks' status derivation for the list_tasks tool.
 func (s *Server) deriveTaskStatus(t *Task) string {
+	lifecycle := t.lifecycleSnapshot()
 	switch {
-	case isTerminalStatus(t.Status):
-		return t.Status
-	case t.Paused || s.engine.IsPaused(t.ID):
+	case isTerminalStatus(lifecycle.Status):
+		return lifecycle.Status
+	case lifecycle.Paused || s.engine.IsPaused(t.ID):
 		return "paused"
 	case s.engine.ReadyFor(t) && s.engine.Started(t.ID):
 		return "running"

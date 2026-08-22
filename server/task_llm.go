@@ -99,6 +99,12 @@ type taskLLMStreamHooks struct {
 	transition func(taskLLMSelection, db.TaskLLMTransition, error)
 }
 
+// current resolves the provider this role runs on, by precedence:
+// Agent 绑定 → 任务 LLM 配置链 → 全局/环境配置。
+// 绑定优先于任务链：某个角色被显式指定了模型，就一直跑在那个模型上；绑定不存在或
+// 构建失败时才降级到任务链，任务链为空时再降级到全局配置。
+// 返回的 profile id 只有走任务链时才非零 —— streamTaskLLM 以此判断额度错误是否
+// 应该推进任务的故障转移状态（绑定/全局路径不改任务链状态，沿用既有语义）。
 func (r *taskLLMRuntime) current() (*Task, int64, int64, llm.Provider, error) {
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
@@ -113,21 +119,24 @@ func (r *taskLLMRuntime) current() (*Task, int64, int64, llm.Provider, error) {
 	}
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
-	if len(pt.LLMProfileIDs) == 0 {
-		prov, _, ok := r.s.fallbackProviderForAgent(r.agentKey)
-		if !ok {
-			return t, 0, pt.LLMChainRevision, nil, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
-		}
+	if prov, _, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		return t, 0, pt.LLMChainRevision, prov, nil
 	}
-	if pt.ActiveLLMProfileID == nil {
-		return t, 0, pt.LLMChainRevision, nil, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
+	if len(pt.LLMProfileIDs) > 0 {
+		if pt.ActiveLLMProfileID == nil {
+			return t, 0, pt.LLMChainRevision, nil, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
+		}
+		prov, _, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID)
+		if !ok {
+			return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, nil, fmt.Errorf("LLM profile #%d is missing or invalid", *pt.ActiveLLMProfileID)
+		}
+		return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, prov, nil
 	}
-	prov, _, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID)
+	prov, _, ok := r.s.globalProvider()
 	if !ok {
-		return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, nil, fmt.Errorf("LLM profile #%d is missing or invalid", *pt.ActiveLLMProfileID)
+		return t, 0, pt.LLMChainRevision, nil, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
 	}
-	return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, prov, nil
+	return t, 0, pt.LLMChainRevision, prov, nil
 }
 
 func parseTaskID(id string) (int64, error) {
@@ -253,7 +262,12 @@ func streamEventCommitsOutput(event llm.StreamEvent) bool {
 	}
 }
 
+// CompactionWindow mirrors current()'s precedence so the context window always
+// matches the provider the role will actually stream on.
 func (r *taskLLMRuntime) CompactionWindow() int {
+	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
+		return cfg.CompactionWindow()
+	}
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
 		return (agent.Config{}).CompactionWindow()
@@ -263,7 +277,7 @@ func (r *taskLLMRuntime) CompactionWindow() int {
 		return (agent.Config{}).CompactionWindow()
 	}
 	if len(chain) == 0 {
-		if _, cfg, ok := r.s.fallbackProviderForAgent(r.agentKey); ok {
+		if _, cfg, ok := r.s.globalProvider(); ok {
 			return cfg.CompactionWindow()
 		}
 		return (agent.Config{}).CompactionWindow()
@@ -283,15 +297,27 @@ func (r *taskLLMRuntime) CompactionWindow() int {
 	return minimum
 }
 
-// fallbackProviderForAgent resolves the pre-existing precedence used by tasks
-// without an explicit chain: the Agent's saved binding first, then the current
-// global provider (which may come from the default profile or environment).
-func (s *Server) fallbackProviderForAgent(agentKey string) (llm.Provider, agent.Config, bool) {
-	if id := s.effectiveProfileForAgent(agentKey, nil); id != nil {
-		if prov, cfg, ok := s.providerForProfile(*id); ok {
-			return s.poolForBinding(*id, prov, cfg), cfg, true
-		}
+// agentBindingProvider resolves the profile a role is explicitly bound to
+// (agents.llm_profile_id) — the highest-precedence level for task agents. ok=false
+// when the role has no binding or the bound profile no longer builds, so callers
+// fall through to the task chain. A bound profile stays exclusive unless
+// llm_pool_bind_fallback is on, which is what poolForBinding encodes.
+func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Config, bool) {
+	id := s.effectiveProfileForAgent(agentKey, nil)
+	if id == nil {
+		return nil, agent.Config{}, false
 	}
+	prov, cfg, ok := s.providerForProfile(*id)
+	if !ok {
+		return nil, agent.Config{}, false
+	}
+	return s.poolForBinding(*id, prov, cfg), cfg, true
+}
+
+// globalProvider returns the process-wide provider (persisted active profile or
+// environment config) — the last resort once a role has neither a binding nor a
+// task chain.
+func (s *Server) globalProvider() (llm.Provider, agent.Config, bool) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	if !s.llmOn || s.llmProv == nil {
@@ -300,30 +326,32 @@ func (s *Server) fallbackProviderForAgent(agentKey string) (llm.Provider, agent.
 	return s.llmProv, s.llmCfg, true
 }
 
+// taskRuntimeAvailable reports whether every listed role can resolve a provider
+// under the runtime precedence in current(): the role's own binding first, then
+// the task chain, then global. An exhausted chain is a hard stop for unbound
+// roles rather than a silent fall through to global — same as current().
 func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
-	if t == nil {
+	if t == nil || len(agentKeys) == 0 {
 		return false
 	}
 	state := t.llmStateSnapshot()
+	unboundReady := false
 	if len(state.ProfileIDs) > 0 {
-		if state.ActiveID == nil {
-			return false
+		if state.ActiveID != nil {
+			_, _, unboundReady = s.providerForProfile(*state.ActiveID)
 		}
-		_, _, ok := s.providerForProfile(*state.ActiveID)
-		return ok
-	}
-	s.cfgMu.Lock()
-	globallyReady := s.llmOn && s.llmProv != nil
-	s.cfgMu.Unlock()
-	if globallyReady {
-		return true
+	} else {
+		_, _, unboundReady = s.globalProvider()
 	}
 	for _, key := range agentKeys {
-		if _, _, ok := s.fallbackProviderForAgent(key); !ok {
+		if _, _, ok := s.agentBindingProvider(key); ok {
+			continue
+		}
+		if !unboundReady {
 			return false
 		}
 	}
-	return len(agentKeys) > 0
+	return true
 }
 
 func (s *Server) invalidateTaskAgents() {
@@ -375,7 +403,7 @@ func (s *Server) syncTaskLLMState(pt *db.Task) {
 	id := fmt.Sprintf("%d", pt.ID)
 	s.m.mu.Lock()
 	if task := s.m.tasks[id]; task != nil {
-		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
 	}
 	s.m.mu.Unlock()
 }

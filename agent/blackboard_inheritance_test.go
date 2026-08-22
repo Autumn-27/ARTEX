@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
@@ -21,6 +22,73 @@ func callReadJSON(t *testing.T, tool actool.CoreTool, input string) any {
 		t.Fatalf("decode tool result: %v; raw=%s", err, result.Flatten())
 	}
 	return out
+}
+
+func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+
+	companies := d.Companies()
+	companyID, _, err := companies.UpsertCompany(fmt.Sprintf("overview-scope-%d", time.Now().UnixNano()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = companies.DeleteCompany(companyID) })
+
+	domain := fmt.Sprintf("overview-scope-%d.invalid", companyID)
+	ip := fmt.Sprintf("2001:db8:%x::42", companyID%0xffff)
+	cidr := fmt.Sprintf("2001:db8:%x:1::/64", companyID%0xffff)
+	icp := fmt.Sprintf("京 ICP 备 %d 号", companyID)
+	keyword := fmt.Sprintf("Scope Company %d", companyID)
+	inputs := []db.ScopeInput{
+		{Kind: "domain", Value: domain},
+		{Kind: "ip", Value: ip},
+		{Kind: "cidr", Value: cidr},
+		{Kind: "icp", Value: icp},
+		{Kind: "keyword", Value: keyword},
+	}
+	added, skipped, invalid, scopeErrors := companies.AddScopeInputs(companyID, inputs, "task context test")
+	if added != len(inputs) || skipped != 0 || invalid != 0 || len(scopeErrors) != 0 {
+		t.Fatalf("add company scope: added=%d skipped=%d invalid=%d errors=%v", added, skipped, invalid, scopeErrors)
+	}
+
+	task, err := d.CreateTaskWithOptions("company context", "read configured scope", db.TaskCreateOptions{
+		CompanyIDs: []int64{companyID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
+	tools.SetTaskID(task.ID)
+	tools.SetAssetStore(d.Assets(), companies)
+	overview := tools.graphOverviewData()
+	coverage, ok := overview["coverage"].(map[string]any)
+	if !ok {
+		t.Fatalf("coverage missing: %#v", overview["coverage"])
+	}
+	scopeRows, ok := coverage["scope"].([]map[string]any)
+	if !ok || len(scopeRows) != 1 {
+		t.Fatalf("task scope missing: %#v", coverage["scope"])
+	}
+	companyScope, ok := scopeRows[0]["company_scope"].([]map[string]any)
+	if !ok || len(companyScope) != len(inputs) {
+		t.Fatalf("company scope not expanded: %#v", scopeRows[0])
+	}
+	kinds := make(map[string]string, len(companyScope))
+	for _, rule := range companyScope {
+		kinds[fmt.Sprint(rule["kind"])] = fmt.Sprint(rule["value"])
+	}
+	for _, input := range inputs {
+		if kinds[input.Kind] != input.Value {
+			t.Errorf("scope %s=%q want %q", input.Kind, kinds[input.Kind], input.Value)
+		}
+	}
+	keywords, ok := scopeRows[0]["company_keywords"].([]string)
+	if !ok || len(keywords) != 1 || keywords[0] != keyword {
+		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
+	}
 }
 
 func TestBlackboardToolsReadDirectSources(t *testing.T) {
@@ -125,7 +193,15 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 	if related[0]["source_task_id"] != source.ID || related[0]["inherited"] != true {
 		t.Fatalf("related source provenance: %#v", related[0])
 	}
-	if facts, ok := related[0]["recent_facts"].([]map[string]any); !ok || len(facts) == 0 || facts[0]["id"] != sourceFact {
+	recentFacts, ok := related[0]["recent_facts"].([]map[string]any)
+	foundSourceFact := false
+	for _, fact := range recentFacts {
+		if fact["id"] == sourceFact {
+			foundSourceFact = true
+			break
+		}
+	}
+	if !ok || !foundSourceFact {
 		t.Fatalf("related fact summary: %#v", related[0]["recent_facts"])
 	}
 	if findings, ok := related[0]["recent_findings"].([]map[string]any); !ok || len(findings) == 0 || findings[0]["id"] != sourceFinding {
