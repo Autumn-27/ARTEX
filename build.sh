@@ -13,7 +13,7 @@
 #   ARTEX_OUTPUT_DIR=dist             Directory for default binary paths.
 #   ARTEX_PACKAGE=1                   Create a zip archive for each target.
 #   ARTEX_PACKAGE_DIR=dist            Directory for release archives.
-#   ARTEX_COMPRESS=auto               UPX mode: auto, required, or 0/off.
+#   ARTEX_COMPRESS=off                UPX mode: off, auto, or required.
 #   ARTEX_UPX_ARGS="--best --lzma"    Arguments passed to UPX.
 #   ARTEX_SKIP_FRONTEND=1             Reuse server/webui/dist (for CI artifact builds).
 #   ARTEX_SKIP_NPM_CI=1               Skip npm ci while rebuilding the frontend.
@@ -37,7 +37,8 @@ usage() {
 选项：
   --release              构建 Linux、macOS、Windows 的 amd64/arm64 目标并生成 zip
   --target OS/ARCH       设置单个目标，例如 windows/amd64
-  --no-compress          不使用 UPX，仅保留 Go linker 压缩
+  --upx                  强制使用 UPX 压缩二进制（可能影响部分 Linux 环境兼容性）
+  --no-compress          不使用 UPX，仅使用 Go linker 裁剪并压缩 zip
   --help                 显示帮助
 
 多目标列表可通过 ARTEX_TARGETS 覆盖，例如：
@@ -47,7 +48,7 @@ EOF
 
 RELEASE_TARGETS_DEFAULT="linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64"
 ARTEX_RELEASE="${ARTEX_RELEASE:-0}"
-ARTEX_COMPRESS="${ARTEX_COMPRESS:-auto}"
+ARTEX_COMPRESS="${ARTEX_COMPRESS:-off}"
 ARTEX_PACKAGE="${ARTEX_PACKAGE:-0}"
 
 while [ "$#" -gt 0 ]; do
@@ -72,6 +73,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-compress)
       ARTEX_COMPRESS=0
+      shift
+      ;;
+    --upx)
+      ARTEX_COMPRESS=required
       shift
       ;;
     --help|-h)
@@ -124,7 +129,7 @@ compress_binary() {
       return 0
       ;;
     auto|required|true|1) ;;
-    *) die "ARTEX_COMPRESS 必须是 auto、required 或 0/off" ;;
+    *) die "ARTEX_COMPRESS 必须是 off、auto 或 required" ;;
   esac
 
   if ! command -v upx >/dev/null 2>&1; then

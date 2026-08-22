@@ -110,18 +110,18 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ### 方式五：构建跨平台 Release 压缩包
 
-`build.sh` 会先构建并嵌入前端，再使用 Go linker 去除调试信息，并在本机安装了 UPX 时进一步压缩二进制。Release 模式默认生成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 的 zip 包：
+`build.sh` 会先构建并嵌入前端，再使用 Go linker 去除调试信息，并将发布文件压缩为 zip。Release 模式默认生成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 的 zip 包：
 
 ```bash
 ./build.sh --release
 # 产物：dist/artex-0.3.3-*.zip
 ```
 
-没有 UPX 时脚本仍可生成 linker 压缩后的二进制；CI Release 会将 UPX 视为必需依赖。可用 `ARTEX_TARGETS` 自定义目标，或用 `--no-compress` 禁用 UPX：
+UPX 自解压二进制可能与部分 Linux 内核、虚拟化环境或安全策略不兼容，因此默认不启用。可用 `ARTEX_TARGETS` 自定义目标；确认目标运行环境兼容时，可显式传入 `--upx` 进一步缩小二进制：
 
 ```bash
 ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
-./build.sh --target darwin/arm64 --no-compress
+./build.sh --target linux/amd64 --upx
 ```
 
 ---

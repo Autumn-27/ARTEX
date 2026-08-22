@@ -48,10 +48,6 @@ jobs:
         with:
           name: web-dist
           path: server/webui/dist
-      - name: Install UPX
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y upx-ucl
       - name: Build and package with build.sh
         env:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
@@ -59,11 +55,16 @@ jobs:
           ARTEX_BUILD_VERSION: ${{ github.ref_name }}
           ARTEX_SKIP_FRONTEND: "1"
           ARTEX_SKIP_NPM_CI: "1"
-          ARTEX_COMPRESS: required
+          # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。
+          # Release 使用 Go linker 裁剪和 zip 压缩，优先保证可移植性。
+          ARTEX_COMPRESS: "0"
           ARTEX_PACKAGE: "1"
           ARTEX_PACKAGE_DIR: dist
         run: |
           ./build.sh --target "${ARTEX_TARGET_OS}/${ARTEX_TARGET_ARCH}"
+      - name: Smoke test Linux amd64 binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: dist/artex-linux-amd64/artex -h
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
