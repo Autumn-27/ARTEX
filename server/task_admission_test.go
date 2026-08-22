@@ -571,6 +571,75 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 	}
 }
 
+// An Agent binding outranks the task's LLM chain; roles left unbound keep using
+// the chain, so binding one role does not move the others off it.
+func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer m.Close()
+
+	stamp := time.Now().UnixNano()
+	boundID, err := m.pg.SaveProfile(&db.LLMProfile{
+		Name: fmt.Sprintf("bound-resolution-%d", stamp), Format: "openai",
+		Model: "bound-model", APIKey: "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chainID, err := m.pg.SaveProfile(&db.LLMProfile{
+		Name: fmt.Sprintf("chain-resolution-%d", stamp), Format: "openai",
+		Model: "chain-model", APIKey: "test-key",
+	})
+	if err != nil {
+		_ = m.pg.DeleteProfile(boundID)
+		t.Fatal(err)
+	}
+	task, err := m.CreateTaskWithOptions("binding precedence", "prefer the bound profile", db.TaskCreateOptions{
+		LLMProfileIDs: []int64{chainID},
+	})
+	if err != nil {
+		_ = m.pg.DeleteProfile(boundID)
+		_ = m.pg.DeleteProfile(chainID)
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{})
+		_ = m.pg.SetAgentLLMProfile("worker", nil)
+		_ = m.pg.DeleteProfile(boundID)
+		_ = m.pg.DeleteProfile(chainID)
+	}()
+
+	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	got, err := s.resolveTaskRoleLLM(task, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "task_chain" || got.Model != "chain-model" {
+		t.Fatalf("resolution=%+v, want the task chain while no binding exists", got)
+	}
+
+	if err := m.pg.SetAgentLLMProfile("worker", &boundID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.resolveTaskRoleLLM(task, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Available || got.Source != "agent_binding" || got.Model != "bound-model" {
+		t.Fatalf("resolution=%+v, want the agent binding to outrank the task chain", got)
+	}
+
+	got, err = s.resolveTaskRoleLLM(task, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "task_chain" || got.Model != "chain-model" {
+		t.Fatalf("resolution=%+v, want an unbound role to keep using the task chain", got)
+	}
+}
+
 func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {

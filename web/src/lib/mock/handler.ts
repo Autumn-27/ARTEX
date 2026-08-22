@@ -108,7 +108,14 @@ function mockProfileResolution(profileID: number | undefined, source: TaskLLMRes
   };
 }
 
+// Mirrors the backend precedence in server/task_resolution.go:
+// Agent 绑定 → 任务 LLM 配置链 → 全局配置 → 环境配置。
 function mockRoleResolution(task: Task, agentKey: "mainagent" | "planner" | "worker"): TaskLLMResolution {
+  const agent = D.agents.find((item) => item.key === agentKey);
+  if (agent?.llm_profile_id) {
+    const bound = mockProfileResolution(agent.llm_profile_id, "agent_binding");
+    if (bound.available) return bound;
+  }
   if (task.llm_profile_ids?.length) {
     if (task.active_llm_profile_id === undefined) {
       return {
@@ -121,11 +128,6 @@ function mockRoleResolution(task: Task, agentKey: "mainagent" | "planner" | "wor
       };
     }
     return mockProfileResolution(task.active_llm_profile_id, "task_chain");
-  }
-  const agent = D.agents.find((item) => item.key === agentKey);
-  if (agent?.llm_profile_id) {
-    const bound = mockProfileResolution(agent.llm_profile_id, "agent_binding");
-    if (bound.available) return bound;
   }
   const globalProfile = D.llmProfiles.find((item) => item.is_default);
   if (globalProfile) return mockProfileResolution(Number(globalProfile.id), "global_profile");

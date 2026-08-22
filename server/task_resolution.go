@@ -42,22 +42,11 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 }
 
 // resolveTaskRoleLLM mirrors taskLLMRuntime.current without creating a provider:
-// explicit task chain -> role Agent binding -> active/global environment config.
+// role Agent binding -> explicit task chain -> active/global environment config.
 // Database failures are returned rather than represented as an unavailable model.
 func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution, error) {
 	if s == nil || s.m == nil || s.m.pg == nil {
 		return taskLLMResolution{}, fmt.Errorf("database unavailable")
-	}
-	state := t.llmStateSnapshot()
-	if len(state.ProfileIDs) > 0 {
-		if state.ActiveID == nil {
-			return taskLLMResolution{Source: "task_chain", Reason: "任务 LLM 配置链额度已耗尽"}, nil
-		}
-		p, err := s.m.pg.ProfileByID(*state.ActiveID)
-		if err != nil {
-			return taskLLMResolution{}, fmt.Errorf("load task LLM profile: %w", err)
-		}
-		return s.resolutionFromProfile(p, "task_chain"), nil
 	}
 	a, err := s.m.pg.GetAgentByKey(agentKey)
 	if err != nil {
@@ -74,6 +63,17 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 				return resolved, nil
 			}
 		}
+	}
+	state := t.llmStateSnapshot()
+	if len(state.ProfileIDs) > 0 {
+		if state.ActiveID == nil {
+			return taskLLMResolution{Source: "task_chain", Reason: "任务 LLM 配置链额度已耗尽"}, nil
+		}
+		p, err := s.m.pg.ProfileByID(*state.ActiveID)
+		if err != nil {
+			return taskLLMResolution{}, fmt.Errorf("load task LLM profile: %w", err)
+		}
+		return s.resolutionFromProfile(p, "task_chain"), nil
 	}
 	p, err := s.m.pg.ActiveProfile()
 	if err != nil {

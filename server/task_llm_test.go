@@ -410,6 +410,33 @@ func TestResolvedTaskStatusKeepsExhaustedStartedTaskRunning(t *testing.T) {
 	}
 }
 
+// A role with no Agent binding falls through to the task chain, then to global —
+// and an exhausted chain stays a hard stop instead of silently borrowing global.
+func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
+	t.Parallel()
+	// A nil pg means effectiveProfileForAgent finds no binding for any role, so
+	// every role here resolves through the chain/global levels.
+	s := &Server{m: &Manager{}}
+	task := &Task{ID: "7"}
+
+	if s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("no binding, no chain and no global provider must not be runnable")
+	}
+	s.llmOn, s.llmProv = true, &scriptedLLMProvider{}
+	if !s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("global provider must serve a role with no binding and no chain")
+	}
+	if s.taskRuntimeAvailable(task) {
+		t.Fatal("a task with no roles requested must not report as runnable")
+	}
+
+	profileID := int64(11)
+	task.setLLMState(&profileID, nil, []int64{profileID}, 1, "chain_exhausted", "quota exhausted")
+	if s.taskRuntimeAvailable(task, "worker") {
+		t.Fatal("exhausted chain must not fall back to the global provider")
+	}
+}
+
 func TestAuthoritativeTaskResolverDoesNotFallBackWhenChainUnavailable(t *testing.T) {
 	t.Parallel()
 	e := &Engine{}
