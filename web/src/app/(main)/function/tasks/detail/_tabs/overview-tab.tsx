@@ -41,7 +41,7 @@ function cacheHitRate(cacheRead: number, input: number): string {
 function scopeValue(row: TaskScopeRow): string {
   if (row.domain) return row.domain;
   if (row.net) return row.net;
-  if (row.company_id) return `company #${row.company_id}`;
+  if (row.company_id) return row.company_name || `企业 #${row.company_id}`;
   return "—";
 }
 

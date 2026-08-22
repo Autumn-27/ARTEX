@@ -52,10 +52,11 @@ tested AS (
 // scopes of its direct source tasks. TaskScope.TaskID preserves provenance.
 func (s *AssetStore) ListTaskScopeWithSources(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`
-SELECT ts.id, ts.task_id, ts.kind, COALESCE(ts.company_id,0), COALESCE(ts.domain,''),
+SELECT ts.id, ts.task_id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
        COALESCE(ts.net::text,''), ts.source, COALESCE(ts.reason,'')
 FROM task_scope ts
 JOIN context_tasks ctx ON ctx.task_id=ts.task_id
+LEFT JOIN companies c ON c.id=ts.company_id
 ORDER BY CASE WHEN ts.task_id=$1 THEN 0 ELSE 1 END, ts.id`, taskID)
 	if err != nil {
 		return nil, err
@@ -65,7 +66,7 @@ ORDER BY CASE WHEN ts.task_id=$1 THEN 0 ELSE 1 END, ts.id`, taskID)
 	for rows.Next() {
 		var scope TaskScope
 		var companyID int64
-		if err := rows.Scan(&scope.ID, &scope.TaskID, &scope.Kind, &companyID, &scope.Domain, &scope.Net, &scope.Source, &scope.Reason); err != nil {
+		if err := rows.Scan(&scope.ID, &scope.TaskID, &scope.Kind, &companyID, &scope.CompanyName, &scope.Domain, &scope.Net, &scope.Source, &scope.Reason); err != nil {
 			return nil, err
 		}
 		if companyID > 0 {

@@ -16,10 +16,13 @@ type TaskScope struct {
 	TaskID    int64  `json:"task_id"`
 	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr
 	CompanyID *int64 `json:"company_id,omitempty"`
-	Domain    string `json:"domain,omitempty"`
-	Net       string `json:"net,omitempty"`
-	Source    string `json:"source"`
-	Reason    string `json:"reason,omitempty"`
+	// CompanyName is resolved for kind=company so callers can label a scope row
+	// without a second lookup. Empty when the row is not a company reference.
+	CompanyName string `json:"company_name,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	Net         string `json:"net,omitempty"`
+	Source      string `json:"source"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 // stripHostPort drops a trailing :port from a host:port / ip:port / [ipv6]:port
@@ -202,8 +205,11 @@ func (s *AssetStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
 // ListTaskScope returns all scope rows for a task.
 func (s *AssetStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
-SELECT id, kind, COALESCE(company_id,0), COALESCE(domain,''), COALESCE(net::text,''), source, COALESCE(reason,'')
-FROM task_scope WHERE task_id=$1 ORDER BY id`, taskID)
+SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
+       COALESCE(ts.net::text,''), ts.source, COALESCE(ts.reason,'')
+FROM task_scope ts
+LEFT JOIN companies c ON c.id=ts.company_id
+WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +218,7 @@ FROM task_scope WHERE task_id=$1 ORDER BY id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.Domain, &t.Net, &t.Source, &t.Reason); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Source, &t.Reason); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID

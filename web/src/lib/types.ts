@@ -241,6 +241,7 @@ export interface TaskScopeRow {
   task_id: number;
   kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr";
   company_id?: number;
+  company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
   domain?: string;
   net?: string;
   source: "auto" | "agent" | "manual";
