@@ -717,6 +717,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/traffic", s.deleteTraffic)
 	mux.HandleFunc("DELETE /api/traffic/hosts", s.deleteTrafficHosts)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
+	mux.HandleFunc("GET /api/traffic/blob", s.getTrafficBlob)
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
@@ -2932,6 +2933,35 @@ func (s *Server) getTrafficExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"req": req, "resp": resp})
+}
+
+// getTrafficBlob streams one oversized body by its sha256. Bodies past the inline
+// threshold are not carried by the exchange endpoint — it returns a preview plus
+// an "@blob sha256:<hash>" pointer — so this is how the UI fetches them whole.
+// Streamed rather than buffered: these are the bodies too large to hold in memory.
+func (s *Server) getTrafficBlob(w http.ResponseWriter, r *http.Request) {
+	tr := s.m.Traffic()
+	if tr == nil {
+		writeErr(w, 404, "traffic disabled")
+		return
+	}
+	hash := strings.TrimSpace(r.URL.Query().Get("hash"))
+	if hash == "" {
+		writeErr(w, 400, "missing hash")
+		return
+	}
+	f, size, err := tr.Blob(hash)
+	if err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", hash+".bin"))
+	if _, err := io.Copy(w, f); err != nil {
+		log.Printf("[traffic] 下载 blob %s 中断：%v", hash, err)
+	}
 }
 
 // getSettings returns the runtime app settings the UI toggles. The Brave API key
