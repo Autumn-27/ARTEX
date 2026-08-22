@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CpuIcon, RadioTowerIcon, SearchIcon } from "lucide-react";
+import { CpuIcon, KeyboardIcon, RadioTowerIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
+import {
+  CHAT_SEND_MODE_OPTIONS,
+  type ChatSendMode,
+  setChatSendMode,
+  useChatSendMode,
+} from "@/lib/chat-send-mode";
 import type { Settings } from "@/lib/types";
 
 export default function SystemSettingsPage() {
@@ -32,6 +38,8 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
+  const sendMode = useChatSendMode();
 
   const apply = React.useCallback((s: Settings) => {
     setTrafficCapture(!!s.traffic_capture);
@@ -422,6 +430,37 @@ export default function SystemSettingsPage() {
               保存
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-2xl">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <KeyboardIcon className="size-4" />
+            会话输入框发送键位
+          </CardTitle>
+          <CardDescription>
+            对话页与任务详情的主 Agent 会话输入框共用此设置，选择后立即生效、无需保存。
+            <br />
+            该偏好<b>只存在本浏览器</b>，不随账号同步，换浏览器或清理站点数据后需重新设置。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-4">
+          <Label htmlFor="chat-send-mode" className="text-sm font-normal text-muted-foreground">
+            发送方式
+          </Label>
+          <Select value={sendMode} onValueChange={(v) => setChatSendMode(v as ChatSendMode)}>
+            <SelectTrigger id="chat-send-mode" className="w-72">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CHAT_SEND_MODE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </CardContent>
       </Card>
     </div>

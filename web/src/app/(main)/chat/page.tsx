@@ -47,6 +47,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -128,9 +129,10 @@ function Composer({
 }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
+  // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
+  const sendMode = useChatSendMode();
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Enter 发送；Shift+Enter 换行。isComposing 时是中文等输入法在选字,不拦截。
-    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    if (!shouldSubmitOnKey(e, sendMode)) return;
     e.preventDefault();
     onSend();
   }

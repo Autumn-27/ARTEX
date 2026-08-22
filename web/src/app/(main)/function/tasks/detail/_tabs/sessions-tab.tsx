@@ -44,6 +44,7 @@ import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } fro
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, sseUrl } from "@/lib/api";
+import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import type {
   Activity,
@@ -1239,6 +1240,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }
 
   const mainLoaded = !!store.main?.loaded;
+  // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
+  const sendMode = useChatSendMode();
   // What the transcript pane should show for the active session.
   const showLoader = !activeState || (activeState.loading && !activeState.loaded);
   const resolutionForSession = (session: Session): TaskLLMResolution | undefined => {
@@ -1511,8 +1514,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)
-                      return;
+                    if (!shouldSubmitOnKey(e, sendMode)) return;
                     e.preventDefault();
                     if (!mainLive) send();
                   }}
