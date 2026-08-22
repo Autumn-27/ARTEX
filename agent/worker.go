@@ -254,6 +254,8 @@ func renderWorkerGraphOverview(data map[string]any) string {
 func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetTaskID(taskID)
+	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
+	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -351,8 +353,11 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
 				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
 				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
-				for _, a := range assets {
-					_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
+				if coverageEnabled {
+					for _, a := range assets {
+						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+					}
 				}
 			}
 		}

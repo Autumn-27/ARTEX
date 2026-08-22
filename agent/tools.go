@@ -56,6 +56,12 @@ type ToolSet struct {
 	ts     *db.ExplorationStore
 	worker string
 	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
+	// zero value (all existing ToolSet constructions) means ENABLED — matching the
+	// DB default (true). When true: graphOverviewData drops the coverage block, the
+	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
+	// are filtered out of the agent's tool list. The scope field stays regardless.
+	coverageDisabled bool
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
@@ -149,6 +155,36 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
+
+// SetCoverageEnabled records whether this task has the asset-coverage feature on
+// (default enabled). Passing false makes graphOverviewData omit the coverage block,
+// the insertAssets auto-scope hook a no-op, and CoverageTools reports the two
+// coverage-only tools so callers can drop them from the agent's tool list.
+func (t *ToolSet) SetCoverageEnabled(enabled bool) { t.coverageDisabled = !enabled }
+
+// CoverageDisabled reports whether the coverage feature is off for this task.
+func (t *ToolSet) CoverageDisabled() bool { return t.coverageDisabled }
+
+// coverageOnlyTools are the LLM tools that only make sense when asset coverage is
+// on. When the feature is off they are filtered out of the agent's tool list so
+// they neither pollute the prompt nor let the model build a disabled denominator.
+var coverageOnlyTools = map[string]bool{"add_task_scope": true, "list_untested_assets": true}
+
+// DropCoverageTools returns tools with the coverage-only ones removed when this
+// task has the feature disabled; otherwise it returns tools unchanged.
+func (t *ToolSet) DropCoverageTools(tools []actool.CoreTool) []actool.CoreTool {
+	if !t.coverageDisabled {
+		return tools
+	}
+	out := tools[:0:0]
+	for _, tool := range tools {
+		if coverageOnlyTools[tool.Name()] {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
 
 // Cross-task reuse: exported accessors returning the per-task tool logic bound to
 // THIS ToolSet's store. Host-side orchestration tools build a ToolSet for an
@@ -362,22 +398,28 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["related_tasks"] = t.relatedTaskOverviews()
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
 	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
+	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 scope/hosts(范围边界与目标主机的
+	// 感知信息，company 关联经由 scope 在此浮现)，丢弃 denominator/tested/pct/by_type/note
+	// 等覆盖度度量，避免污染上下文、也不诱导已隐藏的 add_task_scope/list_untested_assets。
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
-		if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
-			m := map[string]any{
-				"denominator": cov.Denominator,
-				"tested":      cov.Tested,
-				"by_type":     cov.ByType,
-				"note":        "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产【通常不调用list_untested_assets，按照任务推进即可】；",
-			}
-			if cov.Denominator == 0 {
-				m["pct"] = nil
-				m["status"] = "范围未锚定"
-			} else {
-				m["pct"] = cov.Pct
+		{
+			m := map[string]any{}
+			if !t.coverageDisabled {
+				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
+					m["denominator"] = cov.Denominator
+					m["tested"] = cov.Tested
+					m["by_type"] = cov.ByType
+					m["note"] = "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产【通常不调用list_untested_assets，按照任务推进即可】；"
+					if cov.Denominator == 0 {
+						m["pct"] = nil
+						m["status"] = "范围未锚定"
+					} else {
+						m["pct"] = cov.Pct
+					}
+				}
 			}
 			// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
-			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。
+			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。覆盖度开关无关，始终提供。
 			if rows, err := t.as.ListTaskScopeWithSources(t.taskID); err == nil && len(rows) > 0 {
 				scope := make([]map[string]any, 0, len(rows))
 				for _, r := range rows {
@@ -445,7 +487,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 					m["hosts_truncated"] = true
 				}
 			}
-			out["coverage"] = m
+			if len(m) > 0 {
+				out["coverage"] = m
+			}
 		}
 	}
 	return out

@@ -31,6 +31,7 @@ export interface Task {
   llm_failover_reason?: string;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   company_ids?: number[]; // associated company asset scopes available as task context
+  coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
 
 export interface TaskTemplate {

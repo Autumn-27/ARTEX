@@ -844,6 +844,7 @@ export const conversationMessages: Record<number, Activity[]> = {
 
 // ── 资产测试覆盖度（/tasks/{id}/coverage）──
 export const coverage = {
+  enabled: true,
   scope_rows: 4,
   denominator: 26,
   tested: 11,

@@ -89,6 +89,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [coverage, setCoverage] = React.useState<{
+    enabled: boolean;
     scope_rows: number;
     denominator: number;
     tested: number;
@@ -263,7 +264,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
         </CardContent>
       </Card>
-      {coverage && coverage.scope_rows > 0 && (
+      {coverage && coverage.enabled && coverage.scope_rows > 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">

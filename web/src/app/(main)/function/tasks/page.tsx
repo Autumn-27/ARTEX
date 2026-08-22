@@ -1294,6 +1294,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -1357,6 +1358,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
         timeoutSeconds: timeoutSec,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
+        coverageEnabled,
       });
       toast.success("任务已创建");
       setDescription("");
@@ -1368,6 +1370,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setCoverageEnabled(true);
       setUploadCount(0);
       draftIdRef.current = "";
       setOpen(false);
@@ -1546,6 +1549,20 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
                   <p className="text-muted-foreground text-xs">
                     开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
                     接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="coverage-enabled"
+                      checked={coverageEnabled}
+                      onCheckedChange={(v) => setCoverageEnabled(!!v)}
+                    />
+                    资产覆盖度功能
+                  </label>
+                  <p className="text-muted-foreground text-xs">
+                    默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
+                    态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
                   </p>
                 </div>
               </CollapsibleContent>

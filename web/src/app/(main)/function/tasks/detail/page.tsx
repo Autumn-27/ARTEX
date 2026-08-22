@@ -364,7 +364,7 @@ function TaskDetailInner() {
           <AssetsTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} />
+          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
         </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />

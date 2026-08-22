@@ -341,6 +341,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     parent_ref     TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
     plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300,
+    coverage_enabled BOOLEAN NOT NULL DEFAULT true,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
     deleted_at     TIMESTAMPTZ,
@@ -357,6 +358,10 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
 -- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
+-- 资产覆盖度功能开关;补旧库。true(默认)=计算/展示测试覆盖度、自动累积测试范围、
+-- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
+-- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.

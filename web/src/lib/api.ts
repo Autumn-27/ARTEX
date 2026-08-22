@@ -188,6 +188,7 @@ export const api = {
     timeoutSeconds?: number;
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
+    coverageEnabled?: boolean;
   }) =>
     post<Task>("/tasks", {
       description: input.description,
@@ -198,6 +199,7 @@ export const api = {
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
+      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
@@ -240,6 +242,7 @@ export const api = {
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
+      enabled: boolean; // 资产覆盖度功能是否开启；false 时其余字段为零值
       scope_rows: number;
       denominator: number;
       tested: number;

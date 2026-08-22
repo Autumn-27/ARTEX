@@ -274,11 +274,14 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				t.anchorOwner(id)
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
-				svcIP := item.ServiceIP
-				if svcIP == "" {
-					svcIP = item.IP
+				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
+				if !t.coverageDisabled {
+					svcIP := item.ServiceIP
+					if svcIP == "" {
+						svcIP = item.IP
+					}
+					_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
 				}
-				_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
 			}
 
 			return jsonResult(map[string]any{
