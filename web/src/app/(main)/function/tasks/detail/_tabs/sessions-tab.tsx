@@ -59,6 +59,13 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+// resolutionLabel names the LLM a session runs on. The badge shows this alone and
+// keeps the model id in its tooltip. Env-backed configs can arrive without a name,
+// so fall back to the model id rather than rendering an empty badge.
+function resolutionLabel(r: TaskLLMResolution): string {
+  return r.name || r.model || "未命名配置";
+}
+
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
 function fmtBytes(n: number): string {
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
@@ -1376,17 +1383,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 <TooltipTrigger asChild>
                   <Badge
                     variant="outline"
-                    className="max-w-28 shrink-0 font-mono font-normal"
-                    aria-label={activeResolution.available ? `当前模型：${activeResolution.model}` : "模型不可用"}
+                    className="max-w-28 shrink-0 font-normal"
+                    aria-label={
+                      activeResolution.available ? `当前配置：${resolutionLabel(activeResolution)}` : "模型不可用"
+                    }
                   >
                     <span className="truncate">
-                      {activeResolution.available ? activeResolution.model : "模型不可用"}
+                      {activeResolution.available ? resolutionLabel(activeResolution) : "模型不可用"}
                     </span>
                   </Badge>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
                   {activeResolution.available
-                    ? `${activeResolution.name} / ${activeResolution.format} / ${activeResolution.model}`
+                    ? [resolutionLabel(activeResolution), activeResolution.model].filter(Boolean).join(" / ")
                     : activeResolution.reason || "没有可用的 LLM 配置"}
                 </TooltipContent>
               </Tooltip>
