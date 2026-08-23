@@ -615,6 +615,8 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.steerWorkTool(),
 		// set_goals：人可在运行时给本任务补一个新的最终目标（规划者据此重判是否达成）。
 		t.setGoals(),
+		// set_constraints：人可在运行时给本任务补/改操作约束（allow/deny），约束 planner/worker 的探索边界。
+		t.setConstraints(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
 		t.addFinding(), t.recordFact(),

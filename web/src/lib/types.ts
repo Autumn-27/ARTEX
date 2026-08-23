@@ -309,6 +309,16 @@ export interface TaskGoal {
   ts: string;
 }
 
+// 约束管理卡片用的操作约束(allow=允许 / deny=禁止)。
+export type ConstraintKind = "allow" | "deny";
+export interface TaskConstraint {
+  id: string;
+  kind: ConstraintKind;
+  text: string;
+  origin?: string;
+  ts?: string;
+}
+
 // ---- Findings ----
 export type Severity = "critical" | "high" | "medium" | "low";
 
@@ -704,6 +714,9 @@ export interface Settings {
   llm_pool_enabled?: boolean; // 默认 false
   // 绑定了指定配置的 agent/任务失败时是否也回落到轮询链。默认 false = 绑定即独占。
   llm_pool_bind_fallback?: boolean;
+  // 操作约束注入范围(默认都开):把任务的 allow/deny 约束拼进对应 agent 的系统提示。
+  constraints_inject_planner?: boolean;
+  constraints_inject_worker?: boolean;
 }
 
 // ---- LLM config ----

@@ -1402,6 +1402,80 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 		})
 }
 
+type constraintItem struct {
+	Text string `json:"text"`
+	Type string `json:"type"` // allow | deny
+}
+
+// addOneConstraint 落一条操作约束到 task_constraints。origin 取 t.worker(缺省 system):
+// 拆解器写 "goals"、主 agent 写 "human"。
+func (t *ToolSet) addOneConstraint(it constraintItem) (int64, error) {
+	text := strings.TrimSpace(it.Text)
+	if text == "" {
+		return 0, fmt.Errorf("text 不能为空")
+	}
+	kind := strings.TrimSpace(strings.ToLower(it.Type))
+	if kind == "" {
+		kind = "deny" // 默认按禁止处理:未标注类型时更保守
+	}
+	if kind != "allow" && kind != "deny" {
+		return 0, fmt.Errorf("type 必须是 allow 或 deny")
+	}
+	return t.ts.AddConstraint(kind, text, t.worker)
+}
+
+// setConstraints 给【本任务】新增操作约束(allow=允许做什么 / deny=禁止做什么)。既是目标
+// 拆解器 round-0 抽约束的提交工具,也是主 agent 运行时补约束的工具——同一受管工具,可在 web
+// 端改描述/schema、按 agent 绑定。约束会被注入 planner/worker 的系统提示以约束探索边界。
+func (t *ToolSet) setConstraints() actool.CoreTool {
+	return writeTool("set_constraints",
+		"给【本任务】新增操作约束,用来框定探索边界:type=allow(允许做的操作)或 deny(禁止做的操作)。\n"+
+			"约束=对『可以/不可以做哪些操作』的规定(如『仅测当前端口,不扫其他端口』『禁止对生产库做写操作』『只允许被动侦察』),不是目标、也不是攻击步骤。\n"+
+			"★优先批量:多条放进 constraints 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 constraints 直接给顶层 text/type。\n"+
+			"只登记任务目标/描述里【明确写出】的约束,不要臆造;拿不准类型时用 deny(更保守)。",
+		obj(map[string]any{
+			"constraints": map[string]any{"type": "array", "description": "【优先用这个】要新增的约束数组,按顺序处理。每个元素:text(必填,一条约束)+ type(allow|deny)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"text":        str("[单条] 一条操作约束的内容"),
+			"type":        str("[单条] allow(允许)或 deny(禁止);缺省按 deny 处理"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("set_constraints 未启用: ExplorationStore 未初始化"), nil
+			}
+			var a struct {
+				Constraints    []constraintItem `json:"constraints"`
+				constraintItem                  // 单条模式:顶层 text/type
+			}
+			_ = json.Unmarshal(in, &a)
+			batch := len(a.Constraints) > 0
+			items := a.Constraints
+			if !batch {
+				items = []constraintItem{a.constraintItem}
+			}
+			ids := make([]int64, len(items))
+			errs := map[string]string{}
+			for i, it := range items {
+				id, err := t.addOneConstraint(it)
+				if err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
+				ids[i] = id
+			}
+			if !batch { // 单条:保持简单返回
+				if e, bad := errs["0"]; bad {
+					return actool.Errorf(e), nil
+				}
+				return actool.Text(fmt.Sprintf("constraint added: %d", ids[0])), nil
+			}
+			out := map[string]any{"ids": ids}
+			if len(errs) > 0 {
+				out["errors"] = errs
+			}
+			return jsonResult(out)
+		})
+}
+
 func (t *ToolSet) addHint() actool.CoreTool {
 	return writeTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",

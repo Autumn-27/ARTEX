@@ -220,6 +220,21 @@ CREATE TABLE IF NOT EXISTS exploration_anchors (
 );
 CREATE INDEX IF NOT EXISTS idx_anchor_asset ON exploration_anchors(asset_id);
 
+-- task_constraints: operator-authored operation constraints (allow/deny) for a task.
+-- Extracted by the goals decomposer at round 0 (from goal/description), editable at
+-- runtime by the main agent + 总览「约束管理」. Injected into the planner/worker system
+-- prompt each round (config-gated) to keep exploration within the operator's boundary.
+CREATE TABLE IF NOT EXISTS task_constraints (
+    id             BIGSERIAL PRIMARY KEY,
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('allow','deny')),
+    text           TEXT NOT NULL,
+    origin         TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_constraints_exp ON task_constraints(exploration_id);
+
 CREATE TABLE IF NOT EXISTS activity (
     id                 BIGSERIAL PRIMARY KEY,
     exploration_id     BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,

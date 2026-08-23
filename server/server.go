@@ -387,12 +387,14 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
-	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
-	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
-	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
+	pl.SetKillWork(s.engine.KillWork)                  // planner kill_work → terminate a running work
+	pl.SetSteerWork(s.engine.SteerWork)               // planner steer_work → inject mid-run course-correction
+	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())   // WebFetch through the recording proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
+	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
 	return pl, wk
 }
 
@@ -669,6 +671,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)              // 目标管理:人工新增目标(复活任务)
 	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)      // 目标管理:修改目标(复活任务)
 	mux.HandleFunc("DELETE /api/tasks/{id}/goals/{gid}", s.deleteGoal)   // 目标管理:硬删除目标(不复活)
+	mux.HandleFunc("GET /api/tasks/{id}/constraints", s.listConstraints)           // 约束管理:列出本任务操作约束
+	mux.HandleFunc("POST /api/tasks/{id}/constraints", s.addConstraint)            // 约束管理:新增约束(不通知 planner)
+	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)    // 约束管理:修改约束
+	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint) // 约束管理:删除约束
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
@@ -3005,6 +3011,9 @@ func (s *Server) settingsPayload() map[string]any {
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
 		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
+		// 操作约束注入范围(默认都开):把本任务的 allow/deny 约束拼进对应 agent 的系统提示。
+		"constraints_inject_planner": s.constraintInjectPlanner(),
+		"constraints_inject_worker":  s.constraintInjectWorker(),
 	}
 }
 
@@ -3045,10 +3054,25 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 重建 provider 链才生效，走下面的 changed → applyLLM 路径。
 		LLMPoolEnabled      *bool `json:"llm_pool_enabled"`
 		LLMPoolBindFallback *bool `json:"llm_pool_bind_fallback"`
+		// 操作约束注入范围开关(默认都开);即时生效(planner/worker 每轮读),无需重建 agent。
+		ConstraintsInjectPlanner *bool `json:"constraints_inject_planner"`
+		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.ConstraintsInjectPlanner != nil {
+		if err := s.m.pg.SetBool(settingConstraintsInjectPlanner, *req.ConstraintsInjectPlanner); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.ConstraintsInjectWorker != nil {
+		if err := s.m.pg.SetBool(settingConstraintsInjectWorker, *req.ConstraintsInjectWorker); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.Workers != nil {
 		if err := s.m.SetWorkers(*req.Workers); err != nil {

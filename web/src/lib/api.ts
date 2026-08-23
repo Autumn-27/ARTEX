@@ -56,6 +56,7 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskConstraint,
   TaskGoal,
   TaskLLMResolutions,
   TaskNode,
@@ -268,6 +269,19 @@ export const api = {
     patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
   // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+
+  // ---- 操作约束管理（总览）----
+  // 本任务全部操作约束（allow/deny）。
+  taskConstraints: (id: string) => get<{ constraints: TaskConstraint[] }>(`/tasks/${id}/constraints`),
+  // 新增约束（不通知 planner，下一轮规划自然读到）。
+  addConstraint: (id: string, text: string, kind: TaskConstraint["kind"]) =>
+    post<TaskConstraint>(`/tasks/${id}/constraints`, { text, kind }),
+  // 修改约束（文本 + allow/deny）。
+  updateConstraint: (id: string, constraintId: string, text: string, kind: TaskConstraint["kind"]) =>
+    patch<TaskConstraint>(`/tasks/${id}/constraints/${constraintId}`, { text, kind }),
+  // 删除约束。
+  deleteConstraint: (id: string, constraintId: string) =>
+    del<{ ok: boolean }>(`/tasks/${id}/constraints/${constraintId}`),
 
   // 本任务测试范围列表（含继承自来源任务的范围）。
   taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
