@@ -32,6 +32,7 @@ type Planner struct {
 	proxyCACert string                                 // recording proxy's CA cert path (HTTPS verify)
 	webSearch   WebSearchOpts                          // web_search tool backend selection (off by default)
 	workDir     string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                      // resolver: inject task operation constraints into system prompt? (nil = yes)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -60,6 +61,14 @@ func (p *Planner) SetProxy(addr, caCert string) { p.proxyAddr, p.proxyCACert = a
 
 // SetWebSearch selects the web_search backend for the planner (off by default).
 func (p *Planner) SetWebSearch(o WebSearchOpts) { p.webSearch = o }
+
+// SetConstraintInject wires a resolver deciding whether this task's operation
+// constraints get injected into the planner system prompt. Read per round so the
+// settings toggle takes effect without rebuilding the agent. nil = inject (default).
+func (p *Planner) SetConstraintInject(fn func() bool) { p.injectConstraints = fn }
+
+// wantConstraints reports whether constraint injection is enabled (default yes).
+func (p *Planner) wantConstraints() bool { return p.injectConstraints == nil || p.injectConstraints() }
 
 // todoFor returns the task's persistent planning todo store, creating it on first
 // use. Shared across all of this task's planner wake-ups.
@@ -245,7 +254,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
    - 该方向在 recent_done_intents 里已尝试过（即使没产出）→ **不要原样重试**。把它当作【已封锁路线（blocked）】：仅当出现【材料性的新机理】——新事实、新资产、新参数、或一种明显不同的打法/构造——才重新派，且新意图的 summary 里要写清"这次和上次不同在哪"。**只是换个措辞、或"再试一次说不定行"都不算新机理，禁止重试。** 反之，若某条否定结论是 confidence=inferred 的弱证据、且该方向对目标关键，用【一条复核意图】去证实或推翻它是正当的（这属于新理由）。
    - 仅对【当前完全没有任何意图覆盖的全新方向】生成。
    - 所有已知方向都已被现有意图覆盖 → **不生成任何意图，直接结束本轮。**
-   - **保持路线多样、别过早收敛到一条**：当目标尚未达成时，若现有意图全都挤在【同一条攻击路线/同一类入口】上，而还存在【本质不同】的未覆盖方向（如另一种入口面、另一类资产、另一条利用链），优先补一条那样的分歧方向，而不是在同一条线上再加同义意图。理想状态是让 2–3 条彼此独立、机理不同的路线同时存活（如"从上传链打"与"从认证绕过打"）；只有当某条路线已交出【目标逼近】的证据时，才值得把资源集中过去。判断多样性看方向的实质差异，不看措辞。（这不与"0 意图正常"冲突：只有确存在本质不同且未覆盖的方向才补；空白路线若已被现有意图覆盖，仍旧 0 意图。）
+   - **保持路线多样、别过早收敛到一条**：当目标尚未达成时，若现有意图全都挤在【同一条攻击路线/同一类入口】上，而还存在【本质不同】的未覆盖方向（如另一种入口面、另一类资产、另一条利用链），优先补一条那样的分歧方向，而不是在同一条线上再加同义意图。**但这条【多样性】永远服从于顶部的【操作约束】**：只在不违反约束的前提下才拓展方向——被约束排除的入口面/端口/主机/操作，即使"本质不同"也绝不生成意图。理想状态是让 2–3 条彼此独立、机理不同的路线同时存活（如"从上传链打"与"从认证绕过打"）；只有当某条路线已交出【目标逼近】的证据时，才值得把资源集中过去。判断多样性看方向的实质差异，不看措辞。（这不与"0 意图正常"冲突：只有确存在本质不同且未覆盖的方向才补；空白路线若已被现有意图覆盖，仍旧 0 意图。）
 3.5. **串行利用链：分步派，别一次拆成并行。** 很多利用是一条**强依赖串行链**（如：①→ ② → ③）——后一步依赖前一步的**实际产出**。这种情况：
    - **不要**把 ①②③ 一次性作为多个并行意图下发（下游 worker 拿不到还不存在的前置产出，只会重复/空转）；
    - **用 TodoWrite 把整条链记成待办**（每步一条），然后**本轮只派"前置已满足"的那一步**（通常是第一步）；
@@ -303,7 +312,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
-	system, boundary := deferredSystem(plannerSystem(goal, p.workDir, taskDir), def)
+	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	if p.wantConstraints() {
+		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
+	}
+	system, boundary := deferredSystem(sysBody, def)
 	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)

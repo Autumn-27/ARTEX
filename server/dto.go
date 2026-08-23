@@ -208,6 +208,15 @@ func goalDTOs(in []*db.Node) []GoalDTO {
 	return out
 }
 
+// ConstraintDTO is one operation constraint (allow/deny) for the 总览「约束管理」UI.
+type ConstraintDTO struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"` // allow | deny
+	Text   string `json:"text"`
+	Origin string `json:"origin,omitempty"`
+	TS     string `json:"ts,omitempty"`
+}
+
 func taskNodeDTOs(in []*db.Node) []TaskNodeDTO {
 	out := make([]TaskNodeDTO, 0, len(in))
 	for _, n := range in {

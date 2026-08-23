@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CpuIcon, KeyboardIcon, RadioTowerIcon, SearchIcon } from "lucide-react";
+import { CpuIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,9 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  // 操作约束注入范围(默认都开)。
+  const [injectPlanner, setInjectPlanner] = React.useState(true);
+  const [injectWorker, setInjectWorker] = React.useState(true);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -45,6 +48,8 @@ export default function SystemSettingsPage() {
     setProxyInput(s.web_search_proxy || "");
     setPyInterp(s.python_interpreter || "");
     setWorkers(String(s.workers ?? 3));
+    setInjectPlanner(s.constraints_inject_planner !== false);
+    setInjectWorker(s.constraints_inject_worker !== false);
   }, []);
 
   const saveWorkers = () => {
@@ -100,6 +105,22 @@ export default function SystemSettingsPage() {
       .then(apply)
       .catch(() => setTrafficCapture(!v)) // revert on failure
       .finally(() => setSaving(false));
+  };
+
+  const toggleInjectPlanner = (v: boolean) => {
+    setInjectPlanner(v); // optimistic
+    api
+      .setSettings({ constraints_inject_planner: v })
+      .then(apply)
+      .catch(() => setInjectPlanner(!v)); // revert on failure
+  };
+
+  const toggleInjectWorker = (v: boolean) => {
+    setInjectWorker(v); // optimistic
+    api
+      .setSettings({ constraints_inject_worker: v })
+      .then(apply)
+      .catch(() => setInjectWorker(!v)); // revert on failure
   };
 
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
@@ -217,6 +238,46 @@ export default function SystemSettingsPage() {
               disabled={!loaded || saving}
               onCheckedChange={toggleTraffic}
             />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ShieldAlertIcon className="size-4" />
+              操作约束注入
+            </CardTitle>
+            <CardDescription>
+              开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny 条目）拼进对应 Agent
+              的系统提示，用来框定探索边界（如「仅测当前端口」「禁止爆破」）。
+              <br />
+              可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>；默认都开。切换即时生效（下一轮读取），无需重建
+              Agent。关闭后该 Agent 不再看到约束。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="inject-planner" className="text-sm font-normal text-muted-foreground">
+                注入规划者（planner）{injectPlanner ? " · 已开启" : " · 已关闭"}
+              </Label>
+              <Switch
+                id="inject-planner"
+                checked={injectPlanner}
+                disabled={!loaded}
+                onCheckedChange={toggleInjectPlanner}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="inject-worker" className="text-sm font-normal text-muted-foreground">
+                注入执行者（worker）{injectWorker ? " · 已开启" : " · 已关闭"}
+              </Label>
+              <Switch
+                id="inject-worker"
+                checked={injectWorker}
+                disabled={!loaded}
+                onCheckedChange={toggleInjectWorker}
+              />
+            </div>
           </CardContent>
         </Card>
 
