@@ -522,12 +522,12 @@ function ProfileSheet({
             <Input
               id="p-proxy"
               className="font-mono"
-              placeholder="http://127.0.0.1:8080 · socks5://127.0.0.1:1080"
+              placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
               value={proxy}
               onChange={(e) => setProxy(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">
-              仅 LLM 出站请求走此代理，支持 http/https/socks5；留空则用环境变量（HTTP_PROXY/HTTPS_PROXY）。
+              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如 socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
             </p>
           </div>
 

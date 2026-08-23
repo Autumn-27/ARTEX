@@ -31,8 +31,9 @@ type Config struct {
 	BaseURL string
 	APIKey  string
 	Model   string
-	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5).
-	// Empty falls back to the standard *_PROXY environment variables.
+	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5,
+	// optionally with user:pass@ credentials). Empty means direct — it does NOT
+	// fall back to the standard *_PROXY environment variables.
 	Proxy string
 	// RatePerSecond / RatePerMinute cap the shared request rate across ALL agents
 	// using the provider (0 = that window unlimited).
@@ -268,7 +269,7 @@ func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
-		transport.Proxy = http.ProxyFromEnvironment
+		transport.Proxy = nil // 留空=直连,不回退 HTTP_PROXY/HTTPS_PROXY 环境变量
 	} else {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
