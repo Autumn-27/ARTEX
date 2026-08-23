@@ -22,9 +22,16 @@ func (p captureUsageProvider) Stream(ctx context.Context, _ llm.CompletionReques
 func TestCaptureRunPersistsUsageOnProviderFailure(t *testing.T) {
 	wantErr := errors.New("provider failed after reporting usage")
 	provider := captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
-		yield(llm.StreamEvent{Type: llm.SEMessageStart, Usage: llm.Usage{InputTokens: 11, CacheReadTokens: 3}}, nil)
-		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "partial"}, nil)
-		yield(llm.StreamEvent{Type: llm.SEMessageDelta, Usage: llm.Usage{OutputTokens: 7, CacheWriteTokens: 2}}, nil)
+		// 遵守迭代器协议:yield 返回 false 后立即停止,不再调用它。
+		if !yield(llm.StreamEvent{Type: llm.SEMessageStart, Usage: llm.Usage{InputTokens: 11, CacheReadTokens: 3}}, nil) {
+			return
+		}
+		if !yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "partial"}, nil) {
+			return
+		}
+		if !yield(llm.StreamEvent{Type: llm.SEMessageDelta, Usage: llm.Usage{OutputTokens: 7, CacheWriteTokens: 2}}, nil) {
+			return
+		}
 		yield(llm.StreamEvent{}, wantErr)
 	}}
 
@@ -41,9 +48,16 @@ func TestCaptureRunPersistsUsageOnProviderFailure(t *testing.T) {
 func TestCaptureRunPersistsUsageOnCancellation(t *testing.T) {
 	started := make(chan struct{})
 	provider := captureUsageProvider{stream: func(ctx context.Context, yield func(llm.StreamEvent, error) bool) {
-		yield(llm.StreamEvent{Type: llm.SEMessageStart, Usage: llm.Usage{InputTokens: 13, CacheReadTokens: 5}}, nil)
-		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "partial"}, nil)
-		yield(llm.StreamEvent{Type: llm.SEMessageDelta, Usage: llm.Usage{OutputTokens: 9, CacheWriteTokens: 4}}, nil)
+		// 遵守迭代器协议:yield 返回 false 后立即停止,不再调用它。
+		if !yield(llm.StreamEvent{Type: llm.SEMessageStart, Usage: llm.Usage{InputTokens: 13, CacheReadTokens: 5}}, nil) {
+			return
+		}
+		if !yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "partial"}, nil) {
+			return
+		}
+		if !yield(llm.StreamEvent{Type: llm.SEMessageDelta, Usage: llm.Usage{OutputTokens: 9, CacheWriteTokens: 4}}, nil) {
+			return
+		}
 		close(started)
 		<-ctx.Done()
 		yield(llm.StreamEvent{}, ctx.Err())
