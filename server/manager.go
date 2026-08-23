@@ -1488,6 +1488,18 @@ func (t *Task) NotifyGoal(texts []string) {
 	t.Notify()
 }
 
+// NotifyCancelled records that the human deleted intentID (reason = 删除原因), then
+// wakes the planner so the next round spells out which intent was removed and why.
+// The intent is stopped (not deleted); the reason is attached to it as a fact.
+func (t *Task) NotifyCancelled(intentID int64, reason string) {
+	if intentID > 0 {
+		t.trigMu.Lock()
+		t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "cancelled", IntentID: intentID, Detail: reason})
+		t.trigMu.Unlock()
+	}
+	t.Notify()
+}
+
 // drainTriggers returns and clears the trigger events accumulated since the last round.
 func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.trigMu.Lock()

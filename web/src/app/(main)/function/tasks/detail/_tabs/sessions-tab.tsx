@@ -41,6 +41,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
+import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, sseUrl } from "@/lib/api";
@@ -313,6 +314,7 @@ function SessionItem({
   onResume,
   onCancel,
   controlling,
+  deleted,
 }: {
   s: Session;
   active: boolean;
@@ -324,13 +326,15 @@ function SessionItem({
   onResume?: () => void;
   onCancel?: () => void;
   controlling?: boolean;
+  deleted?: boolean;
 }) {
-  const icon =
-    s.role === "worker" ? (
-      statusIcon(s.status)
-    ) : s.live ? (
-      <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
-    ) : null;
+  const icon = deleted ? (
+    <Trash2Icon className="size-3.5 text-destructive" />
+  ) : s.role === "worker" ? (
+    statusIcon(s.status)
+  ) : s.live ? (
+    <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
+  ) : null;
 
   const controllable = s.role === "worker" && !s.inherited && (s.status === "running" || s.status === "paused");
   return (
@@ -356,7 +360,14 @@ function SessionItem({
             来源 #{s.source_task_id}
           </Badge>
         )}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{displayTitle}</span>
+        <span className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}>
+          {displayTitle}
+        </span>
+        {deleted && (
+          <Badge variant="outline" className="shrink-0 border-destructive/40 text-destructive">
+            已删除
+          </Badge>
+        )}
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
           <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
@@ -403,8 +414,8 @@ function SessionItem({
             size="icon-xs"
             onClick={onCancel}
             disabled={controlling}
-            title="取消并清理 Worker 数据"
-            aria-label="取消并清理 Worker 数据"
+            title="删除该意图（需填写原因，保留数据）"
+            aria-label="删除该意图（需填写原因，保留数据）"
             className="text-destructive hover:text-destructive"
           >
             <Trash2Icon />
@@ -432,6 +443,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
+  const [cancelReason, setCancelReason] = React.useState("");
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -461,11 +473,15 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, []);
 
   const controlWorker = React.useCallback(
-    async (session: Session, action: "pause" | "resume" | "cancel") => {
+    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string) => {
       if (!session.intent_id || session.inherited || controllingIntent) return;
+      if (action === "cancel" && !reason?.trim()) {
+        toast.error("请填写删除原因");
+        return;
+      }
       setControllingIntent(session.intent_id);
       try {
-        const result = await api.controlIntent(taskId, session.intent_id, action);
+        await api.controlIntent(taskId, session.intent_id, action, reason);
         if (action === "pause") {
           patchIntentState(session.intent_id, "paused");
           toast.success(`Worker #${session.intent_id} 已暂停`);
@@ -473,14 +489,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           patchIntentState(session.intent_id, "open");
           toast.success(`Worker #${session.intent_id} 已恢复，等待重新领取`);
         } else {
-          patchIntentState(session.intent_id);
-          if (activeId === session.id) setActiveId(MAIN_ID);
-          const deleted = result.deleted;
-          toast.success(
-            deleted
-              ? `Worker #${session.intent_id} 已取消，清理 ${deleted.facts} 条事实、${deleted.findings} 个漏洞`
-              : `Worker #${session.intent_id} 已取消`,
-          );
+          // 删除 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
+          patchIntentState(session.intent_id, "stopped");
+          toast.success(`Worker #${session.intent_id} 已删除（原因已记录，规划者将据此重新规划）`);
+          setCancelReason("");
         }
       } catch (error) {
         toast.error(`Worker 操作失败：${(error as Error).message}`);
@@ -489,7 +501,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         setCancelIntent(null);
       }
     },
-    [activeId, controllingIntent, patchIntentState, taskId],
+    [controllingIntent, patchIntentState, taskId],
   );
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
@@ -964,21 +976,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // For each worker session (intent), derive the display title from the intent
   // payload summary. Also store the full TaskNode for the hover-JSON tooltip.
   const sessionMeta = React.useMemo(() => {
-    const map = new Map<string, { title: string; json: unknown }>();
+    const map = new Map<string, { title: string; json: unknown; deleted: boolean; deleteReason: string }>();
     for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
+      let deleted = false;
+      let deleteReason = "";
       if (node.payload) {
         try {
           const p = JSON.parse(node.payload);
           parsedPayload = p;
           if (p?.summary) title = String(p.summary);
+          if (p?.cancelled_by_user) {
+            deleted = true;
+            deleteReason = String(p.cancel_reason ?? "");
+          }
         } catch {
           title = node.payload.trim() || title;
         }
       }
       const json = { ...node, payload: parsedPayload };
-      map.set(node.id, { title, json });
+      map.set(node.id, { title, json, deleted, deleteReason });
     }
     return map;
   }, [allIntents]);
@@ -1327,6 +1345,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => setActiveId(s.id)}
                           controlling={controllingIntent === s.intent_id}
+                          deleted={meta?.deleted}
                           onPause={() => void controlWorker(s, "pause")}
                           onResume={() => void controlWorker(s, "resume")}
                           onCancel={() => {
@@ -1440,6 +1459,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               {isMain && <span>可交互</span>}
             </div>
           </div>
+          {(() => {
+            const dm = active.role === "worker" ? sessionMeta.get(active.id) : undefined;
+            if (!dm?.deleted) return null;
+            return (
+              <div className="flex items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2.5 text-xs">
+                <Trash2Icon className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                <div className="min-w-0">
+                  <span className="font-medium text-destructive">此意图已被用户删除</span>
+                  <span className="text-muted-foreground">
+                    （已停止执行，规划者已收到通知；意图与产出保留，可在下方查看历史）
+                  </span>
+                  {dm.deleteReason && (
+                    <p className="mt-1 break-words text-foreground">
+                      <span className="text-muted-foreground">删除原因：</span>
+                      {dm.deleteReason}
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
@@ -1569,24 +1609,44 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             </div>
           )}
         </div>
-        <AlertDialog open={cancelIntent !== null} onOpenChange={(open) => !open && setCancelIntent(null)}>
+        <AlertDialog
+          open={cancelIntent !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setCancelIntent(null);
+              setCancelReason("");
+            }
+          }}
+        >
           <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
             <AlertDialogHeader>
-              <AlertDialogTitle>取消 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
+              <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                取消后将删除该意图、执行记录，以及该意图直接登记的事实和漏洞；全局资产、流量和其他 Planner
-                意图不会删除。此操作不可撤销。
+                删除会<strong>停止该意图</strong>（不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <div className="grid gap-2 py-1">
+              <label htmlFor="cancel-reason" className="text-sm font-medium">
+                删除原因（必填）
+              </label>
+              <Textarea
+                id="cancel-reason"
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
+                rows={3}
+                autoFocus
+              />
+            </div>
             <AlertDialogFooter>
               <AlertDialogCancel>返回</AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
-                disabled={!cancelIntent || controllingIntent !== null}
-                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel")}
+                disabled={!cancelIntent || controllingIntent !== null || !cancelReason.trim()}
+                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)}
               >
                 {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
-                确认取消并清理
+                确认删除
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

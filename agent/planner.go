@@ -109,6 +109,8 @@ func renderPlannerTodos(items []actool.Todo) string {
 //	"finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
 //	"goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
 //	            single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
+//	"cancelled" — the human deleted intent IntentID (Detail = 删除原因). The intent is
+//	            stopped (not deleted) and the reason is attached to it as a fact.
 type TriggerEvent struct {
 	Kind     string
 	IntentID int64
@@ -136,6 +138,8 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 			}
 		case "finding":
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
+		case "cancelled":
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已停止（不再执行），其原因已作为事实挂在该意图上；请据此重新规划。", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		default: // "done"
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), workerOutput(ts, ev.IntentID)))
 		}

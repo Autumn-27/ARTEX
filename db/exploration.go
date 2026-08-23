@@ -306,6 +306,67 @@ type IntentCleanup struct {
 	Activities int64 `json:"activities"`
 }
 
+// StopIntentWithReason marks a running/paused intent as 'stopped' WITHOUT deleting
+// it or any of its yielded facts/findings/activities, and records the user's reason
+// as a fact node hanging off that intent (intent --yields--> fact). Returns the new
+// fact node id. The caller must first stop a running worker to prevent late writes.
+// Used by the "delete work" action, which no longer destroys data — it stops the
+// intent and attaches why, so the planner can account for it.
+func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var state string
+	var rawPayload []byte
+	if err := tx.QueryRow(`SELECT state, payload FROM exploration_nodes
+		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state, &rawPayload); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("intent not found")
+		}
+		return 0, err
+	}
+	if state != "running" && state != "paused" {
+		return 0, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
+	}
+	// Merge the delete marker into the intent's own payload so it travels with the
+	// intent everywhere (session list badge, detail banner) without a schema change.
+	ip := map[string]any{}
+	_ = json.Unmarshal(rawPayload, &ip)
+	ip["cancelled_by_user"] = true
+	ip["cancel_reason"] = reason
+	newPayload, _ := json.Marshal(ip)
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL
+		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
+		return 0, err
+	}
+
+	if origin == "" {
+		origin = "user"
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"summary":     "用户删除了该意图",
+		"detail":      "删除原因：" + reason,
+		"confidence":  "observed",
+		"user_cancel": true,
+	})
+	var factID int64
+	if err := tx.QueryRow(`
+INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
+VALUES ($1, 'fact', $2, 5, 'confirmed', $3) RETURNING id`,
+		s.expID, string(raw), origin).Scan(&factID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`
+INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
+ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
+		return 0, err
+	}
+	return factID, tx.Commit()
+}
+
 // CancelIntent removes one local intent and the fact/finding nodes it directly
 // yielded. The standalone finding row must be deleted before its node (whose FK
 // otherwise uses ON DELETE SET NULL), so the entire cleanup is kept in one DB

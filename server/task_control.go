@@ -115,7 +115,7 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 	return out, nil
 }
 
-func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action string) (intentControlResult, error) {
+func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason string) (intentControlResult, error) {
 	out := intentControlResult{ID: iid}
 	node, err := t.Store.GetNode(iid)
 	if err != nil {
@@ -153,20 +153,25 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		t.Notify()
 		out.State = "open"
 	case "cancel":
+		// 「删除」新语义:不销毁意图与产出,而是把意图停到 stopped、把用户填写的删除原因
+		// 作为一条事实挂到该意图上,并用 cancelled 触发告知 planner(意图内容 + 删除原因)。
 		if node.State != "running" && node.State != "paused" {
-			return out, fmt.Errorf("仅运行中或已暂停的意图可以取消")
+			return out, fmt.Errorf("仅运行中或已暂停的意图可以删除")
+		}
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return out, fmt.Errorf("请填写删除原因")
 		}
 		if node.State == "running" {
 			if err := s.engine.ControlWork(ctx, iid, "cancel"); err != nil {
 				return out, err
 			}
 		}
-		deleted, err := t.Store.CancelIntent(iid)
-		if err != nil {
+		if _, err := t.Store.StopIntentWithReason(iid, reason, "user"); err != nil {
 			return out, err
 		}
-		t.Notify()
-		out.State, out.Deleted = "cancelled", &deleted
+		t.NotifyCancelled(iid, reason)
+		out.State = "stopped"
 	default:
 		return out, fmt.Errorf("action must be pause|resume|cancel")
 	}
