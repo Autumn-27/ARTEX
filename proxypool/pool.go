@@ -2,6 +2,7 @@ package proxypool
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"sync"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/Autumn-27/artex/db"
 )
+
+// errUnknownSource is returned when a fetch targets a name not in BuiltinSources.
+var errUnknownSource = errors.New("unknown proxy source")
 
 // Config wires the pool's background loops to live settings via callbacks, so a
 // settings change takes effect on the next tick without restarting the loops.
@@ -108,34 +112,50 @@ func (p *Pool) probeURL() string {
 // then immediately probes the freshly-added ones so they don't sit unknown for a
 // full check interval.
 func (p *Pool) fetchOnce(ctx context.Context) {
-	store := p.db.Proxies()
-	names, err := store.EnabledSources()
+	names, err := p.db.Proxies().EnabledSources()
 	if err != nil {
 		log.Printf("[proxypool] list enabled sources: %v", err)
 		return
 	}
 	for _, name := range names {
-		src, ok := sourceByName(name)
-		if !ok {
-			continue
-		}
-		proxies, ferr := fetch(ctx, src, p.client)
-		if ferr != nil {
-			_ = store.RecordFetch(name, 0, trimErr(ferr.Error()))
-			log.Printf("[proxypool] fetch %s: %v", name, ferr)
-			continue
-		}
-		added, uerr := store.UpsertFromSource(name, proxies)
-		if uerr != nil {
-			_ = store.RecordFetch(name, len(proxies), trimErr(uerr.Error()))
-			log.Printf("[proxypool] upsert %s: %v", name, uerr)
-			continue
-		}
-		_ = store.RecordFetch(name, len(proxies), "")
-		log.Printf("[proxypool] source %s: fetched %d, added %d new", name, len(proxies), added)
+		_, _, _ = p.fetchSource(ctx, name)
 	}
 	// Probe whatever is now enabled+unknown so new nodes become usable fast.
 	p.probeOnce(ctx)
+}
+
+// fetchSource pulls one source by name and upserts its proxies. Returns the total
+// fetched and how many were newly added. Records the outcome regardless of the
+// source's enabled state, so the manual "fetch now" button works on any source.
+func (p *Pool) fetchSource(ctx context.Context, name string) (total, added int, err error) {
+	store := p.db.Proxies()
+	src, ok := sourceByName(name)
+	if !ok {
+		return 0, 0, errUnknownSource
+	}
+	proxies, ferr := fetch(ctx, src, p.client)
+	if ferr != nil {
+		_ = store.RecordFetch(name, 0, trimErr(ferr.Error()))
+		return 0, 0, ferr
+	}
+	added, uerr := store.UpsertFromSource(name, proxies)
+	if uerr != nil {
+		_ = store.RecordFetch(name, len(proxies), trimErr(uerr.Error()))
+		return len(proxies), 0, uerr
+	}
+	_ = store.RecordFetch(name, len(proxies), "")
+	log.Printf("[proxypool] source %s: fetched %d, added %d new", name, len(proxies), added)
+	return len(proxies), added, nil
+}
+
+// FetchSourceNow pulls one source on demand (manual "fetch now" button), then
+// probes so freshly-added nodes become usable without waiting for the loop.
+func (p *Pool) FetchSourceNow(ctx context.Context, name string) (total, added int, err error) {
+	total, added, err = p.fetchSource(ctx, name)
+	if err == nil && added > 0 {
+		go p.probeOnce(context.WithoutCancel(ctx))
+	}
+	return total, added, err
 }
 
 // probeOnce concurrently probes every enabled proxy and writes back health.

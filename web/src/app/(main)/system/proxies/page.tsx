@@ -64,6 +64,7 @@ export default function ProxyPoolPage() {
   const [sources, setSources] = React.useState<ProxySource[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [checking, setChecking] = React.useState<Set<number>>(new Set());
+  const [fetching, setFetching] = React.useState<Set<string>>(new Set());
   const [editing, setEditing] = React.useState<ProxyNode | null>(null);
   const [form, setForm] = React.useState<ProxyInput | null>(null);
   const [importOpen, setImportOpen] = React.useState(false);
@@ -192,6 +193,23 @@ export default function ProxyPoolPage() {
     }
   };
 
+  const fetchSource = async (name: string) => {
+    setFetching((prev) => new Set(prev).add(name));
+    try {
+      const res = await api.fetchProxySource(name);
+      toast.success(`抓取 ${res.fetched} 个，新增 ${res.added} 个`);
+      await load();
+    } catch (e) {
+      toast.error(`抓取失败：${(e as Error).message}`);
+    } finally {
+      setFetching((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
+    }
+  };
+
   const toggleSource = async (name: string, enabled: boolean) => {
     setSources((prev) => prev.map((s) => (s.name === name ? { ...s, enabled } : s)));
     try {
@@ -230,7 +248,19 @@ export default function ProxyPoolPage() {
                     : "尚未抓取"}
                 </div>
               </div>
-              <Switch checked={s.enabled} onCheckedChange={(v) => toggleSource(s.name, v)} />
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label="立即抓取"
+                  title="立即抓取一次"
+                  disabled={fetching.has(s.name)}
+                  onClick={() => fetchSource(s.name)}
+                >
+                  {fetching.has(s.name) ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                </Button>
+                <Switch checked={s.enabled} onCheckedChange={(v) => toggleSource(s.name, v)} />
+              </div>
             </div>
           ))}
         </CardContent>

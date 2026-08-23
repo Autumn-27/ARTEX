@@ -697,6 +697,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/proxies/{id}/check", s.checkProxy)
 	mux.HandleFunc("GET /api/proxy-sources", s.listProxySources)
 	mux.HandleFunc("PUT /api/proxy-sources/{name}", s.setProxySource)
+	mux.HandleFunc("POST /api/proxy-sources/{name}/fetch", s.fetchProxySource)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)

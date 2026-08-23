@@ -374,6 +374,8 @@ export const api = {
   proxySources: () => get<{ sources: ProxySource[] }>("/proxy-sources").then((r) => arr(r.sources)),
   setProxySource: (name: string, enabled: boolean) =>
     put<{ ok: boolean }>(`/proxy-sources/${encodeURIComponent(name)}`, { enabled }),
+  fetchProxySource: (name: string) =>
+    post<{ fetched: number; added: number }>(`/proxy-sources/${encodeURIComponent(name)}/fetch`, {}),
 
   // ---- exploration (per task) ----
   frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),

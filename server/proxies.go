@@ -177,6 +177,17 @@ func (s *Server) listProxySources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"sources": sources})
 }
 
+// fetchProxySource POST /api/proxy-sources/{name}/fetch — pull one free source now.
+func (s *Server) fetchProxySource(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	total, added, err := s.m.ProxyPool().FetchSourceNow(r.Context(), name)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"fetched": total, "added": added})
+}
+
 // setProxySource PUT /api/proxy-sources/{name} — body {"enabled":bool}.
 func (s *Server) setProxySource(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
