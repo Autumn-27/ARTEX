@@ -162,6 +162,7 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	tsx := agent.NewToolSet(t.Store, "orchestrator")
 	if s.m.Assets() != nil {
 		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
+		tsx.SetProxyStore(s.m.Assets().Proxies())
 	}
 	tsx.SetNotify(t.Notify) // hint writes wake this task's planner (no-op for read tools)
 	return pick(tsx).Call(ctx, inner, nil)

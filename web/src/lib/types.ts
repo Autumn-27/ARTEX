@@ -249,6 +249,69 @@ export interface TaskScopeRow {
   reason?: string;
 }
 
+// ---- 代理池（出口代理轮换）----
+export type ProxyProtocol = "http" | "https" | "socks5";
+
+// 一个代理节点。password 由后端打码返回（"********"），前端提交时留空表示不改。
+// 命名 ProxyNode 而非 Proxy：避免遮蔽全局 Proxy 对象（biome noShadowRestrictedNames）。
+export interface ProxyNode {
+  id: number;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  anonymity?: string; // elite/anonymous/transparent
+  region?: string;
+  tags: string[];
+  label?: string;
+  source: string; // manual/import/<源名>
+  trusted: boolean;
+  enabled: boolean;
+  healthy: boolean;
+  latency_ms: number;
+  last_check_at?: string;
+  last_ok_at?: string;
+  last_error?: string;
+  fail_streak: number;
+  check_count: number;
+  ok_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// 新增/编辑代理的提交体。
+export interface ProxyInput {
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  anonymity?: string;
+  region?: string;
+  tags?: string[];
+  label?: string;
+  enabled: boolean;
+}
+
+export interface ProxyQuery {
+  protocol?: string;
+  region?: string;
+  tag?: string;
+  healthy?: boolean;
+  page?: number; // 1-based；省略 = 不分页返回全部
+  limit?: number;
+}
+
+// 免费代理源开关 + 上次抓取状态。
+export interface ProxySource {
+  name: string;
+  enabled: boolean;
+  last_fetch_at?: string;
+  last_count: number;
+  last_error?: string;
+}
+
 export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
 
 // 新增企业时提交的结构化资产范围规则。
@@ -691,6 +754,12 @@ export interface Settings {
   llm_pool_enabled?: boolean; // 默认 false
   // 绑定了指定配置的 agent/任务失败时是否也回落到轮询链。默认 false = 绑定即独占。
   llm_pool_bind_fallback?: boolean;
+  // 代理池主开关（默认关）。开启后：MITM 开→上游走池轮换；MITM 关→注入代理池网关。
+  proxy_pool_enabled?: boolean;
+  // 安全阀门（默认开）：主出口只轮换可信（手动/导入）代理，免费源不进主出口。
+  proxy_egress_trusted_only?: boolean;
+  proxy_fetch_interval_min?: number; // 免费源抓取间隔(分钟，默认 15)
+  proxy_check_interval_min?: number; // 验活间隔(分钟，默认 30)
 }
 
 // ---- LLM config ----

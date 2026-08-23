@@ -11,7 +11,7 @@ import (
 
 // TestMgmtAPI exercises the PostgreSQL-backed management API through the real mux.
 func TestMgmtAPI(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("database unavailable (%v) — skipping management API test", err)
 	}

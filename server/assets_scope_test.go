@@ -34,7 +34,7 @@ func TestCompanyScopeInputsAcceptStructuredAndLegacyRules(t *testing.T) {
 }
 
 func TestCreateCompanyRejectsNormalizedDuplicateWithoutChangingScope(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -74,7 +74,7 @@ func TestCreateCompanyRejectsNormalizedDuplicateWithoutChangingScope(t *testing.
 }
 
 func TestDeleteCompanyRefreshesLiveTaskCompanyIDs(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -115,7 +115,7 @@ func TestDeleteCompanyRefreshesLiveTaskCompanyIDs(t *testing.T) {
 }
 
 func TestCompanyScopeHTTPErrorClassificationAndBounds(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -180,7 +180,7 @@ func TestCompanyScopeHTTPErrorClassificationAndBounds(t *testing.T) {
 }
 
 func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -206,7 +206,7 @@ func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
 }
 
 func TestDeleteCompanyRejectsBadJSONAndReportsMissing(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
@@ -245,7 +245,7 @@ func TestDeleteCompanyRejectsBadJSONAndReportsMissing(t *testing.T) {
 }
 
 func TestCompanyScopeSystemFailureIsHTTP500(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}

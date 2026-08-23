@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CpuIcon, KeyboardIcon, RadioTowerIcon, SearchIcon } from "lucide-react";
+import { CpuIcon, KeyboardIcon, RadioTowerIcon, RouteIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,8 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  const [proxyPool, setProxyPool] = React.useState(false);
+  const [proxyTrustedOnly, setProxyTrustedOnly] = React.useState(true);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -45,7 +47,30 @@ export default function SystemSettingsPage() {
     setProxyInput(s.web_search_proxy || "");
     setPyInterp(s.python_interpreter || "");
     setWorkers(String(s.workers ?? 3));
+    setProxyPool(!!s.proxy_pool_enabled);
+    setProxyTrustedOnly(s.proxy_egress_trusted_only ?? true);
   }, []);
+
+  const toggleProxyPool = (v: boolean) => {
+    setProxyPool(v); // optimistic
+    api
+      .setSettings({ proxy_pool_enabled: v })
+      .then(apply)
+      .catch((e) => {
+        setProxyPool(!v);
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
+  };
+  const toggleProxyTrustedOnly = (v: boolean) => {
+    setProxyTrustedOnly(v); // optimistic
+    api
+      .setSettings({ proxy_egress_trusted_only: v })
+      .then(apply)
+      .catch((e) => {
+        setProxyTrustedOnly(!v);
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
+  };
 
   const saveWorkers = () => {
     const n = Number(workers);
@@ -440,6 +465,41 @@ export default function SystemSettingsPage() {
               <Button onClick={saveWorkers} disabled={!loaded || savingWorkers}>
                 保存
               </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RouteIcon className="size-4" />
+              代理池（出口代理）
+            </CardTitle>
+            <CardDescription>
+              开启后：流量录制<b>开</b> → MITM 上游走代理池轮换；流量录制<b>关</b> → 注入代理池网关（纯转发、不抓包）。
+              代理节点在「代理池」页管理。
+              <br />
+              安全阀门<b>仅可信出口</b>（默认开）：主出口只轮换手动/导入的可信代理，免费源节点不进主出口
+              （agent 仍可用 list_proxies 自行选用）。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="proxy-pool" className="text-sm font-normal text-muted-foreground">
+                {proxyPool ? "已开启 · 出口经代理池轮换" : "已关闭 · agent 直连出口"}
+              </Label>
+              <Switch id="proxy-pool" checked={proxyPool} disabled={!loaded} onCheckedChange={toggleProxyPool} />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="proxy-trusted" className="text-sm font-normal text-muted-foreground">
+                仅可信出口（免费源不进主出口）
+              </Label>
+              <Switch
+                id="proxy-trusted"
+                checked={proxyTrustedOnly}
+                disabled={!loaded}
+                onCheckedChange={toggleProxyTrustedOnly}
+              />
             </div>
           </CardContent>
         </Card>

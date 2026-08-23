@@ -43,7 +43,7 @@ func restoreConcurrencySetting(t *testing.T, m *Manager) func() {
 }
 
 func TestAdmitAlreadyRunningTaskDoesNotQueueAfterLimitDecrease(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -85,7 +85,7 @@ func TestAdmitAlreadyRunningTaskDoesNotQueueAfterLimitDecrease(t *testing.T) {
 }
 
 func TestAdmissionDoesNotOverwriteConcurrentTerminalStatus(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -122,7 +122,7 @@ func TestAdmissionDoesNotOverwriteConcurrentTerminalStatus(t *testing.T) {
 }
 
 func TestAdmitKeepsQueuedBootstrapMode(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -165,7 +165,7 @@ func TestAdmitKeepsQueuedBootstrapMode(t *testing.T) {
 }
 
 func TestTerminalTaskQueuedByAdmissionKeepsExecutionBarrier(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -213,7 +213,7 @@ func TestTerminalTaskQueuedByAdmissionKeepsExecutionBarrier(t *testing.T) {
 }
 
 func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -299,7 +299,7 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 }
 
 func TestQueuedTaskCanPauseAndResumeAtFIFOTail(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -349,7 +349,7 @@ func TestQueuedTaskCanPauseAndResumeAtFIFOTail(t *testing.T) {
 }
 
 func TestReadyFIFOIsAdmittedBeforeNewTask(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -396,7 +396,7 @@ func TestReadyFIFOIsAdmittedBeforeNewTask(t *testing.T) {
 }
 
 func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -435,7 +435,7 @@ func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
 }
 
 func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -489,7 +489,7 @@ func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
 }
 
 func TestRerunAdmissionFailureRestoresIntentState(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -533,7 +533,7 @@ func TestRerunAdmissionFailureRestoresIntentState(t *testing.T) {
 }
 
 func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -574,7 +574,7 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 // An Agent binding outranks the task's LLM chain; roles left unbound keep using
 // the chain, so binding one role does not move the others off it.
 func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -641,7 +641,7 @@ func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
 }
 
 func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -686,7 +686,7 @@ func TestTokenStatsWithoutTaskReturnsStableShape(t *testing.T) {
 }
 
 func TestBatchControlLimitCountsDeduplicatedIDs(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -760,7 +760,7 @@ func TestBatchControlLimitCountsDeduplicatedIDs(t *testing.T) {
 }
 
 func TestPauseTaskToolPersistsAndDequeuesTask(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -796,7 +796,7 @@ func TestPauseTaskToolPersistsAndDequeuesTask(t *testing.T) {
 }
 
 func TestPauseTaskToolUsesOrchestratorCancellationCause(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}

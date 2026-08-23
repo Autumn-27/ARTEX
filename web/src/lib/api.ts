@@ -46,6 +46,10 @@ import type {
   ModelTokenStat,
   PromptVar,
   PromptVersion,
+  ProxyInput,
+  ProxyNode,
+  ProxyQuery,
+  ProxySource,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -351,6 +355,32 @@ export const api = {
       method: "DELETE",
       body: JSON.stringify({ delete_assets: deleteAssets }),
     }),
+
+  // ---- proxy pool ----
+  proxies: (q: ProxyQuery = {}) => {
+    const p = new URLSearchParams();
+    if (q.protocol) p.set("protocol", q.protocol);
+    if (q.region) p.set("region", q.region);
+    if (q.tag) p.set("tag", q.tag);
+    if (q.healthy) p.set("healthy", "1");
+    if (q.page) p.set("page", String(q.page));
+    if (q.limit) p.set("limit", String(q.limit));
+    const qs = p.toString();
+    return get<{ proxies: ProxyNode[]; total: number }>(`/proxies${qs ? `?${qs}` : ""}`).then((r) => ({
+      proxies: arr(r.proxies),
+      total: r.total ?? 0,
+    }));
+  },
+  createProxy: (input: ProxyInput) => post<{ id: number }>("/proxies", input),
+  updateProxy: (id: number, input: ProxyInput) => put<{ ok: boolean }>(`/proxies/${id}`, input),
+  deleteProxy: (id: number) => del<{ ok: boolean }>(`/proxies/${id}`),
+  importProxies: (text: string) => post<{ added: number; invalid: string[] }>("/proxies/import", { text }),
+  checkProxy: (id: number) => post<{ ok: boolean; latency_ms: number; error: string }>(`/proxies/${id}/check`, {}),
+  proxySources: () => get<{ sources: ProxySource[] }>("/proxy-sources").then((r) => arr(r.sources)),
+  setProxySource: (name: string, enabled: boolean) =>
+    put<{ ok: boolean }>(`/proxy-sources/${encodeURIComponent(name)}`, { enabled }),
+  fetchProxySource: (name: string) =>
+    post<{ fetched: number; added: number }>(`/proxy-sources/${encodeURIComponent(name)}/fetch`, {}),
 
   // ---- exploration (per task) ----
   frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),
