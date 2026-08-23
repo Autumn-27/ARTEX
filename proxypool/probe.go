@@ -66,7 +66,7 @@ func proxyHTTPClient(proxyURL *url.URL, timeout time.Duration) (*http.Client, er
 	switch strings.ToLower(proxyURL.Scheme) {
 	case "http", "https":
 		tr.Proxy = http.ProxyURL(proxyURL)
-	case "socks5", "socks4":
+	case "socks5":
 		tr.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
 			return dialSOCKS(ctx, proxyURL, address)
 		}

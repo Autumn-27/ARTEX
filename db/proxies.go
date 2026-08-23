@@ -468,9 +468,9 @@ func ParseProxyLine(line string) (Proxy, error) {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
-	case "http", "https", "socks5", "socks4":
+	case "http", "https", "socks5":
 	default:
-		return Proxy{}, fmt.Errorf("不支持的协议: %s", u.Scheme)
+		return Proxy{}, fmt.Errorf("不支持的协议: %s（仅支持 http/https/socks5）", u.Scheme)
 	}
 	host := u.Hostname()
 	portStr := u.Port()

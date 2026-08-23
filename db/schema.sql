@@ -791,7 +791,7 @@ CREATE INDEX IF NOT EXISTS idx_server_logs_id ON server_logs(id DESC);
 -- 免费源抓来的 trusted=false，默认不进主出口轮换。质量字段驱动自动禁用死代理 + 优先稳定节点。
 CREATE TABLE IF NOT EXISTS proxies (
     id            BIGSERIAL PRIMARY KEY,
-    protocol      TEXT NOT NULL DEFAULT 'http',  -- http/https/socks5/socks4
+    protocol      TEXT NOT NULL DEFAULT 'http',  -- http/https/socks5
     host          TEXT NOT NULL,
     port          INTEGER NOT NULL,
     username      TEXT NOT NULL DEFAULT '',

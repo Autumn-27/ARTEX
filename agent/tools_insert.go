@@ -592,11 +592,11 @@ func (t *ToolSet) listProxies() actool.CoreTool {
 	return readTool(
 		"list_proxies",
 		"列出代理池中【当前健康】的出口代理节点，供你在命令里自行使用（如 curl -x <proxy>、"+
-			"proxychains、nmap --proxies）访问目标、轮换出口 IP。返回 http/https/socks5/socks4 代理的 "+
+			"proxychains、nmap --proxies）访问目标、轮换出口 IP。返回 http/https/socks5 代理的 "+
 			"address（scheme://host:port）、地区、匿名度、延迟。可选 protocol/region/tag 过滤。"+
 			"只读：不改变全局出口设置。代理池未开启时返回空。",
 		obj(map[string]any{
-			"protocol": str("按协议过滤(可选)：http/https/socks5/socks4"),
+			"protocol": str("按协议过滤(可选)：http/https/socks5"),
 			"region":   str("按地区码过滤(可选)，如 CN/US"),
 			"tag":      str("按标签过滤(可选)"),
 		}),

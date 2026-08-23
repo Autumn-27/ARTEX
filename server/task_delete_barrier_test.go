@@ -145,7 +145,7 @@ func TestTaskLifecycleRechecksDeleteBarrierAfterConcLock(t *testing.T) {
 }
 
 func TestAbortTaskDeleteUsesPersistedPauseAndQueueState(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}

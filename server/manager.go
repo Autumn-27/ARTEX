@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -226,7 +227,9 @@ type Manager struct {
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
-	proxyPool        *proxypool.Pool // 出口代理池后台任务（抓取 + 验活）
+	proxyPool        *proxypool.Pool    // 出口代理池后台任务（抓取 + 验活）
+	proxyGW          *proxypool.Gateway // 入口C：本地转发网关（纯 TCP，不解密）
+	proxyGWAddr      string             // 网关监听地址（空 = 禁用入口C）
 }
 
 // Settings keys the UI toggles at runtime.
@@ -320,7 +323,7 @@ func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
 // traffic-recording proxy. PostgreSQL is required (it is the single data source).
-func NewManager(dir, proxyAddr string) (*Manager, error) {
+func NewManager(dir, proxyAddr, gatewayAddr string) (*Manager, error) {
 	// Resolve the data dir to an ABSOLUTE path up front. Every data path derives
 	// from it — notably the MITM CA cert, whose path is injected into worker shells
 	// (SSL_CERT_FILE/CURL_CA_BUNDLE) and read by WebFetch. A relative path (the
@@ -348,13 +351,16 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
 	}
-	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg), proxyGWAddr: gatewayAddr}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
 			log.Printf("[traffic] disabled: %v", err)
 		} else {
 			m.traffic = tr
+			// 入口A：代理池开启时，MITM 上游按目标 host 从池里选一个出口（每 host 粘性，
+			// 受"仅可信"安全阀门约束）；池关或无可用代理时返回 nil → 直连目标。
+			tr.SetPoolUpstream(m.selectPoolUpstream)
 			go func() {
 				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA)", proxyAddr, tr.ProxyAddr())
 				if err := tr.Start(); err != nil {
@@ -396,7 +402,32 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		CheckInterval: func() time.Duration { return time.Duration(m.proxyCheckMin()) * time.Minute },
 	})
 	m.proxyPool.Start(context.Background())
+	// 入口C：本地转发网关（纯 TCP，不解密、不抓包）。常驻监听；仅当 MITM 关 + 池开时
+	// ProxyAddr() 才把它注入给 agent（见下）。上游选择与入口A 共用 selectPoolUpstream。
+	if gatewayAddr != "" {
+		gw := proxypool.NewGateway(gatewayAddr)
+		gw.SetUpstream(m.selectPoolUpstream)
+		if err := gw.Start(); err != nil {
+			log.Printf("[proxypool] gateway disabled: %v", err)
+		} else {
+			m.proxyGW = gw
+		}
+	}
 	return m, nil
+}
+
+// selectPoolUpstream picks a pool proxy URL for a target host, or nil to dial
+// direct. Shared by the MITM upstream (入口A) and the gateway (入口C): honors the
+// pool master switch and the trusted-only egress safety valve.
+func (m *Manager) selectPoolUpstream(host string) *url.URL {
+	if !m.ProxyPoolEnabled() {
+		return nil
+	}
+	p, err := m.pg.Proxies().SelectForHost(host, m.ProxyEgressTrustedOnly())
+	if err != nil || p == nil {
+		return nil
+	}
+	return p.URL()
 }
 
 // TrafficEnabled reports whether traffic capture is on (default off). When off,
@@ -721,22 +752,30 @@ func (m *Manager) settingIntDefault(key string, def int) int {
 	return n
 }
 
-// ProxyAddr returns the recording proxy address agents route through — empty when
-// traffic capture is off, so no proxy is injected (agent runs direct, no recording).
+// ProxyAddr returns the local proxy address agents route through, decided by the
+// MITM(traffic) × proxy-pool switch matrix:
+//   - MITM on            → the recording proxy (入口A; pool-on makes its upstream rotate)
+//   - MITM off + pool on → the pool gateway (入口C; plain forward, no capture)
+//   - both off           → "" (direct, nothing injected)
 func (m *Manager) ProxyAddr() string {
-	if m.traffic == nil || !m.TrafficEnabled() {
-		return ""
+	if m.traffic != nil && m.TrafficEnabled() {
+		return m.traffic.ProxyAddr()
 	}
-	return m.traffic.ProxyAddr()
+	if m.proxyGW != nil && m.ProxyPoolEnabled() {
+		return "http://" + m.proxyGW.Addr()
+	}
+	return ""
 }
 
-// ProxyCACert returns the recording proxy's CA cert path (empty when no proxy or
-// traffic capture is off), which WebFetch trusts to verify HTTPS through the MITM.
+// ProxyCACert returns the CA the injected proxy needs trusted. Only the MITM
+// recording proxy terminates TLS and needs its CA; the gateway is a plain tunnel
+// that never decrypts, so it MUST inject no CA (the agent does real TLS to the
+// target). Empty when direct or in gateway mode.
 func (m *Manager) ProxyCACert() string {
-	if m.traffic == nil || !m.TrafficEnabled() {
-		return ""
+	if m.traffic != nil && m.TrafficEnabled() {
+		return m.traffic.CACertPath()
 	}
-	return m.traffic.CACertPath()
+	return ""
 }
 
 func (m *Manager) Close() error {
@@ -744,6 +783,9 @@ func (m *Manager) Close() error {
 	defer m.mu.Unlock()
 	if m.proxyPool != nil {
 		m.proxyPool.Stop()
+	}
+	if m.proxyGW != nil {
+		m.proxyGW.Stop()
 	}
 	if m.traffic != nil {
 		m.traffic.Close()

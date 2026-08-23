@@ -13,7 +13,7 @@ import (
 )
 
 func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(t.TempDir(), "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
@@ -172,7 +172,7 @@ func TestStageTaskFilesRollbackReportsRestoreFailure(t *testing.T) {
 
 func TestManagerDeleteTaskRestoresFilesAndTrafficWhenPostgresDeleteFails(t *testing.T) {
 	dataDir := t.TempDir()
-	m, err := NewManager(dataDir, "")
+	m, err := NewManager(dataDir, "", "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}

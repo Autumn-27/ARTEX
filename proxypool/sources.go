@@ -27,10 +27,10 @@ type Source struct {
 // daily-updated raw text lists with a stable "ip:port\n" format. If a source dies
 // (raw lists do rot), the user disables it; adding/removing entries here is the
 // only maintenance touch-point.
+// 仅收录可拨号的协议（http/https/socks5）——socks4 go-mitmproxy/x/net 均不支持，故不纳入。
 var BuiltinSources = []Source{
 	{Name: "TheSpeedX-http", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", Protocol: "http"},
 	{Name: "TheSpeedX-socks5", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", Protocol: "socks5"},
-	{Name: "TheSpeedX-socks4", URL: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", Protocol: "socks4"},
 	{Name: "monosans-http", URL: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", Protocol: "http"},
 	{Name: "monosans-socks5", URL: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", Protocol: "socks5"},
 }

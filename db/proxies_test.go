@@ -20,7 +20,7 @@ func TestParseProxyLine(t *testing.T) {
 		{in: "1.2.3.4:8080", proto: "http", host: "1.2.3.4", port: 8080},
 		{in: "socks5://9.9.9.9:1080", proto: "socks5", host: "9.9.9.9", port: 1080},
 		{in: "http://user:pass@10.0.0.1:3128", proto: "http", host: "10.0.0.1", port: 3128, user: "user", pass: "pass"},
-		{in: "socks4://5.6.7.8:1080", proto: "socks4", host: "5.6.7.8", port: 1080},
+		{in: "socks4://5.6.7.8:1080", wantErr: true}, // socks4 不支持（仅 http/https/socks5）
 		{in: "  8.8.8.8:80  ", proto: "http", host: "8.8.8.8", port: 80},
 		{in: "ftp://1.2.3.4:21", wantErr: true}, // unsupported scheme
 		{in: "1.2.3.4", wantErr: true},          // no port

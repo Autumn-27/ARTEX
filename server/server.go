@@ -2987,6 +2987,7 @@ func (s *Server) settingsPayload() map[string]any {
 	if concLimit == 0 {
 		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
 	}
+	fetchMin, checkMin := s.m.ProxyIntervals()
 	return map[string]any{
 		"traffic_capture":          s.m.TrafficEnabled(),
 		"llm_record":               s.m.LLMRecordEnabled(),
@@ -3003,6 +3004,11 @@ func (s *Server) settingsPayload() map[string]any {
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
 		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
+		// 代理池：主开关；"主出口只走可信代理"安全阀门；抓取/验活间隔(分钟)。
+		"proxy_pool_enabled":        s.m.ProxyPoolEnabled(),
+		"proxy_egress_trusted_only": s.m.ProxyEgressTrustedOnly(),
+		"proxy_fetch_interval_min":  fetchMin,
+		"proxy_check_interval_min":  checkMin,
 	}
 }
 
@@ -3043,6 +3049,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 重建 provider 链才生效，走下面的 changed → applyLLM 路径。
 		LLMPoolEnabled      *bool `json:"llm_pool_enabled"`
 		LLMPoolBindFallback *bool `json:"llm_pool_bind_fallback"`
+		// 代理池：主开关、"仅可信"安全阀门、抓取/验活间隔(分钟)。即时生效，无需重建 agent
+		// （出口注入在每次取 ProxyAddr 时按开关计算；后台 loop 每 tick 读间隔）。
+		ProxyPoolEnabled       *bool `json:"proxy_pool_enabled"`
+		ProxyEgressTrustedOnly *bool `json:"proxy_egress_trusted_only"`
+		ProxyFetchIntervalMin  *int  `json:"proxy_fetch_interval_min"`
+		ProxyCheckIntervalMin  *int  `json:"proxy_check_interval_min"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3113,6 +3125,34 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changed = true
+	}
+	if req.ProxyPoolEnabled != nil {
+		if err := s.m.SetProxyPoolEnabled(*req.ProxyPoolEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		// 开关改变 ProxyAddr() 注入的出口地址（traffic 关时：网关 vs 直连），需重建
+		// agent 让新出口生效——与 traffic_capture 同理。
+		changed = true
+	}
+	if req.ProxyEgressTrustedOnly != nil {
+		if err := s.m.SetProxyEgressTrustedOnly(*req.ProxyEgressTrustedOnly); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.ProxyFetchIntervalMin != nil || req.ProxyCheckIntervalMin != nil {
+		fetchMin, checkMin := 0, 0
+		if req.ProxyFetchIntervalMin != nil {
+			fetchMin = *req.ProxyFetchIntervalMin
+		}
+		if req.ProxyCheckIntervalMin != nil {
+			checkMin = *req.ProxyCheckIntervalMin
+		}
+		if err := s.m.SetProxyIntervals(fetchMin, checkMin); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.

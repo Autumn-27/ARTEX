@@ -120,6 +120,21 @@ type Traffic struct {
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
 	pass sync.Map // hostname(string) -> struct{}
+	// poolUpstream, if set, picks an upstream proxy for a target host so recorded
+	// traffic egresses through the proxy pool (入口A). nil / returns nil = dial the
+	// target directly. Set by the server; the pool switch/selection lives there.
+	poolUpstream atomic.Pointer[func(host string) *url.URL]
+}
+
+// SetPoolUpstream installs (or clears with nil) the proxy-pool upstream resolver.
+// When set and it returns a non-nil URL for a host, recorded target traffic to
+// that host is forwarded through the returned proxy instead of dialed directly.
+func (t *Traffic) SetPoolUpstream(fn func(host string) *url.URL) {
+	if fn == nil {
+		t.poolUpstream.Store(nil)
+		return
+	}
+	t.poolUpstream.Store(&fn)
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -159,12 +174,19 @@ func Open(dir, addr string) (*Traffic, error) {
 		db.Close()
 		return nil, err
 	}
-	// Dial targets DIRECTLY. go-mitmproxy's default upstream uses
-	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment
-	// (a VPN/system proxy) would make it forward target requests through that
-	// external proxy — which can't reach the target → 502. We capture target
-	// traffic directly, never via the host's proxy.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return nil, nil })
+	// Upstream selection: by default dial targets DIRECTLY (never via the host's
+	// HTTP_PROXY/HTTPS_PROXY — go-mitmproxy's default would forward through a
+	// VPN/system proxy that can't reach the target → 502). When the proxy pool is
+	// on (入口A), poolUpstream returns a pool proxy for the host so recorded traffic
+	// egresses through it; a nil return falls back to direct.
+	p.SetUpstreamProxy(func(req *http.Request) (*url.URL, error) {
+		if fn := t.poolUpstream.Load(); fn != nil {
+			if u := (*fn)(hostOnly(req.Host)); u != nil {
+				return u, nil
+			}
+		}
+		return nil, nil
+	})
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.

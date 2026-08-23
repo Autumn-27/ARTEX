@@ -250,7 +250,7 @@ export interface TaskScopeRow {
 }
 
 // ---- 代理池（出口代理轮换）----
-export type ProxyProtocol = "http" | "https" | "socks5" | "socks4";
+export type ProxyProtocol = "http" | "https" | "socks5";
 
 // 一个代理节点。password 由后端打码返回（"********"），前端提交时留空表示不改。
 // 命名 ProxyNode 而非 Proxy：避免遮蔽全局 Proxy 对象（biome noShadowRestrictedNames）。
@@ -752,6 +752,12 @@ export interface Settings {
   llm_pool_enabled?: boolean; // 默认 false
   // 绑定了指定配置的 agent/任务失败时是否也回落到轮询链。默认 false = 绑定即独占。
   llm_pool_bind_fallback?: boolean;
+  // 代理池主开关（默认关）。开启后：MITM 开→上游走池轮换；MITM 关→注入代理池网关。
+  proxy_pool_enabled?: boolean;
+  // 安全阀门（默认开）：主出口只轮换可信（手动/导入）代理，免费源不进主出口。
+  proxy_egress_trusted_only?: boolean;
+  proxy_fetch_interval_min?: number; // 免费源抓取间隔(分钟，默认 15)
+  proxy_check_interval_min?: number; // 验活间隔(分钟，默认 30)
 }
 
 // ---- LLM config ----

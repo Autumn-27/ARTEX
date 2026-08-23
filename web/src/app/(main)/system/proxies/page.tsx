@@ -34,7 +34,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { ProxyInput, ProxyNode, ProxyProtocol, ProxySource } from "@/lib/types";
 
-const PROTOCOLS: ProxyProtocol[] = ["http", "https", "socks5", "socks4"];
+const PROTOCOLS: ProxyProtocol[] = ["http", "https", "socks5"];
 
 function emptyInput(): ProxyInput {
   return { protocol: "http", host: "", port: 8080, enabled: true, tags: [] };
