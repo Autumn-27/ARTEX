@@ -249,7 +249,8 @@ const (
 	settingConcurrencyOn    = "task_concurrency_enabled"
 	settingConcurrencyLimit = "task_concurrency_limit"
 	// 代理池：主开关、"主出口只走可信代理"安全阀门、抓取/验活间隔（分钟）。
-	settingProxyPoolOn       = "proxy_pool_enabled"
+	// 主开关键复用 db.SettingProxyPoolEnabled，agent 工具层与此读同一个键。
+	settingProxyPoolOn       = pgdb.SettingProxyPoolEnabled
 	settingProxyTrustedOnly  = "proxy_egress_trusted_only"
 	settingProxyFetchMin     = "proxy_fetch_interval_min"
 	settingProxyCheckMin     = "proxy_check_interval_min"

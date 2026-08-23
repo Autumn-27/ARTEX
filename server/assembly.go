@@ -342,6 +342,7 @@ func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
 	}
 	serverTS := agent.NewToolSet(nil, "")
 	serverTS.SetAssetStore(as, as.Companies())
+	serverTS.SetProxyStore(as.Proxies()) // list_proxies 若被 auto/自定义 agent 勾选，需要池句柄
 	reg := make(map[string]actool.CoreTool)
 	for _, t := range serverTS.AllDomainTools() {
 		reg[t.Name()] = t

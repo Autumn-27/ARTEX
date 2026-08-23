@@ -21,6 +21,9 @@ func (t *ToolSet) SetAssetStore(as *db.AssetStore, cs *db.CompanyStore) {
 	t.cs = cs
 }
 
+// SetProxyStore wires the proxy pool store so the list_proxies tool is active.
+func (t *ToolSet) SetProxyStore(ps *db.ProxyStore) { t.ps = ps }
+
 // assetInputItem is one element of the insert_assets "assets" array.
 type assetInputItem struct {
 	Type string `json:"type"` // root_domain|ip|subdomain|app|service|endpoint
@@ -582,6 +585,66 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 	)
 }
 
+// listProxies lets an agent enumerate healthy outbound proxies it can route through
+// on its own (e.g. curl -x, proxychains) for a specific target. Read-only: it only
+// lists nodes, it does not change any global egress setting.
+func (t *ToolSet) listProxies() actool.CoreTool {
+	return readTool(
+		"list_proxies",
+		"列出代理池中【当前健康】的出口代理节点，供你在命令里自行使用（如 curl -x <proxy>、"+
+			"proxychains、nmap --proxies）访问目标、轮换出口 IP。返回 http/https/socks5/socks4 代理的 "+
+			"address（scheme://host:port）、地区、匿名度、延迟。可选 protocol/region/tag 过滤。"+
+			"只读：不改变全局出口设置。代理池未开启时返回空。",
+		obj(map[string]any{
+			"protocol": str("按协议过滤(可选)：http/https/socks5/socks4"),
+			"region":   str("按地区码过滤(可选)，如 CN/US"),
+			"tag":      str("按标签过滤(可选)"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.ps == nil || !t.ps.PoolEnabled() {
+				return actool.Errorf("list_proxies 未启用: 代理池功能已关闭（在系统设置开启后可用）"), nil
+			}
+			var a struct {
+				Protocol string `json:"protocol"`
+				Region   string `json:"region"`
+				Tag      string `json:"tag"`
+			}
+			_ = json.Unmarshal(in, &a)
+			f := db.ProxyFilter{
+				Protocol:    strings.TrimSpace(a.Protocol),
+				Region:      strings.TrimSpace(a.Region),
+				OnlyEnabled: true,
+				OnlyHealthy: true,
+			}
+			if tag := strings.TrimSpace(a.Tag); tag != "" {
+				f.Tags = []string{tag}
+			}
+			proxies, err := t.ps.ListProxies(f)
+			if err != nil {
+				return actool.Errorf("查询代理失败: " + err.Error()), nil
+			}
+			type proxyOut struct {
+				Address   string `json:"address"` // scheme://host:port (含认证，供命令直接使用)
+				Protocol  string `json:"protocol"`
+				Region    string `json:"region,omitempty"`
+				Anonymity string `json:"anonymity,omitempty"`
+				LatencyMs int    `json:"latency_ms"`
+			}
+			out := make([]proxyOut, 0, len(proxies))
+			for _, p := range proxies {
+				out = append(out, proxyOut{
+					Address:   p.URL().String(),
+					Protocol:  p.Protocol,
+					Region:    p.Region,
+					Anonymity: p.Anonymity,
+					LatencyMs: p.LatencyMs,
+				})
+			}
+			return jsonResult(map[string]any{"count": len(out), "proxies": out})
+		},
+	)
+}
+
 // splitLines splits a multi-line string into non-empty trimmed lines.
 func splitLines(s string) []string {
 	var out []string
@@ -603,6 +666,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(), t.listCompanies(),
+		// outbound proxy pool (read-only; guarded when pool store/switch off)
+		t.listProxies(),
 	}
 }
 

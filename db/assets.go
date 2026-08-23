@@ -94,6 +94,10 @@ func (d *DB) Assets() *AssetStore {
 // Companies returns the company store associated with this asset store.
 func (s *AssetStore) Companies() *CompanyStore { return s.company }
 
+// Proxies returns the proxy pool store on the same DB, so agent tool wiring that
+// already holds an AssetStore can reach the pool without a separate handle.
+func (s *AssetStore) Proxies() *ProxyStore { return s.db.Proxies() }
+
 // withCompanyScopeMutation serializes scope resolution and every asset write
 // that consumes its result in one transaction. Nested asset side effects reuse
 // the same transaction through the scoped store.

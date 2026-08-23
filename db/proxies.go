@@ -69,6 +69,10 @@ func (p Proxy) Masked() Proxy {
 // automatically disabled, so dead free-pool nodes drop out without manual cleanup.
 const ProxyFailAutoDisable = 5
 
+// SettingProxyPoolEnabled is the settings key for the pool master switch. Defined
+// here so both the server (settings UI) and the agent tool layer read one key.
+const SettingProxyPoolEnabled = "proxy_pool_enabled"
+
 var ErrProxyNotFound = errors.New("proxy not found")
 
 // ProxyStore operates on the proxies + proxy_sources tables.
@@ -76,6 +80,11 @@ type ProxyStore struct{ db *DB }
 
 // Proxies returns a store bound to this DB.
 func (d *DB) Proxies() *ProxyStore { return &ProxyStore{db: d} }
+
+// PoolEnabled reports whether the proxy pool master switch is on (default off).
+// Read from settings so the agent tool layer can gate list_proxies without a
+// dependency on the server package.
+func (s *ProxyStore) PoolEnabled() bool { return s.db.GetBool(SettingProxyPoolEnabled, false) }
 
 // ProxyFilter narrows a ListProxies / SelectForHost query. Zero value = no filter.
 type ProxyFilter struct {

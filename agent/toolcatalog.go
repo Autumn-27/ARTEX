@@ -36,7 +36,7 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 	return map[string][]actool.CoreTool{
 		"mainagent": ts.MainAgentTools(),
 		"planner":   ts.PlannerTools(),
-		"worker":    ts.WorkerTools(),
+		"worker":    ts.WorkerTools(), // 含 list_proxies（代理池只读，随开关生效）
 		// goals（目标拆解器）默认绑 set_goals：它靠这个工具把拆出的目标写进图。
 		// 与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。
 		"goals": {ts.setGoals()},
