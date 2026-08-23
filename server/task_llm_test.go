@@ -36,6 +36,42 @@ func (p *scriptedLLMProvider) Stream(context.Context, llm.CompletionRequest) ite
 	}
 }
 
+// withZeroRetryBackoff sets the same-provider retry backoff to zero for the
+// duration of a (serial) test and returns a restore func for defer.
+func withZeroRetryBackoff() func() {
+	prev := sameProviderRetryBackoff
+	sameProviderRetryBackoff = func(int) time.Duration { return 0 }
+	return func() { sameProviderRetryBackoff = prev }
+}
+
+// flakyThenOKProvider fails its first failCount stream attempts pre-commit
+// (emitting only a non-committing SEMessageStart before the error, mirroring a
+// gateway that returns 200 then drops), then serves okEvents.
+type flakyThenOKProvider struct {
+	failCount int
+	failErr   error
+	okEvents  []llm.StreamEvent
+	calls     int
+}
+
+func (p *flakyThenOKProvider) Stream(context.Context, llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	return func(yield func(llm.StreamEvent, error) bool) {
+		p.calls++
+		if p.calls <= p.failCount {
+			if !yield(llm.StreamEvent{Type: llm.SEMessageStart}, nil) {
+				return
+			}
+			yield(llm.StreamEvent{}, p.failErr)
+			return
+		}
+		for _, ev := range p.okEvents {
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}
+}
+
 func collectTaskLLMStream(seq iter.Seq2[llm.StreamEvent, error]) ([]llm.StreamEvent, error) {
 	var events []llm.StreamEvent
 	var streamErr error
@@ -265,7 +301,9 @@ func TestTaskLLMStreamRetriesStalePreStreamFailureAgainstReplacementChain(t *tes
 }
 
 func TestTaskLLMStreamDoesNotSwitchForOrdinaryErrors(t *testing.T) {
-	t.Parallel()
+	// Not parallel: overrides the package-level backoff so the retryable cases
+	// don't sleep. Serial tests never overlap the parallel batch, so this is safe.
+	defer withZeroRetryBackoff()()
 	tests := []string{
 		"openai: status 429: rate limit exceeded",
 		"openai: status 401: invalid api key",
@@ -376,6 +414,91 @@ func TestTaskLLMRuntimeErrorSkipsWorkerReplay(t *testing.T) {
 	}
 	if !retryableWorkerModelError(harness.ReasonModelError, errors.New("temporary network error")) {
 		t.Fatal("ordinary model errors should retain the existing worker retry behavior")
+	}
+}
+
+// A transient pre-commit stream failure (200-then-drop / overloaded / 5xx) is
+// retried on the SAME provider, without switching profiles, and succeeds once the
+// blip clears — instead of surfacing as a model_error.
+func TestTaskLLMStreamRetriesTransientPreCommitOnSameProvider(t *testing.T) {
+	defer withZeroRetryBackoff()()
+	provider := &flakyThenOKProvider{
+		failCount: 2, // fail twice, succeed on the 3rd attempt (initial + 2 retries)
+		failErr:   errors.New("anthropic: overloaded_error"),
+		okEvents:  []llm.StreamEvent{{Type: llm.SEMessageStart}, {Type: llm.SETextDelta, Text: "ok"}},
+	}
+	exhausted := 0
+	hooks := taskLLMStreamHooks{
+		current: func() (taskLLMSelection, error) {
+			return taskLLMSelection{profileID: 11, provider: provider}, nil
+		},
+		exhaust: func(taskLLMSelection, error) (db.TaskLLMTransition, error) {
+			exhausted++
+			return db.TaskLLMTransition{}, nil
+		},
+	}
+	events, err := collectTaskLLMStream(streamTaskLLM(context.Background(), "7", llm.CompletionRequest{}, hooks))
+	if err != nil {
+		t.Fatalf("transient pre-commit failure should have been retried to success, got %v", err)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("provider calls=%d, want 3 (1 initial + 2 retries)", provider.calls)
+	}
+	if exhausted != 0 {
+		t.Fatalf("same-provider retry must not change failover state (exhausted=%d)", exhausted)
+	}
+	if len(events) == 0 || events[len(events)-1].Text != "ok" {
+		t.Fatalf("recovered stream missing its committed output: %+v", events)
+	}
+}
+
+// Once retries are exhausted, the transient error is surfaced (becoming a
+// model_error upstream) after exactly sameProviderStreamRetries+1 attempts.
+func TestTaskLLMStreamSurfacesTransientAfterRetriesExhausted(t *testing.T) {
+	defer withZeroRetryBackoff()()
+	provider := &flakyThenOKProvider{
+		failCount: 99, // never recovers
+		failErr:   errors.New("dial tcp: connection reset by peer"),
+	}
+	hooks := taskLLMStreamHooks{
+		current: func() (taskLLMSelection, error) {
+			return taskLLMSelection{profileID: 11, provider: provider}, nil
+		},
+		exhaust: func(taskLLMSelection, error) (db.TaskLLMTransition, error) {
+			return db.TaskLLMTransition{}, nil
+		},
+	}
+	_, err := collectTaskLLMStream(streamTaskLLM(context.Background(), "7", llm.CompletionRequest{}, hooks))
+	if err == nil {
+		t.Fatal("persistent transient failure must still surface an error")
+	}
+	if provider.calls != sameProviderStreamRetries+1 {
+		t.Fatalf("provider calls=%d, want %d", provider.calls, sameProviderStreamRetries+1)
+	}
+}
+
+// A deterministic 4xx rejection is NOT retried on the same provider — replaying
+// the identical request everywhere fails the same way.
+func TestTaskLLMStreamDoesNotRetryDeterministicRejection(t *testing.T) {
+	defer withZeroRetryBackoff()()
+	provider := &flakyThenOKProvider{
+		failCount: 99,
+		failErr:   errors.New("anthropic: status 400: messages.1: invalid request"),
+	}
+	hooks := taskLLMStreamHooks{
+		current: func() (taskLLMSelection, error) {
+			return taskLLMSelection{profileID: 11, provider: provider}, nil
+		},
+		exhaust: func(taskLLMSelection, error) (db.TaskLLMTransition, error) {
+			return db.TaskLLMTransition{}, nil
+		},
+	}
+	_, err := collectTaskLLMStream(streamTaskLLM(context.Background(), "7", llm.CompletionRequest{}, hooks))
+	if err == nil {
+		t.Fatal("expected the deterministic rejection to surface")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("deterministic 4xx must not be retried: provider calls=%d, want 1", provider.calls)
 	}
 }
 

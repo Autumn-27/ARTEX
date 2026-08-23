@@ -183,27 +183,46 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 			committed := false
 			var pending []llm.StreamEvent
 			var streamErr error
-			for event, err := range selection.provider.Stream(ctx, req) {
-				if err != nil {
-					streamErr = err
-					break
+			// 同 provider 安全窗口重试:committed 之前(还没向调用方交付任何输出)
+			// 的瞬时失败可以原样重放,不会重复模型输出或工具执行。committed 之后、
+			// ctx 取消、或确定性/额度错误则跳出,交给下方原有的透传/故障转移逻辑。
+			for attempt := 0; ; attempt++ {
+				committed = false
+				pending = nil
+				streamErr = nil
+				for event, err := range selection.provider.Stream(ctx, req) {
+					if err != nil {
+						streamErr = err
+						break
+					}
+					if !committed && !streamEventCommitsOutput(event) {
+						pending = append(pending, event)
+						continue
+					}
+					if !committed {
+						for _, buffered := range pending {
+							if !yield(buffered, nil) {
+								return
+							}
+						}
+						pending = nil
+						committed = true
+					}
+					if !yield(event, nil) {
+						return
+					}
 				}
-				if !committed && !streamEventCommitsOutput(event) {
-					pending = append(pending, event)
+				if streamErr != nil && !committed && ctx.Err() == nil &&
+					attempt < sameProviderStreamRetries && isRetryableStreamError(streamErr) {
+					backoff := sameProviderRetryBackoff(attempt)
+					log.Printf("[task-llm] task %s 提交前流失败,%v 后同 provider 重试 (%d/%d): %v",
+						taskID, backoff, attempt+1, sameProviderStreamRetries, streamErr)
+					if sleepCtx(ctx, backoff) {
+						break // 退避期间 ctx 取消 → 停止重试
+					}
 					continue
 				}
-				if !committed {
-					for _, buffered := range pending {
-						if !yield(buffered, nil) {
-							return
-						}
-					}
-					pending = nil
-					committed = true
-				}
-				if !yield(event, nil) {
-					return
-				}
+				break
 			}
 			if streamErr == nil {
 				for _, buffered := range pending {
@@ -260,6 +279,48 @@ func streamEventCommitsOutput(event llm.StreamEvent) bool {
 	default:
 		return false
 	}
+}
+
+// 提交前安全窗口内、对同一 provider 的重试次数。SDK 的 doStream 只重试建连阶段
+// (拿到 200 之前);流一旦开始,中途断流 / overloaded / 流内 429 等瞬时故障会直接
+// 冒泡成 model_error,零重试。只要一个 token 都还没交给调用方(!committed),重放
+// 完全相同的请求就不会重复模型输出或工具副作用,因此这里补一层同 provider 退避重试,
+// 把这类抖动挡在意图整体重跑之前。
+const sameProviderStreamRetries = 2
+
+// sameProviderRetryBackoff 是第 attempt 次重试前的退避(0.5s、1s…,上限 4s),
+// 与 SDK backoffSleep 同风格但封顶更小,避免拖住 worker 的收尾/取消响应。
+// 以变量形式暴露,便于测试将退避置零。
+var sameProviderRetryBackoff = func(attempt int) time.Duration {
+	return min(500*time.Millisecond*(1<<attempt), 4*time.Second)
+}
+
+// isRetryableStreamError 判断「提交前的流失败」是否值得在同一 provider 上重放。
+// 瞬时的传输中断 / 供应商过载 / 限流会自行恢复,可安全重试;而以下三类不重试:
+//   - 额度耗尽:交给 profile 故障转移处理,别在这里白烧重试
+//   - 上下文过长:相同请求重放也没用,交给 harness 的 reactive 压缩兜底
+//   - 4xx 确定性拒绝(400/401/403/404/422):到哪个 provider 都一样会失败
+func isRetryableStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isQuotaExhaustedError(err) {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "too long") || strings.Contains(s, "context length") ||
+		strings.Contains(s, "context_length") || strings.Contains(s, "maximum context") ||
+		strings.Contains(s, "status 413") {
+		return false
+	}
+	for _, code := range []string{"status 400", "status 401", "status 403", "status 404", "status 422"} {
+		if strings.Contains(s, code) {
+			return false
+		}
+	}
+	// 其余(传输 reset/EOF/timeout、408/429/5xx、流内 error 事件如 anthropic
+	// overloaded_error 等)一律视为瞬时,允许重试。
+	return true
 }
 
 // CompactionWindow mirrors current()'s precedence so the context window always
