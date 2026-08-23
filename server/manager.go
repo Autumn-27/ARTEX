@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/proxypool"
 	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -224,6 +226,7 @@ type Manager struct {
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
+	proxyPool        *proxypool.Pool // 出口代理池后台任务（抓取 + 验活）
 }
 
 // Settings keys the UI toggles at runtime.
@@ -245,8 +248,16 @@ const (
 	// 任务并发上限:开关 + 上限数。默认关闭;开启后默认上限 5(见 defaultConcurrencyLimit)。
 	settingConcurrencyOn    = "task_concurrency_enabled"
 	settingConcurrencyLimit = "task_concurrency_limit"
+	// 代理池：主开关、"主出口只走可信代理"安全阀门、抓取/验活间隔（分钟）。
+	settingProxyPoolOn       = "proxy_pool_enabled"
+	settingProxyTrustedOnly  = "proxy_egress_trusted_only"
+	settingProxyFetchMin     = "proxy_fetch_interval_min"
+	settingProxyCheckMin     = "proxy_check_interval_min"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
+	// 代理池默认间隔：免费代理失效快，验活默认 30min、抓取默认 15min。
+	defaultProxyFetchMin = 15
+	defaultProxyCheckMin = 30
 	// defaultWorkers is the concurrent work-agent count when the setting is unset.
 	defaultWorkers = 3
 	// defaultConcurrencyLimit is the simultaneous-running-task cap when the feature
@@ -376,6 +387,14 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
+	// Outbound proxy pool background loops (fetch free sources + probe liveness).
+	// Loops read the master switch each tick; they no-op while the pool is off.
+	m.proxyPool = proxypool.NewPool(pg, proxypool.Config{
+		Enabled:       m.ProxyPoolEnabled,
+		FetchInterval: func() time.Duration { return time.Duration(m.proxyFetchMin()) * time.Minute },
+		CheckInterval: func() time.Duration { return time.Duration(m.proxyCheckMin()) * time.Minute },
+	})
+	m.proxyPool.Start(context.Background())
 	return m, nil
 }
 
@@ -638,6 +657,69 @@ func (m *Manager) Assets() *pgdb.AssetStore  { return m.assets }
 func (m *Manager) PG() *pgdb.DB              { return m.pg }
 func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
 
+// Proxies returns the outbound proxy pool store.
+func (m *Manager) Proxies() *pgdb.ProxyStore { return m.pg.Proxies() }
+
+// ProxyPool returns the background pool runner (fetch + probe + manual check).
+func (m *Manager) ProxyPool() *proxypool.Pool { return m.proxyPool }
+
+// ProxyPoolEnabled reports whether the outbound proxy pool is on (default off).
+func (m *Manager) ProxyPoolEnabled() bool { return m.pg.GetBool(settingProxyPoolOn, false) }
+
+// SetProxyPoolEnabled toggles the pool master switch.
+func (m *Manager) SetProxyPoolEnabled(on bool) error { return m.pg.SetBool(settingProxyPoolOn, on) }
+
+// ProxyEgressTrustedOnly reports whether the main egress (MITM upstream / gateway)
+// only rotates trusted (manual/imported) proxies. Default true — free-pool nodes
+// stay out of the main egress unless the user opts them in.
+func (m *Manager) ProxyEgressTrustedOnly() bool {
+	return m.pg.GetBool(settingProxyTrustedOnly, true)
+}
+
+// SetProxyEgressTrustedOnly toggles the trusted-only egress safety valve.
+func (m *Manager) SetProxyEgressTrustedOnly(on bool) error {
+	return m.pg.SetBool(settingProxyTrustedOnly, on)
+}
+
+// proxyFetchMin / proxyCheckMin read the pool intervals (minutes), falling back to
+// defaults when unset or non-positive.
+func (m *Manager) proxyFetchMin() int { return m.settingIntDefault(settingProxyFetchMin, defaultProxyFetchMin) }
+func (m *Manager) proxyCheckMin() int { return m.settingIntDefault(settingProxyCheckMin, defaultProxyCheckMin) }
+
+// ProxyIntervals returns the fetch/check intervals in minutes (for the settings UI).
+func (m *Manager) ProxyIntervals() (fetchMin, checkMin int) {
+	return m.proxyFetchMin(), m.proxyCheckMin()
+}
+
+// SetProxyIntervals persists the fetch/check intervals (minutes); non-positive
+// values are ignored so a partial update keeps the other.
+func (m *Manager) SetProxyIntervals(fetchMin, checkMin int) error {
+	if fetchMin > 0 {
+		if err := m.pg.SetSetting(settingProxyFetchMin, strconv.Itoa(fetchMin)); err != nil {
+			return err
+		}
+	}
+	if checkMin > 0 {
+		if err := m.pg.SetSetting(settingProxyCheckMin, strconv.Itoa(checkMin)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// settingIntDefault reads an integer setting, returning def when unset/invalid.
+func (m *Manager) settingIntDefault(key string, def int) int {
+	v, ok, err := m.pg.GetSetting(key)
+	if err != nil || !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
 // ProxyAddr returns the recording proxy address agents route through — empty when
 // traffic capture is off, so no proxy is injected (agent runs direct, no recording).
 func (m *Manager) ProxyAddr() string {
@@ -659,6 +741,9 @@ func (m *Manager) ProxyCACert() string {
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.proxyPool != nil {
+		m.proxyPool.Stop()
+	}
 	if m.traffic != nil {
 		m.traffic.Close()
 	}

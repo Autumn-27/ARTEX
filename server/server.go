@@ -688,6 +688,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/companies/{id}", s.deleteCompany)
 	mux.HandleFunc("POST /api/companies/{id}/scope", s.addCompanyScope)
 	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)
+	// 代理池：条目 CRUD/导入/探活 + 免费源开关
+	mux.HandleFunc("GET /api/proxies", s.listProxies)
+	mux.HandleFunc("POST /api/proxies", s.createProxy)
+	mux.HandleFunc("POST /api/proxies/import", s.importProxies)
+	mux.HandleFunc("PUT /api/proxies/{id}", s.updateProxy)
+	mux.HandleFunc("DELETE /api/proxies/{id}", s.deleteProxy)
+	mux.HandleFunc("POST /api/proxies/{id}/check", s.checkProxy)
+	mux.HandleFunc("GET /api/proxy-sources", s.listProxySources)
+	mux.HandleFunc("PUT /api/proxy-sources/{name}", s.setProxySource)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)

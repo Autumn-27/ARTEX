@@ -782,3 +782,50 @@ CREATE TABLE IF NOT EXISTS server_logs (
     text       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_server_logs_id ON server_logs(id DESC);
+
+-- =====================================================================
+-- N. 代理池（出口代理轮换）
+-- =====================================================================
+-- 连接信息拆分存（非完整 URL）：去重键 (protocol,host,port)、UI 隐藏密码、日志不落认证。
+-- username/password 明文存（与 llm_profiles.api_key 一致）。source/trusted 供安全阀门，
+-- 免费源抓来的 trusted=false，默认不进主出口轮换。质量字段驱动自动禁用死代理 + 优先稳定节点。
+CREATE TABLE IF NOT EXISTS proxies (
+    id            BIGSERIAL PRIMARY KEY,
+    protocol      TEXT NOT NULL DEFAULT 'http',  -- http/https/socks5/socks4
+    host          TEXT NOT NULL,
+    port          INTEGER NOT NULL,
+    username      TEXT NOT NULL DEFAULT '',
+    password      TEXT NOT NULL DEFAULT '',
+    anonymity     TEXT NOT NULL DEFAULT '',       -- elite/anonymous/transparent/''
+    region        TEXT NOT NULL DEFAULT '',       -- 国家码 CN/US…
+    tags          TEXT[] NOT NULL DEFAULT '{}',
+    label         TEXT NOT NULL DEFAULT '',
+    source        TEXT NOT NULL DEFAULT 'manual', -- manual/import/<源名>
+    trusted       BOOLEAN NOT NULL DEFAULT true,
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    healthy       BOOLEAN NOT NULL DEFAULT false,
+    latency_ms    INTEGER NOT NULL DEFAULT 0,
+    last_check_at TIMESTAMPTZ,
+    last_ok_at    TIMESTAMPTZ,
+    last_error    TEXT NOT NULL DEFAULT '',
+    fail_streak   INTEGER NOT NULL DEFAULT 0,
+    check_count   INTEGER NOT NULL DEFAULT 0,
+    ok_count      INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(protocol, host, port)
+);
+CREATE INDEX IF NOT EXISTS idx_proxies_tags ON proxies USING GIN(tags);
+CREATE INDEX IF NOT EXISTS idx_proxies_pick ON proxies(enabled, healthy, trusted);
+DROP TRIGGER IF EXISTS trg_proxies_upd ON proxies;
+CREATE TRIGGER trg_proxies_upd BEFORE UPDATE ON proxies
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 免费代理源开关与抓取状态。默认无行 = 全部未开启（安全底线）。
+CREATE TABLE IF NOT EXISTS proxy_sources (
+    name          TEXT PRIMARY KEY,
+    enabled       BOOLEAN NOT NULL DEFAULT false,
+    last_fetch_at TIMESTAMPTZ,
+    last_count    INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT NOT NULL DEFAULT ''
+);

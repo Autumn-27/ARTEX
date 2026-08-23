@@ -249,6 +249,67 @@ export interface TaskScopeRow {
   reason?: string;
 }
 
+// ---- 代理池（出口代理轮换）----
+export type ProxyProtocol = "http" | "https" | "socks5" | "socks4";
+
+// 一个代理节点。password 由后端打码返回（"********"），前端提交时留空表示不改。
+// 命名 ProxyNode 而非 Proxy：避免遮蔽全局 Proxy 对象（biome noShadowRestrictedNames）。
+export interface ProxyNode {
+  id: number;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  anonymity?: string; // elite/anonymous/transparent
+  region?: string;
+  tags: string[];
+  label?: string;
+  source: string; // manual/import/<源名>
+  trusted: boolean;
+  enabled: boolean;
+  healthy: boolean;
+  latency_ms: number;
+  last_check_at?: string;
+  last_ok_at?: string;
+  last_error?: string;
+  fail_streak: number;
+  check_count: number;
+  ok_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// 新增/编辑代理的提交体。
+export interface ProxyInput {
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  anonymity?: string;
+  region?: string;
+  tags?: string[];
+  label?: string;
+  enabled: boolean;
+}
+
+export interface ProxyQuery {
+  protocol?: string;
+  region?: string;
+  tag?: string;
+  healthy?: boolean;
+}
+
+// 免费代理源开关 + 上次抓取状态。
+export interface ProxySource {
+  name: string;
+  enabled: boolean;
+  last_fetch_at?: string;
+  last_count: number;
+  last_error?: string;
+}
+
 export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
 
 // 新增企业时提交的结构化资产范围规则。
