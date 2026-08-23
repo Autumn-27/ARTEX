@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +113,12 @@ func (p *pendingManager) remove(id int64) {
 	p.mu.Unlock()
 }
 
+// Reviewer runs the LLM fallback judge for one tool call and returns its verdict
+// as a Decision (Action ∈ allow|ask|deny; empty Action means the reply could not
+// be parsed). It is injected by the server layer so the intercept package stays
+// free of any llm dependency. profileID == 0 means "use the active/default profile".
+type Reviewer func(ctx context.Context, profileID int64, prompt, tool, command string) (Decision, error)
+
 // Interceptor loads intercept rules from the database and evaluates them on
 // tool calls. It is safe for concurrent use.
 type Interceptor struct {
@@ -120,6 +127,14 @@ type Interceptor struct {
 	cached       []compiledRule  // sorted by priority DESC; nil means not loaded yet
 	enabledTools map[string]bool // nil means not loaded yet
 	pending      *pendingManager
+	reviewer     Reviewer // nil = LLM fallback judge not wired
+}
+
+// SetReviewer installs the LLM fallback judge callback. Passing nil disables it.
+func (i *Interceptor) SetReviewer(r Reviewer) {
+	i.mu.Lock()
+	i.reviewer = r
+	i.mu.Unlock()
 }
 
 // defaultEnabledTools is the hard-coded set of tools that enter the intercept
@@ -275,6 +290,189 @@ type Decision struct {
 	TimeoutAction  string // "deny" | "allow"
 }
 
+// --- LLM fallback judge ---
+
+// Judge settings keys (stored in the settings KV table). See docs §3.
+const (
+	settingJudgeEnabled          = "llm_judge_enabled"
+	settingJudgeProfileID        = "llm_judge_profile_id"
+	settingJudgePrompt           = "llm_judge_prompt"
+	settingJudgeTimeoutSecs      = "llm_judge_timeout_seconds"
+	settingJudgeFailAction       = "llm_judge_fail_action"
+	settingJudgeAskTimeoutSecs   = "llm_judge_ask_timeout_seconds"
+	settingJudgeAskTimeoutAction = "llm_judge_ask_timeout_action"
+)
+
+// Judge default values.
+const (
+	defaultJudgeTimeoutSecs      = 15
+	defaultJudgeFailAction       = "allow"
+	defaultJudgeAskTimeoutSecs   = 300
+	defaultJudgeAskTimeoutAction = "deny"
+)
+
+// JudgeConfig is the resolved LLM-fallback-judge configuration. Prompt is always
+// non-empty (falls back to DefaultJudgePrompt).
+type JudgeConfig struct {
+	Enabled           bool   `json:"enabled"`
+	ProfileID         int64  `json:"profile_id"` // 0 = follow active/default
+	Prompt            string `json:"prompt"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	FailAction        string `json:"fail_action"` // allow|ask|deny
+	AskTimeoutSeconds int    `json:"ask_timeout_seconds"`
+	AskTimeoutAction  string `json:"ask_timeout_action"` // allow|deny
+}
+
+// judgeConfig reads the judge configuration from settings, applying defaults for
+// missing/invalid keys. Read fresh on each fallback judgement — the LLM call that
+// follows dwarfs a few KV reads, and freshness avoids a cache-invalidation path.
+func (i *Interceptor) judgeConfig() JudgeConfig {
+	c := JudgeConfig{
+		Enabled:           i.db.GetBool(settingJudgeEnabled, false),
+		ProfileID:         int64(i.getSettingInt(settingJudgeProfileID, 0)),
+		TimeoutSeconds:    i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
+		FailAction:        i.getSettingChoice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
+		AskTimeoutSeconds: i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
+		AskTimeoutAction:  i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
+	}
+	// Prompt: stored value if non-empty, else the built-in template.
+	if v, ok, _ := i.db.GetSetting(settingJudgePrompt); ok && strings.TrimSpace(v) != "" {
+		c.Prompt = v
+	} else {
+		c.Prompt = DefaultJudgePrompt
+	}
+	if c.TimeoutSeconds <= 0 {
+		c.TimeoutSeconds = defaultJudgeTimeoutSecs
+	}
+	if c.AskTimeoutSeconds <= 0 {
+		c.AskTimeoutSeconds = defaultJudgeAskTimeoutSecs
+	}
+	return c
+}
+
+func (i *Interceptor) getSettingInt(key string, def int) int {
+	v, ok, err := i.db.GetSetting(key)
+	if err != nil || !ok {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func (i *Interceptor) getSettingChoice(key, def string, allowed ...string) string {
+	v, ok, err := i.db.GetSetting(key)
+	if err != nil || !ok {
+		return def
+	}
+	v = strings.TrimSpace(v)
+	for _, a := range allowed {
+		if v == a {
+			return v
+		}
+	}
+	return def
+}
+
+// GetJudgeConfig returns the resolved judge configuration for the API/UI. Prompt
+// is the effective prompt (built-in template when unset), so the UI can prefill.
+func (i *Interceptor) GetJudgeConfig() JudgeConfig { return i.judgeConfig() }
+
+// SetJudgeConfig persists the judge configuration. An empty Prompt clears the
+// override (the built-in template is used again).
+func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
+	if err := i.db.SetBool(settingJudgeEnabled, c.Enabled); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeProfileID, strconv.FormatInt(c.ProfileID, 10)); err != nil {
+		return err
+	}
+	// Store the prompt only when it differs from the built-in template, so version
+	// updates to DefaultJudgePrompt flow through for users who never customized it.
+	promptToStore := ""
+	if strings.TrimSpace(c.Prompt) != "" && strings.TrimSpace(c.Prompt) != strings.TrimSpace(DefaultJudgePrompt) {
+		promptToStore = c.Prompt
+	}
+	if err := i.db.SetSetting(settingJudgePrompt, promptToStore); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeTimeoutSecs, strconv.Itoa(c.TimeoutSeconds)); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeFailAction, c.FailAction); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeAskTimeoutSecs, strconv.Itoa(c.AskTimeoutSeconds)); err != nil {
+		return err
+	}
+	if err := i.db.SetSetting(settingJudgeAskTimeoutAction, c.AskTimeoutAction); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Judge runs the LLM fallback judge for a tool call that matched no rule. It
+// returns (Decision, true) when the judge produced a terminal verdict, or
+// (Decision{}, false) when the fallback is disabled or not wired (caller then
+// keeps the current behavior: allow). On model error or an unparseable reply it
+// falls back to the configured FailAction. Ask verdicts carry the human-approval
+// timeout so the existing HandleAsk consumes them unchanged.
+func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision, bool) {
+	cfg := i.judgeConfig()
+	i.mu.RLock()
+	rv := i.reviewer
+	i.mu.RUnlock()
+	if !cfg.Enabled || rv == nil {
+		return Decision{}, false
+	}
+
+	cctx := ctx
+	if cfg.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
+	out, err := rv(cctx, cfg.ProfileID, cfg.Prompt, tool, command)
+	if err != nil {
+		out = Decision{Action: cfg.FailAction, Message: "模型审批失败,按失败策略处理: " + err.Error()}
+	}
+	switch out.Action {
+	case "allow", "ask", "deny":
+		// valid verdict
+	default:
+		out = Decision{Action: cfg.FailAction, Message: "模型输出无法解析,按失败策略处理"}
+	}
+	// A model verdict never carries a rule; keep RuleID 0 (→ NULL) for history.
+	out.RuleID = 0
+	if out.Message == "" {
+		out.Message = "[模型] " + judgeActionLabel(out.Action)
+	} else if !strings.HasPrefix(out.Message, "[模型]") {
+		out.Message = "[模型] " + out.Message
+	}
+	if out.Action == "ask" {
+		out.TimeoutEnabled = true
+		out.TimeoutSeconds = cfg.AskTimeoutSeconds
+		out.TimeoutAction = cfg.AskTimeoutAction
+	}
+	return out, true
+}
+
+func judgeActionLabel(action string) string {
+	switch action {
+	case "allow":
+		return "放行"
+	case "deny":
+		return "拦截"
+	case "ask":
+		return "转人工审批"
+	default:
+		return action
+	}
+}
+
 // Match evaluates the rule list (priority DESC) against a tool call.
 // Returns (Decision, true) for the first matching enabled rule, or
 // (Decision{}, false) if no rule matches.
@@ -337,7 +535,7 @@ func defaultMessage(action, name string) string {
 // (status='pending') is unaffected, so it still shows only asks awaiting a decision.
 func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolName string, input []byte, status string) {
 	taskID, agentName := taskInfoFromCtx(ctx)
-	_, _ = i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status)
+	_, _ = i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status, dec.Message)
 }
 
 // HandleAsk creates a pending approval record and blocks until the user decides
@@ -353,7 +551,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	taskID, agentName := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)
 
-	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, agentName, toolName, input)
+	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, agentName, toolName, input, dec.Message)
 	if err != nil {
 		return false
 	}

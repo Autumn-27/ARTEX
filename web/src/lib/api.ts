@@ -35,6 +35,7 @@ import type {
   InterceptApprovalRow,
   InterceptPending,
   InterceptRule,
+  JudgeConfig,
   LLMPoolStatus,
   LLMProfile,
   LLMRecordDetail,
@@ -863,6 +864,10 @@ export const api = {
     });
     if (!r.ok) throw new Error(await r.text());
   },
+
+  // ---- intercept LLM judge (模型兜底审批,全局配置) ----
+  interceptGetJudgeConfig: () => get<JudgeConfig>("/intercept/judge"),
+  interceptSetJudgeConfig: (cfg: JudgeConfig) => put<{ ok: boolean }>("/intercept/judge", cfg),
 
   // ---- commands (tool execution history, any tool) ----
   commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {

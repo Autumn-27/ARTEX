@@ -916,8 +916,20 @@ export interface InterceptPending {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tool_input: Record<string, any>;
   status: "pending" | "allowed" | "denied" | "timeout";
+  reason: string; // 规则 message 或模型判定理由(模型判定带 [模型] 前缀)
   decided_at?: string;
   created_at: string;
+}
+
+// JudgeConfig: 模型兜底审批(仅当没有任何拦截规则命中时由模型判断)的全局配置。
+export interface JudgeConfig {
+  enabled: boolean;
+  profile_id: number; // 0 = 跟随激活/默认配置
+  prompt: string; // 判定提示词;GET 未设置时后端回填内置模板全文
+  timeout_seconds: number; // 模型调用超时
+  fail_action: "allow" | "ask" | "deny"; // 模型出错/超时/不可解析时的回退
+  ask_timeout_seconds: number; // 模型判 ask 转人工后的审批等待超时
+  ask_timeout_action: "allow" | "deny"; // 审批超时后的默认动作
 }
 
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.

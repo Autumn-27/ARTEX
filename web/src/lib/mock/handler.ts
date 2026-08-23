@@ -943,6 +943,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "intercept" && seg[1] === "task")
     return { items: D.interceptHistory.filter((r) => r.task_id === seg[2]) };
   if (path === "/intercept/tool-config") return { enabled_tools: ["bash"] };
+  if (path === "/intercept/judge" && m === "GET")
+    return {
+      enabled: false,
+      profile_id: 0,
+      prompt: "",
+      timeout_seconds: 15,
+      fail_action: "allow",
+      ask_timeout_seconds: 300,
+      ask_timeout_action: "deny",
+    };
+  if (path === "/intercept/judge" && m === "PUT") return { ok: true };
 
   // ── 写操作兜底：成功但不落库 ──
   if (["POST", "PUT", "PATCH", "DELETE"].includes(m)) return { ok: true };

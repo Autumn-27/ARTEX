@@ -3,6 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import {
+  BotIcon,
   ListFilterIcon,
   PencilIcon,
   PlusIcon,
@@ -48,8 +49,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Card, CardContent } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { InterceptRule, InterceptAction, Tool } from "@/lib/types";
+import type { InterceptRule, InterceptAction, JudgeConfig, LLMProfile, Tool } from "@/lib/types";
 
 // ---- tool scope ----
 
@@ -143,6 +145,203 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+// ---- LLM fallback judge card ----
+
+const FOLLOW_ACTIVE = "0"; // profile_id 0 = 跟随激活/默认配置
+
+const defaultJudge = (): JudgeConfig => ({
+  enabled: false,
+  profile_id: 0,
+  prompt: "",
+  timeout_seconds: 15,
+  fail_action: "allow",
+  ask_timeout_seconds: 300,
+  ask_timeout_action: "deny",
+});
+
+function JudgeCard() {
+  const [cfg, setCfg] = React.useState<JudgeConfig>(defaultJudge());
+  const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const [j, ps] = await Promise.all([api.interceptGetJudgeConfig(), api.llmProfiles()]);
+      setCfg(j);
+      setProfiles(ps);
+    } catch (e) {
+      toast.error("加载模型兜底配置失败: " + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  function patch(p: Partial<JudgeConfig>) {
+    setCfg((c) => ({ ...c, ...p }));
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.interceptSetJudgeConfig(cfg);
+      toast.success("模型兜底配置已保存");
+      await load(); // 回读:提示词若清空则回填内置模板
+    } catch (e) {
+      toast.error("保存失败: " + (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function restorePrompt() {
+    // 清空提示词并保存 → 服务端下次返回内置模板全文,回填到输入框。
+    setSaving(true);
+    try {
+      await api.interceptSetJudgeConfig({ ...cfg, prompt: "" });
+      const j = await api.interceptGetJudgeConfig();
+      setCfg(j);
+      toast.success("已恢复内置默认模板");
+    } catch (e) {
+      toast.error("恢复失败: " + (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 启用开关 —— 独立高亮条 */}
+      <div
+        className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3 ${
+          cfg.enabled ? "border-violet-400/50 bg-violet-50/40 dark:bg-violet-950/20" : "bg-muted/40"
+        }`}
+      >
+        <div className="flex items-center gap-2.5">
+          <BotIcon className={`h-5 w-5 shrink-0 ${cfg.enabled ? "text-violet-600" : "text-muted-foreground"}`} />
+          <div>
+            <p className="text-sm font-semibold leading-tight">模型兜底审批</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              在<span className="font-medium text-foreground">拦截范围</span>内、且<span className="font-medium text-foreground">没有任何拦截规则命中</span>的命令，才由模型做语义判断（放行 / 转人工 / 拦截）
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-xs text-muted-foreground">{cfg.enabled ? "已启用" : "未启用"}</span>
+          <Switch checked={cfg.enabled} disabled={loading} onCheckedChange={(v) => patch({ enabled: v })} />
+        </div>
+      </div>
+
+      {cfg.enabled && (
+        <div className="grid gap-4 lg:grid-cols-5">
+          {/* 左:提示词编辑器(直接展开,主区域) */}
+          <Card className="lg:col-span-3">
+            <CardContent className="flex h-full flex-col gap-2 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">审批提示词</p>
+                  <p className="text-xs text-muted-foreground">模型据此判定 ALLOW / ASK / DENY，可直接编辑</p>
+                </div>
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={restorePrompt} disabled={saving}>
+                  恢复默认模板
+                </Button>
+              </div>
+              <Textarea
+                className="min-h-[22rem] flex-1 resize-none font-mono text-xs leading-relaxed"
+                value={cfg.prompt}
+                onChange={(e) => patch({ prompt: e.target.value })}
+                placeholder="留空使用内置模板"
+                spellCheck={false}
+              />
+              <p className="text-right text-[11px] text-muted-foreground">{cfg.prompt.length} 字</p>
+            </CardContent>
+          </Card>
+
+          {/* 右:判定参数(设置栏) */}
+          <Card className="lg:col-span-2">
+            <CardContent className="space-y-5 p-4">
+              <div className="space-y-4">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">判定模型与策略</p>
+                <Field label="审批模型">
+                  <Select value={String(cfg.profile_id || 0)} onValueChange={(v) => patch({ profile_id: Number(v) })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={FOLLOW_ACTIVE}>跟随激活配置</SelectItem>
+                      {profiles.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name}（{p.model}）
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="模型判定超时（秒）">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={cfg.timeout_seconds}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10);
+                      if (n > 0) patch({ timeout_seconds: n });
+                    }}
+                  />
+                </Field>
+                <Field label="模型失败时（出错 / 超时 / 无法解析）">
+                  <Select value={cfg.fail_action} onValueChange={(v) => patch({ fail_action: v as JudgeConfig["fail_action"] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="allow">放行</SelectItem>
+                      <SelectItem value="ask">转人工审批</SelectItem>
+                      <SelectItem value="deny">拦截</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-4">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">人工审批（模型判为「转人工」时）</p>
+                <Field label="审批等待超时（秒）">
+                  <Input
+                    type="number"
+                    min={5}
+                    value={cfg.ask_timeout_seconds}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10);
+                      if (n > 0) patch({ ask_timeout_seconds: n });
+                    }}
+                  />
+                </Field>
+                <Field label="超时后默认动作">
+                  <Select value={cfg.ask_timeout_action} onValueChange={(v) => patch({ ask_timeout_action: v as JudgeConfig["ask_timeout_action"] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="deny">拦截</SelectItem>
+                      <SelectItem value="allow">放行</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      <div className="flex justify-end">
+        <Button size="sm" onClick={save} disabled={saving || loading}>
+          {saving ? "保存中…" : "保存配置"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // ---- page ----
 
 export default function InterceptPage() {
@@ -161,8 +360,18 @@ export default function InterceptPage() {
   const [enabledTools, setEnabledTools] = React.useState<Set<string>>(new Set());
   const [scopeLoading, setScopeLoading] = React.useState(false);
   const [scopeSaving, setScopeSaving]   = React.useState(false);
+  const [scopeTools, setScopeTools]     = React.useState<string[]>([]); // 页头信息条:当前进入拦截的工具
 
   // ---- data ----
+
+  const loadScope = React.useCallback(async () => {
+    try {
+      const cfg = await api.interceptGetToolConfig();
+      setScopeTools(cfg.enabled_tools);
+    } catch {
+      // 信息条非关键,失败静默
+    }
+  }, []);
 
   const load = React.useCallback(async () => {
     try {
@@ -175,7 +384,7 @@ export default function InterceptPage() {
     }
   }, []);
 
-  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => { load(); loadScope(); }, [load, loadScope]);
 
   React.useEffect(() => {
     if (form.match_type !== "regex" || !form.pattern) { setRegexErr(""); setRegexWarn(false); return; }
@@ -285,6 +494,7 @@ export default function InterceptPage() {
     try {
       await api.interceptSetToolConfig([...enabledTools]);
       toast.success("拦截范围已保存");
+      setScopeTools([...enabledTools]);
       setScopeOpen(false);
     } catch (e) {
       toast.error("保存失败: " + (e as Error).message);
@@ -298,34 +508,74 @@ export default function InterceptPage() {
   // ---- render ----
 
   return (
-    <div className="flex flex-1 flex-col gap-6 p-6">
+    <div className="flex flex-1 flex-col gap-5 p-6">
 
       {/* ---- header ---- */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-2.5">
-          <ShieldAlertIcon className="h-5 w-5 mt-0.5 shrink-0" />
-          <div>
-            <h1 className="text-lg font-semibold leading-tight">拦截规则</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              工具执行前按优先级（数字越大越先）逐条匹配，首条命中的规则生效
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button variant="outline" size="sm" onClick={openScope}>
-            <ListFilterIcon className="h-4 w-4" />
-            拦截范围
-          </Button>
-          <Button onClick={openNew} size="sm">
-            <PlusIcon className="h-4 w-4" />
-            新建规则
-          </Button>
+      <div className="flex items-center gap-2.5">
+        <ShieldAlertIcon className="h-5 w-5 shrink-0" />
+        <div>
+          <h1 className="text-lg font-semibold leading-tight">命令拦截</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            工具执行前先按拦截规则匹配；未命中的命令可交由模型兜底判定
+          </p>
         </div>
       </div>
 
-      {/* ---- rules table ---- */}
-      <Card>
-        <CardContent className="p-0">
+      {/* ---- 拦截范围信息条（规则匹配与模型兜底共用：不在范围内的工具两者都不介入）---- */}
+      <div
+        className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 ${
+          scopeTools.length === 0
+            ? "border-amber-400/60 bg-amber-50/50 dark:bg-amber-950/20"
+            : "bg-muted/40"
+        }`}
+      >
+        <div className="flex min-w-0 items-center gap-2 text-sm">
+          <ListFilterIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="shrink-0 font-medium">拦截范围</span>
+          {scopeTools.length === 0 ? (
+            <span className="text-amber-700 dark:text-amber-500">
+              未启用任何工具 — 拦截规则与模型兜底均不会生效
+            </span>
+          ) : (
+            <>
+              <Badge variant="secondary" className="shrink-0">{scopeTools.length} 个工具</Badge>
+              <span className="truncate text-muted-foreground" title={scopeTools.join("、")}>
+                {scopeTools.join("、")}
+              </span>
+            </>
+          )}
+        </div>
+        <Button
+          variant={scopeTools.length === 0 ? "default" : "outline"}
+          size="sm"
+          className="shrink-0"
+          onClick={openScope}
+        >
+          <ListFilterIcon className="h-4 w-4" />
+          调整范围
+        </Button>
+      </div>
+
+      <Tabs defaultValue="rules" className="flex-1">
+        <TabsList>
+          <TabsTrigger value="rules">拦截规则</TabsTrigger>
+          <TabsTrigger value="judge">模型配置</TabsTrigger>
+        </TabsList>
+
+        {/* ---- tab: 拦截规则 ---- */}
+        <TabsContent value="rules" className="mt-4 flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              按优先级（数字越大越先）逐条匹配，首条命中的规则生效
+            </p>
+            <Button onClick={openNew} size="sm" className="shrink-0">
+              <PlusIcon className="h-4 w-4" />
+              新建规则
+            </Button>
+          </div>
+
+          <Card>
+            <CardContent className="p-0">
           {loading ? (
             <p className="p-6 text-sm text-muted-foreground">加载中…</p>
           ) : rules.length === 0 ? (
@@ -404,8 +654,15 @@ export default function InterceptPage() {
               </TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ---- tab: 模型配置 ---- */}
+        <TabsContent value="judge" className="mt-4">
+          <JudgeCard />
+        </TabsContent>
+      </Tabs>
 
       {/* ---- editor sheet ---- */}
       <Sheet open={open} onOpenChange={setOpen}>

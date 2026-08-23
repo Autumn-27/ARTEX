@@ -264,6 +264,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		}
 	}
 	go s.reconcileConcurrency()
+	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
 	return s
 }
 
@@ -831,6 +832,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/task/{taskID}", s.interceptListTaskItems)
 	mux.HandleFunc("GET /api/intercept/tool-config", s.interceptGetToolConfig)
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
+	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
+	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the

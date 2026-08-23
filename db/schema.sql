@@ -737,11 +737,15 @@ CREATE TABLE IF NOT EXISTS intercept_pending (
     tool_input      JSONB NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'allowed', 'denied', 'timeout')),
+    -- 判定理由:规则命中时为规则 message;LLM 兜底判定时为模型给的简短理由(前缀 [模型])。
+    reason          TEXT NOT NULL DEFAULT '',
     decided_at      TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_status ON intercept_pending(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_task   ON intercept_pending(task_id, created_at DESC);
+-- 补旧库:reason 列(已发版,加列要带 IF NOT EXISTS)。
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
 
 -- =====================================================================
 -- L. 漏洞发现持久化

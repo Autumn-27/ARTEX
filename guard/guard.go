@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/norma/hook"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/norma/hook"
 )
 
 // AuditEntry records one gated tool call.
@@ -75,12 +75,13 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		cmd = in.Text
 	}
 	g.record(ev.ToolName, "allow", "", cmd)
-	return g.applyIntercept(ctx, ev)
+	return g.applyIntercept(ctx, ev, cmd)
 }
 
 // applyIntercept evaluates user-configured intercept rules against the tool call.
-// It is called after all built-in safety checks pass.
-func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
+// It is called after all built-in safety checks pass. cmd is the extracted shell
+// surface (empty for non-shell tools), passed to the LLM fallback judge.
+func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
@@ -89,7 +90,13 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	}
 	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
 	if !matched {
-		return hook.Result{}
+		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
+		// or unwired, keep current behavior and allow.
+		d, judged := g.interceptor.Judge(ctx, ev.ToolName, judgeSubject(cmd, ev.Input))
+		if !judged {
+			return hook.Result{}
+		}
+		dec = d
 	}
 	switch dec.Action {
 	case "deny":
@@ -98,7 +105,10 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		return g.block(ev.ToolName, dec.Message, "")
 	case "allow":
 		// 观测:显式 allow 规则命中记一条 allowed（无规则命中的放行不记，避免全量刷屏）。
-		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
+		// 模型兜底判 allow(RuleID==0)同样不落库,与「未命中直接放行」一致。
+		if dec.RuleID != 0 {
+			g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
+		}
 		return hook.Result{}
 	case "ask":
 		// If the worker context is already cancelled (task stopped / killed), block
@@ -114,6 +124,16 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		return hook.Result{}
 	}
 	return hook.Result{}
+}
+
+// judgeSubject builds the text the LLM fallback judge evaluates: the shell
+// command for shell tools, or the raw tool input JSON for others (Write/Edit/…)
+// so the model sees what is being written/requested.
+func judgeSubject(cmd string, input []byte) string {
+	if cmd != "" {
+		return cmd
+	}
+	return string(input)
 }
 
 var reBlocked = regexp.MustCompile(`(?i)\b(403|forbidden|waf|blocked|rate.?limit|429|captcha|denied)\b`)
