@@ -81,10 +81,12 @@ DENY   hping3 --flood -p 80 tgt                                参数明示 floo
 ASK    mysql -e "DROP TABLE users_bak_0921"                    像备份表,无法确定是否生产数据。
 ASK    删除 /data/uploads 下一个归属不明的文件                    作用对象无法判明。
 
-# 输出(严格一行,不要任何解释、前后缀或代码块)
-- 放行:ALLOW
-- 转人工:ASK:<不超过30字,说明为何判不准>
-- 拦截:DENY:<不超过30字,写明命中 D1–D6 中哪条>`
+# 输出格式(严格一行,只含裁决本身;禁止输出「放行/转人工/拦截」等中文标签、解释、前后缀或代码块)
+- 放行  → 输出 ALLOW
+- 转人工 → 输出 ASK:<不超过30字,说明为何判不准>
+- 拦截  → 输出 DENY:<不超过30字,写明命中 D1–D6 中哪条>
+合法输出示例:DENY:删除生产文件命中D4
+合法输出示例:ALLOW`
 
 // Verdict is the parsed outcome of the judge's single-line reply.
 type Verdict struct {
@@ -92,42 +94,57 @@ type Verdict struct {
 	Reason string
 }
 
-// ParseVerdict parses the judge model's reply. It accepts a single line of the
-// form ALLOW / ASK:<reason> / DENY:<reason> (case-insensitive, optional colon).
-// Only the first non-empty line is considered. An empty Action signals the reply
-// could not be parsed, so the caller applies the configured fail action.
+// ParseVerdict parses the judge model's reply. It accepts a single line
+// containing ALLOW / ASK:<reason> / DENY:<reason> (case-insensitive). It scans
+// for the earliest verdict keyword rather than requiring it at the very start,
+// so a model that echoes a leading label from the prompt (e.g. "拦截:DENY:...")
+// is still parsed correctly instead of silently falling through to fail-open.
+// An empty Action signals the reply could not be parsed, so the caller applies
+// the configured fail action.
 func ParseVerdict(text string) Verdict {
 	line := firstNonEmptyLine(text)
 	if line == "" {
 		return Verdict{}
 	}
 	upper := strings.ToUpper(line)
-	switch {
-	case strings.HasPrefix(upper, "ALLOW"):
-		return Verdict{Action: "allow"}
-	case strings.HasPrefix(upper, "DENY"):
-		return Verdict{Action: "deny", Reason: verdictReason(line, 4)}
-	case strings.HasPrefix(upper, "ASK"):
-		return Verdict{Action: "ask", Reason: verdictReason(line, 3)}
-	default:
+
+	// Find whichever verdict keyword appears earliest in the line.
+	keywords := []struct {
+		word   string
+		action string
+	}{
+		{"ALLOW", "allow"},
+		{"DENY", "deny"},
+		{"ASK", "ask"},
+	}
+	bestIdx, bestLen, action := -1, 0, ""
+	for _, k := range keywords {
+		idx := strings.Index(upper, k.word)
+		if idx >= 0 && (bestIdx < 0 || idx < bestIdx) {
+			bestIdx, bestLen, action = idx, len(k.word), k.action
+		}
+	}
+	if bestIdx < 0 {
 		return Verdict{}
 	}
+	if action == "allow" {
+		return Verdict{Action: "allow"}
+	}
+	return Verdict{Action: action, Reason: cleanReason(line[bestIdx+bestLen:])}
 }
 
-// verdictReason extracts the reason after the keyword of length n, trimming a
-// leading colon/whitespace and capping the length so a runaway model can't bloat
-// the audit row.
-func verdictReason(line string, n int) string {
-	if len(line) <= n {
-		return ""
+// cleanReason trims the text after a verdict keyword: drop a leading colon/space,
+// keep only the first line, and cap the length so a runaway model can't bloat the
+// audit row.
+func cleanReason(s string) string {
+	s = firstNonEmptyLine(s)
+	s = strings.TrimSpace(s)
+	s = strings.TrimLeft(s, ":：")
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		s = s[:200]
 	}
-	r := strings.TrimSpace(line[n:])
-	r = strings.TrimLeft(r, ":：")
-	r = strings.TrimSpace(r)
-	if len(r) > 200 {
-		r = r[:200]
-	}
-	return r
+	return s
 }
 
 func firstNonEmptyLine(text string) string {
