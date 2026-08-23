@@ -228,6 +228,40 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 	return err
 }
 
+// UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
+// scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
+// error if no such goal exists in this exploration.
+func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
+	payload := map[string]any{"text": text}
+	if vulnclass != "" {
+		payload["vulnclass"] = vulnclass
+	}
+	raw, _ := json.Marshal(payload)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
+// DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
+// an intent/fact by id. The edges (spawns) and anchors reference it with ON DELETE
+// CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
+// error if no such goal exists in this exploration.
+func (s *ExplorationStore) DeleteGoal(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
 // SetIntentState updates an intent node's state.
 // ResetRunningIntents returns any intent left in 'running' back to 'open' so it
 // is re-claimed. Called on startup: a 'running' intent with no live worker (a

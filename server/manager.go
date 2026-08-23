@@ -1488,6 +1488,34 @@ func (t *Task) NotifyGoal(texts []string) {
 	t.Notify()
 }
 
+// NotifyGoalDeleted records that the human deleted a goal (via 总览的目标管理), then
+// wakes the planner so the next round spells out which goal was removed. The event
+// survives an early-returning terminal round (drain happens after the gate).
+func (t *Task) NotifyGoalDeleted(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal_deleted", Detail: text})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
+// NotifyGoalEdited records that the human edited a goal (via 总览的目标管理), then wakes
+// the planner so the next round spells out the old→new change. The event survives an
+// early-returning terminal round (drain happens after the gate).
+func (t *Task) NotifyGoalEdited(oldText, newText string) {
+	oldText, newText = strings.TrimSpace(oldText), strings.TrimSpace(newText)
+	if newText == "" {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal_edited", OldGoal: oldText, NewGoal: newText})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
 // NotifyCancelled records that the human deleted intentID (reason = 删除原因), then
 // wakes the planner so the next round spells out which intent was removed and why.
 // The intent is stopped (not deleted); the reason is attached to it as a fact.

@@ -299,6 +299,16 @@ export interface TaskNode {
   inherited?: boolean;
 }
 
+// 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
+export interface TaskGoal {
+  id: string;
+  text: string;
+  vulnclass?: string;
+  state: string; // GoalState
+  origin?: string;
+  ts: string;
+}
+
 // ---- Findings ----
 export type Severity = "critical" | "high" | "medium" | "low";
 

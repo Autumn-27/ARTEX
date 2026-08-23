@@ -56,6 +56,7 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskGoal,
   TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
@@ -256,6 +257,18 @@ export const api = {
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
+  // ---- 目标管理（总览）----
+  // 本任务全部目标（text/vulnclass/state）。
+  taskGoals: (id: string) => get<{ goals: TaskGoal[] }>(`/tasks/${id}/goals`),
+  // 人工新增目标：写入图谱并通知 planner、复活任务。
+  addGoal: (id: string, text: string, vulnclass?: string) =>
+    post<TaskGoal>(`/tasks/${id}/goals`, { text, vulnclass: vulnclass ?? "" }),
+  // 人工修改目标文本（及 vulnclass）：通知 planner「由 old 变为 new」、复活任务。
+  updateGoal: (id: string, goalId: string, text: string, vulnclass?: string) =>
+    patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
+  // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
+  deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+
   // 本任务测试范围列表（含继承自来源任务的范围）。
   taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
   // 手动新增一条测试范围（kind=company/root_domain/subdomain/ip/cidr）。
