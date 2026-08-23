@@ -299,6 +299,8 @@ export interface ProxyQuery {
   region?: string;
   tag?: string;
   healthy?: boolean;
+  page?: number; // 1-based；省略 = 不分页返回全部
+  limit?: number;
 }
 
 // 免费代理源开关 + 上次抓取状态。

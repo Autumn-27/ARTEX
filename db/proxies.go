@@ -87,6 +87,8 @@ func (d *DB) Proxies() *ProxyStore { return &ProxyStore{db: d} }
 func (s *ProxyStore) PoolEnabled() bool { return s.db.GetBool(SettingProxyPoolEnabled, false) }
 
 // ProxyFilter narrows a ListProxies / SelectForHost query. Zero value = no filter.
+// Limit/Offset apply only to ListProxies (SelectForHost ignores them); Limit<=0
+// means no paging.
 type ProxyFilter struct {
 	Protocol    string
 	Region      string
@@ -95,6 +97,8 @@ type ProxyFilter struct {
 	OnlyHealthy bool
 	OnlyEnabled bool
 	TrustedOnly bool
+	Limit       int
+	Offset      int
 }
 
 // listProxyCols is the shared SELECT column list. tags is read as a JSON array
@@ -122,7 +126,8 @@ func scanProxy(rows *sql.Rows) (*Proxy, error) {
 	return &p, nil
 }
 
-// ListProxies returns proxies matching the filter, newest first.
+// ListProxies returns proxies matching the filter, newest first. When f.Limit>0
+// the result is a page (LIMIT/OFFSET); otherwise all matching rows are returned.
 func (s *ProxyStore) ListProxies(f ProxyFilter) ([]*Proxy, error) {
 	q := `SELECT ` + listProxyCols + ` FROM proxies`
 	where, args := proxyWhere(f)
@@ -130,6 +135,12 @@ func (s *ProxyStore) ListProxies(f ProxyFilter) ([]*Proxy, error) {
 		q += " WHERE " + where
 	}
 	q += " ORDER BY id DESC"
+	if f.Limit > 0 {
+		args = append(args, f.Limit)
+		q += fmt.Sprintf(" LIMIT $%d", len(args))
+		args = append(args, f.Offset)
+		q += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -144,6 +155,19 @@ func (s *ProxyStore) ListProxies(f ProxyFilter) ([]*Proxy, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// CountProxies returns how many proxies match the filter (ignoring Limit/Offset),
+// for server-side pagination totals.
+func (s *ProxyStore) CountProxies(f ProxyFilter) (int, error) {
+	q := `SELECT count(*) FROM proxies`
+	where, args := proxyWhere(f)
+	if where != "" {
+		q += " WHERE " + where
+	}
+	var n int
+	err := s.db.QueryRow(q, args...).Scan(&n)
+	return n, err
 }
 
 // proxyWhere builds the shared WHERE clause + args ($1-based) from a filter.

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { TablePagination } from "@/components/table-pagination";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -61,6 +62,9 @@ function HealthBadge({ p }: { p: ProxyNode }) {
 
 export default function ProxyPoolPage() {
   const [proxies, setProxies] = React.useState<ProxyNode[]>([]);
+  const [total, setTotal] = React.useState(0);
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(20);
   const [sources, setSources] = React.useState<ProxySource[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [checking, setChecking] = React.useState<Set<number>>(new Set());
@@ -73,15 +77,16 @@ export default function ProxyPoolPage() {
 
   const load = React.useCallback(async () => {
     try {
-      const [px, srcs] = await Promise.all([api.proxies(), api.proxySources()]);
-      setProxies(px);
+      const [px, srcs] = await Promise.all([api.proxies({ page, limit: pageSize }), api.proxySources()]);
+      setProxies(px.proxies);
+      setTotal(px.total);
       setSources(srcs);
     } catch (e) {
       toast.error(`加载失败：${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, pageSize]);
 
   React.useEffect(() => {
     void load();
@@ -136,6 +141,7 @@ export default function ProxyPoolPage() {
     setProxies((prev) => prev.filter((x) => x.id !== p.id));
     try {
       await api.deleteProxy(p.id);
+      await load(); // 重拉当前页：修正 total 并从后页补位
     } catch (e) {
       toast.error(`删除失败：${(e as Error).message}`);
       await load();
@@ -271,7 +277,7 @@ export default function ProxyPoolPage() {
         <CardHeader className="flex-row items-center justify-between">
           <div>
             <CardTitle className="text-base">代理节点</CardTitle>
-            <CardDescription>共 {proxies.length} 个</CardDescription>
+            <CardDescription>共 {total} 个</CardDescription>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
@@ -365,6 +371,20 @@ export default function ProxyPoolPage() {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          )}
+          {!loading && total > 0 && (
+            <div className="mt-3">
+              <TablePagination
+                page={page}
+                pageSize={pageSize}
+                total={total}
+                onPageChange={setPage}
+                onPageSizeChange={(s) => {
+                  setPageSize(s);
+                  setPage(1);
+                }}
+              />
             </div>
           )}
         </CardContent>

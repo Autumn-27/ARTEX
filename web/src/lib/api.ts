@@ -363,8 +363,13 @@ export const api = {
     if (q.region) p.set("region", q.region);
     if (q.tag) p.set("tag", q.tag);
     if (q.healthy) p.set("healthy", "1");
+    if (q.page) p.set("page", String(q.page));
+    if (q.limit) p.set("limit", String(q.limit));
     const qs = p.toString();
-    return get<{ proxies: ProxyNode[] }>(`/proxies${qs ? `?${qs}` : ""}`).then((r) => arr(r.proxies));
+    return get<{ proxies: ProxyNode[]; total: number }>(`/proxies${qs ? `?${qs}` : ""}`).then((r) => ({
+      proxies: arr(r.proxies),
+      total: r.total ?? 0,
+    }));
   },
   createProxy: (input: ProxyInput) => post<{ id: number }>("/proxies", input),
   updateProxy: (id: number, input: ProxyInput) => put<{ ok: boolean }>(`/proxies/${id}`, input),

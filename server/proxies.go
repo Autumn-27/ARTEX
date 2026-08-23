@@ -23,7 +23,8 @@ func maskProxies(in []*db.Proxy) []db.Proxy {
 	return out
 }
 
-// listProxies GET /api/proxies — optional ?protocol=&region=&tag=&healthy=1 filters.
+// listProxies GET /api/proxies — filters ?protocol=&region=&tag=&healthy=1&enabled=1
+// plus server-side paging ?page=&limit= (page 1-based; omit for all rows).
 func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := db.ProxyFilter{
@@ -36,12 +37,26 @@ func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
 	if tag := q.Get("tag"); tag != "" {
 		f.Tags = []string{tag}
 	}
-	rows, err := s.m.Proxies().ListProxies(f)
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit > 0 {
+		if page < 1 {
+			page = 1
+		}
+		f.Limit, f.Offset = limit, (page-1)*limit
+	}
+	store := s.m.Proxies()
+	total, err := store.CountProxies(f)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"proxies": maskProxies(rows)})
+	rows, err := store.ListProxies(f)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"proxies": maskProxies(rows), "total": total})
 }
 
 // proxyCreateReq is the create/update body. Password "" on update keeps the
