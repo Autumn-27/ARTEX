@@ -109,6 +109,8 @@ func renderPlannerTodos(items []actool.Todo) string {
 //	"finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
 //	"goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
 //	            single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
+//	"goal_deleted" — the human deleted a goal from 总览的目标管理 (Detail = 被删目标文本).
+//	"goal_edited"  — the human edited a goal from 总览的目标管理 (OldGoal→NewGoal 文本).
 //	"cancelled" — the human deleted intent IntentID (Detail = 删除原因). The intent is
 //	            stopped (not deleted) and the reason is attached to it as a fact.
 type TriggerEvent struct {
@@ -116,6 +118,8 @@ type TriggerEvent struct {
 	IntentID int64
 	Detail   string
 	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
+	OldGoal  string   // Kind=="goal_edited" 专用：修改前的目标文本
+	NewGoal  string   // Kind=="goal_edited" 专用：修改后的目标文本
 }
 
 // renderTriggers spells out the change(s) that fired this round: for a finished
@@ -136,6 +140,10 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 			} else {
 				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了 %d 个目标：%s —— 均为新的待达成目标，请逐一为尚无对应意图的目标补充探索方向。", len(ev.Goals), strings.Join(ev.Goals, "；")))
 			}
+		case "goal_deleted":
+			b.WriteString(fmt.Sprintf("\n- 人删除了该目标：%s —— 该目标已移除，请据此重判剩余目标/方向（不必再为它派意图）。", ev.Detail))
+		case "goal_edited":
+			b.WriteString(fmt.Sprintf("\n- 人修改了目标，由「%s」变为「%s」—— 请据新目标调整探索方向（原方向若已不适用请停派）。", ev.OldGoal, ev.NewGoal))
 		case "finding":
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		case "cancelled":
