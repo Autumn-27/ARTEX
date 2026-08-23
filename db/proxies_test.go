@@ -160,6 +160,32 @@ func TestProxyStoreLifecycle(t *testing.T) {
 	if got.Enabled {
 		t.Fatalf("proxy should auto-disable after %d fails", ProxyFailAutoDisable)
 	}
+
+	// Free-source (untrusted) proxy: a single probe failure deletes it outright.
+	freeAdded, err := ps.UpsertFromSource("unittest-free", []Proxy{{Protocol: "http", Host: host(2), Port: 8080}})
+	if err != nil || freeAdded != 1 {
+		t.Fatalf("seed free proxy: added=%d err=%v", freeAdded, err)
+	}
+	all, err = ps.ListProxies(ProxyFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var freeID int64
+	for _, p := range all {
+		if p.Host == host(2) {
+			freeID = p.ID
+			ids = append(ids, p.ID)
+		}
+	}
+	if freeID == 0 {
+		t.Fatal("free proxy not found after upsert")
+	}
+	if err := ps.UpdateHealth(freeID, false, 0, "timeout"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.GetProxy(freeID); err != ErrProxyNotFound {
+		t.Fatalf("free-source proxy should be deleted on probe failure, got err=%v", err)
+	}
 }
 
 // TestProxySourceToggle covers source enable persistence + fetch stamping.

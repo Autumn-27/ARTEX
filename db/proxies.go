@@ -380,9 +380,13 @@ func successRate(p *Proxy) float64 {
 	return float64(p.OkCount) / float64(p.CheckCount)
 }
 
-// UpdateHealth records the outcome of one probe. On success it clears the fail
-// streak and stamps last_ok_at; on failure it increments the streak and, past
-// ProxyFailAutoDisable, auto-disables the proxy so dead nodes drop out.
+// UpdateHealth records the outcome of one probe.
+//   - success: clears the fail streak, stamps last_ok_at, marks healthy.
+//   - failure of an UNTRUSTED (free-source) proxy: the row is DELETED outright —
+//     free proxies are disposable and re-fetched, so a dead one is just removed.
+//   - failure of a TRUSTED (manual/imported) proxy: kept for retry; the fail streak
+//     increments and past ProxyFailAutoDisable the proxy auto-disables (not deleted,
+//     since the user entered it deliberately).
 func (s *ProxyStore) UpdateHealth(id int64, ok bool, latencyMs int, probeErr string) error {
 	if ok {
 		_, err := s.db.Exec(`
@@ -392,7 +396,17 @@ UPDATE proxies SET healthy=true, latency_ms=$2, last_error='',
 WHERE id=$1`, id, latencyMs)
 		return err
 	}
-	_, err := s.db.Exec(`
+	// Free-source (untrusted) proxy failed → delete it. RowsAffected>0 means it was
+	// an untrusted row and is now gone; nothing more to do.
+	res, err := s.db.Exec(`DELETE FROM proxies WHERE id=$1 AND NOT trusted`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// Trusted proxy failed → keep, bump streak, auto-disable past the threshold.
+	_, err = s.db.Exec(`
 UPDATE proxies SET healthy=false, last_error=$2, last_check_at=now(),
     fail_streak=fail_streak+1, check_count=check_count+1,
     enabled = CASE WHEN fail_streak+1 >= $3 THEN false ELSE enabled END
