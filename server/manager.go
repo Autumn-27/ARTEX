@@ -29,6 +29,7 @@ import (
 type Task struct {
 	ID          string `json:"id"`
 	ExpID       int64  `json:"exploration_id"`
+	Name        string `json:"name"` // 可选任务名称;空=未命名
 	Description string `json:"description"`
 	Goal        string `json:"goal"`
 	CreatedAt   int64  `json:"created_at"`
@@ -687,6 +688,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
+		Name:        pt.Name,
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,

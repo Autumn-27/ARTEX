@@ -243,6 +243,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const companyIDs = [...((b.company_ids as number[] | undefined) ?? [])];
     const created: Task = {
       id,
+      name: String(b.name ?? ""),
       description: String(b.description ?? "新任务"),
       goal: String(b.goal ?? ""),
       status: "created",
@@ -595,14 +596,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/findings/stats") {
     const vulnclasses = Array.from(new Set(mockFindings.map((f) => f.vulnclass))).sort();
     // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
-    const taskMap = new Map<string, { description: string; count: number }>();
+    const taskMap = new Map<string, { name: string; description: string; count: number }>();
     for (const f of mockFindings) {
       if (!f.task_id) continue;
-      const cur = taskMap.get(f.task_id) ?? { description: f.task_description ?? "", count: 0 };
+      const owner = mockTasks.find((candidate) => candidate.id === f.task_id);
+      const cur = taskMap.get(f.task_id) ?? { name: owner?.name ?? "", description: f.task_description ?? "", count: 0 };
       cur.count++;
       taskMap.set(f.task_id, cur);
     }
-    const tasks = Array.from(taskMap, ([id, v]) => ({ id, description: v.description, count: v.count }));
+    const tasks = Array.from(taskMap, ([id, v]) => ({ id, name: v.name, description: v.description, count: v.count }));
     return {
       total: mockFindings.length,
       pending: mockFindings.filter((f) => f.status === "pending").length,
@@ -636,6 +638,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       const owner = mockTasks.find((candidate) => candidate.id === key);
       return {
         task_id: key === "__unassigned__" ? null : key,
+        task_name: owner?.name ?? "",
         task_description: owner?.description ?? items[0]?.task_description ?? "",
         task_status: owner?.status ?? "",
         count: items.length,

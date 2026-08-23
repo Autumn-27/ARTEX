@@ -1299,6 +1299,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskReq struct {
+	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
 	Description          string   `json:"description"`
 	Goal                 string   `json:"goal"`
 	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
@@ -1356,6 +1357,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.CompanyIDs = companyIDs
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
+		Name:          strings.TrimSpace(req.Name),
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,

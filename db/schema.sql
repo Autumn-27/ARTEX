@@ -324,6 +324,7 @@ CREATE TABLE IF NOT EXISTS llm_profile_health (
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
     description    TEXT NOT NULL,
     goal           TEXT NOT NULL,
     exploration_id BIGINT NOT NULL UNIQUE
@@ -367,6 +368,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEF
 -- exploration that already owns goals/history.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queue_mode TEXT NOT NULL DEFAULT '';
+-- 可选的任务名称;补旧库。空串=未命名,前端展示时回退到描述。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
 

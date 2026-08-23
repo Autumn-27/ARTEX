@@ -225,7 +225,10 @@ export default function TasksPage() {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (!q) return true;
       return (
-        t.description.toLowerCase().includes(q) || t.goal.toLowerCase().includes(q) || t.id.toLowerCase().includes(q)
+        (t.name ?? "").toLowerCase().includes(q) ||
+        t.description.toLowerCase().includes(q) ||
+        t.goal.toLowerCase().includes(q) ||
+        t.id.toLowerCase().includes(q)
       );
     });
   }, [tasks, query, statusFilter]);
@@ -575,6 +578,7 @@ export default function TasksPage() {
                   />
                 </TableHead>
                 <TableHead className="font-mono">ID</TableHead>
+                <TableHead>名称</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>目标</TableHead>
                 <TableHead>状态</TableHead>
@@ -741,12 +745,21 @@ const TaskRow = React.memo(function TaskRow({
           <Link
             href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
             className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={task.description}
+            title={task.name || task.description}
           >
-            {task.description}
+            {task.name || <span className="text-muted-foreground">未命名</span>}
           </Link>
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
         </div>
+      </TableCell>
+      <TableCell className="text-muted-foreground max-w-xs">
+        <Link
+          href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+          className="block truncate rounded-sm hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          title={task.description}
+        >
+          {task.description}
+        </Link>
       </TableCell>
       <TableCell className="text-muted-foreground max-w-xs truncate">{task.goal}</TableCell>
       <TableCell>
@@ -1282,6 +1295,7 @@ function CompanyPicker({
 
 function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () => void }) {
   const [open, setOpen] = React.useState(false);
+  const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
@@ -1350,6 +1364,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
+        name: name.trim(),
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -1361,6 +1376,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
         coverageEnabled,
       });
       toast.success("任务已创建");
+      setName("");
       setDescription("");
       setGoal("");
       setSelectedTemplateID(null);
@@ -1415,6 +1431,15 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
               }}
               portalContainer={sheetContentRef}
             />
+            <div className="grid gap-2">
+              <Label htmlFor="name">名称（可选）</Label>
+              <Input
+                id="name"
+                placeholder="给任务起个便于识别的名字，例如：Acme 官网渗透"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
             <div className="grid gap-2">
               <Label htmlFor="description">描述</Label>
               <Textarea

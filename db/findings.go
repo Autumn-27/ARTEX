@@ -228,6 +228,7 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 // deletion; those records intentionally share one "unassigned/deleted" bucket.
 type FindingGroup struct {
 	TaskID          *int64    `json:"task_id"`
+	TaskName        string    `json:"task_name"` // 可选任务名称;空=未命名
 	TaskDescription string    `json:"task_description"`
 	TaskStatus      string    `json:"task_status"`
 	Count           int       `json:"count"`
@@ -250,7 +251,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 	}
 	where, args := f.where()
 	grouped := ` FROM findings f LEFT JOIN tasks t ON f.task_id=t.id` + where +
-		` GROUP BY t.id, t.description, t.status, t.paused, t.queued`
+		` GROUP BY t.id, t.name, t.description, t.status, t.paused, t.queued`
 
 	var groupTotal, findingTotal int
 	countQuery := `SELECT COUNT(*), COALESCE(SUM(finding_count),0) FROM (` +
@@ -267,7 +268,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC, MAX(f.created_at) DESC, t.id DESC NULLS LAST`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
-	query := fmt.Sprintf(`SELECT t.id, COALESCE(t.description,''), COALESCE(
+	query := fmt.Sprintf(`SELECT t.id, COALESCE(t.name,''), COALESCE(t.description,''), COALESCE(
 		CASE
 			WHEN t.status IN ('done','failed','timeout') THEN t.status
 			WHEN t.queued THEN 'queued'
@@ -290,7 +291,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 	for rows.Next() {
 		var group FindingGroup
 		var taskID sql.NullInt64
-		if err := rows.Scan(&taskID, &group.TaskDescription, &group.TaskStatus, &group.Count,
+		if err := rows.Scan(&taskID, &group.TaskName, &group.TaskDescription, &group.TaskStatus, &group.Count,
 			&group.Critical, &group.High, &group.Medium, &group.Low, &group.LastFoundAt); err != nil {
 			return nil, 0, 0, err
 		}
@@ -477,6 +478,7 @@ type FindingStats struct {
 // the id.
 type FindingTaskOption struct {
 	ID          int64  `json:"id"`
+	Name        string `json:"name"` // 可选任务名称;空=未命名
 	Description string `json:"description"`
 	Count       int    `json:"count"`
 }
@@ -513,11 +515,11 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	}
 
 	// 任务下拉:有漏洞的任务,带描述(任务删除后为空,前端回退 id)和条数,最新有漏洞的排前。
-	trows, err := d.Query(`SELECT f.task_id, COALESCE(t.description, ''), COUNT(*)
+	trows, err := d.Query(`SELECT f.task_id, COALESCE(t.name, ''), COALESCE(t.description, ''), COUNT(*)
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.task_id IS NOT NULL
-		GROUP BY f.task_id, t.description
+		GROUP BY f.task_id, t.name, t.description
 		ORDER BY MAX(f.created_at) DESC`)
 	if err != nil {
 		return nil, err
@@ -525,7 +527,7 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	defer trows.Close()
 	for trows.Next() {
 		var opt FindingTaskOption
-		if err := trows.Scan(&opt.ID, &opt.Description, &opt.Count); err != nil {
+		if err := trows.Scan(&opt.ID, &opt.Name, &opt.Description, &opt.Count); err != nil {
 			return nil, err
 		}
 		st.Tasks = append(st.Tasks, opt)

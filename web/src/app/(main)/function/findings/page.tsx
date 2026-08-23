@@ -626,7 +626,7 @@ export default function FindingsPage() {
               <SelectItem value={UNASSIGNED_TASK}>未关联 / 任务已删除</SelectItem>
               {(stats.tasks ?? []).map((t) => {
                 const id = String(t.id);
-                const label = t.description || `任务 #${id}（已删除）`;
+                const label = t.name || t.description || `任务 #${id}（已删除）`;
                 return (
                   <SelectItem key={id} value={id}>
                     <span className="flex w-full items-center gap-2">
@@ -704,7 +704,11 @@ export default function FindingsPage() {
                       />
                       <div className="flex min-w-0 flex-col gap-1">
                         <CardTitle className="truncate text-sm">
-                          {group.task_id === null ? "未关联 / 任务已删除" : `任务 #${group.task_id}`}
+                          {group.task_id === null
+                            ? "未关联 / 任务已删除"
+                            : group.task_name
+                              ? `${group.task_name}（任务 #${group.task_id}）`
+                              : `任务 #${group.task_id}`}
                         </CardTitle>
                         <CardDescription className="truncate" title={group.task_description}>
                           {group.task_description || "来源任务不可用"}

@@ -180,6 +180,7 @@ export const api = {
   tasks: () =>
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   createTask: (input: {
+    name?: string;
     description: string;
     goal: string;
     llmProfileIds?: number[];
@@ -191,6 +192,7 @@ export const api = {
     coverageEnabled?: boolean;
   }) =>
     post<Task>("/tasks", {
+      name: input.name ?? "",
       description: input.description,
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],

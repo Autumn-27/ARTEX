@@ -6,6 +6,7 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
   id: string;
+  name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   description: string;
   goal: string;
   status: TaskStatus;
@@ -349,6 +350,7 @@ export interface FindingsPage {
 
 export interface FindingGroup {
   task_id: string | number | null;
+  task_name?: string; // 可选任务名称;空/缺省=未命名
   task_description: string;
   task_status: string;
   count: number;
@@ -390,6 +392,7 @@ export interface FindingStats {
 // 前端回退展示 id)及其漏洞条数。
 export interface FindingTaskOption {
   id: string | number;
+  name?: string; // 可选任务名称;空/缺省=未命名
   description: string;
   count: number;
 }
