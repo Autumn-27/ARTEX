@@ -438,6 +438,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
+	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner

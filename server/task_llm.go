@@ -388,6 +388,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
+	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,

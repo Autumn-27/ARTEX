@@ -611,6 +611,8 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
+		// steer_work：人可对某条正在运行的意图(work)实时注入纠偏指令（不打断、不丢进展）。
+		t.steerWorkTool(),
 		// set_goals：人可在运行时给本任务补一个新的最终目标（规划者据此重判是否达成）。
 		t.setGoals(),
 		// asset management (handlers guard nil store internally)
