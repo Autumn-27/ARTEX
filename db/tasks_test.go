@@ -563,3 +563,45 @@ func TestCreateTaskWithCompanyScopes(t *testing.T) {
 		t.Fatalf("failed company association leaked %d exploration rows", leaked)
 	}
 }
+
+// TestListTasksOrderByIDDesc pins list ordering to id-descending. created_at is
+// deliberately not the sort key: tasks created in the same instant share a
+// timestamp and would reorder between polls; id is unique and monotonic.
+func TestListTasksOrderByIDDesc(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	var ids []int64
+	for i := range 3 {
+		tk, err := d.CreateTask(fmt.Sprintf("order-%d-%d", stamp, i), "goal", nil, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.DeleteTask(tk.ID) })
+		ids = append(ids, tk.ID)
+	}
+
+	list, err := d.ListTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reduce to just the ids created here; other rows may exist in the shared DB.
+	mine := map[int64]bool{ids[0]: true, ids[1]: true, ids[2]: true}
+	var seen []int64
+	for _, task := range list {
+		if mine[task.ID] {
+			seen = append(seen, task.ID)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("found %d of the created tasks in the list, want 3", len(seen))
+	}
+	// Newest (largest id) first.
+	if seen[0] != ids[2] || seen[1] != ids[1] || seen[2] != ids[0] {
+		t.Fatalf("order=%v, want descending %v", seen, []int64{ids[2], ids[1], ids[0]})
+	}
+}

@@ -1016,6 +1016,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			createdAny := false
 			for i, it := range items {
 				id, err := t.addOneIntent(it)
 				if err != nil {
@@ -1023,6 +1024,15 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
+				createdAny = true
+			}
+
+			// 人经主 agent 直投意图 → 若任务已 done（无 open 目标的 goalless 分支），把它
+			// 拉回 running，worker 才能领这条意图执行。resumeTask 仅由主 agent 的 Chat 接入
+			// (SetResumeTask)；planner 的 ToolSet 为 nil，故 planner 自己调 add_intent 时此段
+			// no-op，不影响其正常产意图。意图节点已在上面建好(open)，复活时不会被误判抽干。
+			if createdAny && t.resumeTask != nil {
+				t.resumeTask()
 			}
 
 			if !batch { // 单条：保持原返回

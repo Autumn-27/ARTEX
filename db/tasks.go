@@ -322,7 +322,9 @@ func (d *DB) SetParentRef(id int64, parentRef string) error {
 
 // ListTasks returns alive tasks, newest first.
 func (d *DB) ListTasks() ([]*Task, error) {
-	rows, err := d.Query(`SELECT ` + taskCols + ` FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC`)
+	// 按 id 降序:id 是 BIGSERIAL,单调递增即插入顺序,最新的在最前。不用 created_at
+	// 是因为同一时刻创建的多个任务时间戳相同,排序不稳定,列表会频繁换位(见 List)。
+	rows, err := d.Query(`SELECT ` + taskCols + ` FROM tasks WHERE deleted_at IS NULL ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}

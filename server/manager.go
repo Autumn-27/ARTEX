@@ -1558,7 +1558,14 @@ func (m *Manager) List() []*Task {
 	for _, t := range m.tasks {
 		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	// 按 id 降序(最新插入在最前)。m.tasks 是 map,遍历顺序随机,每次轮询都要重排;
+	// 若按 CreatedAt 排,同一秒创建的任务时间戳相同,排序不稳定,会在列表里频繁换
+	// 位置。id 由 BIGSERIAL 单调递增分配,唯一且稳定,顺序恒定。
+	sort.Slice(out, func(i, j int) bool {
+		ai, _ := strconv.ParseInt(out[i].ID, 10, 64)
+		aj, _ := strconv.ParseInt(out[j].ID, 10, 64)
+		return ai > aj
+	})
 	return out
 }
 
