@@ -308,13 +308,13 @@ target AS (
   JOIN task_scope ts ON ts.task_id = $1 AND (
        (ts.kind='company'     AND a.company_id = ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
-	    OR (ts.kind='subdomain'   AND a.domain = ts.domain)
-	    OR (ts.kind IN ('ip','cidr') AND a.ip IS NOT NULL AND a.ip !~ '[^0-9a-fA-F:.]' AND ts.net >>= a.ip::inet)
-	    OR (ts.kind='icp' AND (
-	         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
-	         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
-	       ))
-	  )
+    OR (ts.kind='subdomain'   AND a.domain = ts.domain)
+    OR (ts.kind IN ('ip','cidr') AND a.ip IS NOT NULL AND a.ip !~ '[^0-9a-fA-F:.]' AND ts.net >>= a.ip::inet)
+    OR (ts.kind='icp' AND (
+         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
+         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
+       ))
+  )
 ),
 tested AS (
   SELECT DISTINCT ea.asset_id

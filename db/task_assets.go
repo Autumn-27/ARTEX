@@ -288,6 +288,10 @@ FROM assets WHERE id=ANY($2::bigint[])`, taskID, assetIDs).Scan(&found, &existin
 	if found != len(assetIDs) {
 		return mutation, ErrTaskAssetAssetNotFound
 	}
+	// Order matters: this UPDATE fires trg_assets_task_links, which creates the
+	// link rows with the generic source='system'. The INSERT below must stay
+	// after it so the operator-authored 'manual' provenance wins; swapping the
+	// two statements silently degrades every manual attach back to 'system'.
 	if _, err := tx.Exec(`
 UPDATE assets
 SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END
