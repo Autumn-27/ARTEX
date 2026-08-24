@@ -430,24 +430,33 @@ function SessionItem({
   );
 }
 
+function truncateWorkerAssetLabel(value: string, maxChars = 30): string {
+  const chars = Array.from(value.trim());
+  if (chars.length <= maxChars) return chars.join("");
+  return `${chars.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
+}
+
 function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
-  const first = assets[0];
-  const firstLabel = first.label.trim() ? first.label : `#${first.asset_id}`;
+  const displayAssets = assets.filter(
+    (asset) => asset.type === "root_domain" || asset.type === "subdomain" || asset.type === "ip",
+  );
+  if (displayAssets.length === 0) return null;
+
+  const first = displayAssets[0];
+  const firstLabel = truncateWorkerAssetLabel(first.label || `#${first.asset_id}`);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="outline" className="max-w-28 shrink-0 font-normal">
+        <Badge variant="outline" className="max-w-60 shrink-0 font-normal" title={first.label}>
           <span className="truncate">当前资产：{firstLabel}</span>
-          {assets.length > 1 && <span className="shrink-0 tabular-nums">+{assets.length - 1}</span>}
+          {displayAssets.length > 1 && <span className="shrink-0 tabular-nums">+{displayAssets.length - 1}</span>}
         </Badge>
       </TooltipTrigger>
       <TooltipContent side="right" align="start" className="max-w-sm">
         <div className="flex flex-col gap-2">
-          {assets.map((asset) => (
+          {displayAssets.map((asset) => (
             <div key={`${asset.intent_id}-${asset.asset_id}`} className="min-w-0">
-              <div className="break-all font-mono text-xs">
-                {asset.label.trim() ? asset.label : `#${asset.asset_id}`}
-              </div>
+              <div className="break-all font-mono text-xs">{asset.label || `#${asset.asset_id}`}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 {taskAssetTypeLabel(asset.type)} · {taskAssetSourceLabel(asset.source)}
                 {asset.inherited ? ` · 来源任务 #${asset.source_task_id}` : ""}
