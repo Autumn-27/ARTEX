@@ -1,7 +1,11 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -9,15 +13,29 @@ import (
 type Task struct {
 	ID            int64      `json:"id"`
 	Name          string     `json:"name"` // 可选任务名称;空=未命名
+	CategoryID    *int64     `json:"category_id,omitempty"`
+	CategoryName  string     `json:"category_name,omitempty"`
 	Description   string     `json:"description"`
 	Goal          string     `json:"goal"`
 	ExplorationID int64      `json:"exploration_id"`
 	Status        string     `json:"status"`
 	Paused        bool       `json:"paused"`
+	Queued        bool       `json:"queued"`
+	QueuedAt      *time.Time `json:"queued_at,omitempty"`
+	QueueMode     string     `json:"queue_mode,omitempty"`
 	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
-	ParentRef     string     `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
-	CreatedAt     time.Time  `json:"created_at"`
-	CompletedAt   *time.Time `json:"completed_at,omitempty"` // 进入终态(done/failed/timeout)的时刻;非终态为 nil
+	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
+	// for ActiveLLMProfileID while older API clients still send one profile id.
+	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
+	ActiveLLMProfileID *int64     `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64      `json:"-"`
+	LLMFailoverState   string     `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string     `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []int64    `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64    `json:"company_ids,omitempty"`
+	ParentRef          string     `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
+	CreatedAt          time.Time  `json:"created_at"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"` // 进入终态(done/failed/timeout)的时刻;非终态为 nil
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。
 	TimeoutSeconds int        `json:"timeout_seconds"`        // 0=不限时
 	FirstRunAt     *time.Time `json:"first_run_at,omitempty"` // 首次真正开始运行的时刻(非 created_at);nil=尚未运行
@@ -30,6 +48,23 @@ type Task struct {
 	// list_untested_assets、态势里不注入 coverage 块(scope 字段仍保留)。company 关联
 	// (task_scope kind=company)与此开关无关，永不受影响。见 db/task_scope.go。
 	CoverageEnabled bool `json:"coverage_enabled"`
+}
+
+// TaskDeleteResult reports optional related-data cleanup performed in the same
+// transaction as the task/exploration delete.
+type TaskDeleteResult struct {
+	AssetsDeleted     int64
+	AssetsDetached    int64
+	FindingsDeleted   int64
+	LLMRecordsDeleted int64
+}
+
+// TaskDeletePreparation is produced inside the PostgreSQL deletion transaction
+// after asset and anchor writers have been excluded. Prepare callbacks may use
+// TrafficHosts to stage an external traffic deletion before PostgreSQL commits.
+type TaskDeletePreparation struct {
+	ExplorationID int64
+	TrafficHosts  []string
 }
 
 // IsTerminal reports whether a task status is a terminal (finished) state.
@@ -45,6 +80,46 @@ func IsTerminal(status string) bool {
 // 低于它(含缺省 0 / 负值 / 误配的小值)一律抬到 10min，防止把 planner 打爆。
 const MinPlanHeartbeatSeconds = 600
 
+// MaxTaskSourceCount bounds the amount of live inherited context one task can
+// pull into every planner/main-agent prompt. Inheritance is intentionally direct
+// only; keeping the fan-in bounded also prevents a single create request from
+// multiplying graph and asset-context queries without limit.
+const MaxTaskSourceCount = 8
+
+// MaxTaskCompanyCount bounds the number of company asset scopes attached to a
+// task. Company scopes are prompt context, so an unbounded list would inflate
+// every planner and worker call.
+const MaxTaskCompanyCount = 32
+
+var (
+	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
+	ErrTaskCompanyNotFound   = errors.New("task company not found")
+)
+
+// NormalizeTaskCompanyIDs validates IDs and removes duplicates while retaining
+// the user's first-seen order.
+func NormalizeTaskCompanyIDs(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	seen := make(map[int64]struct{}, min(len(ids), MaxTaskCompanyCount))
+	normalized := make([]int64, 0, min(len(ids), MaxTaskCompanyCount))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("%w: company id must be positive", ErrTaskCompanyIDsInvalid)
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+		if len(normalized) > MaxTaskCompanyCount {
+			return nil, fmt.Errorf("%w: got more than %d unique companies", ErrTaskCompanyIDsInvalid, MaxTaskCompanyCount)
+		}
+	}
+	return normalized, nil
+}
+
 func normalizeHeartbeat(sec int) int {
 	if sec < MinPlanHeartbeatSeconds {
 		return MinPlanHeartbeatSeconds
@@ -53,8 +128,6 @@ func normalizeHeartbeat(sec int) int {
 }
 
 func (d *DB) CreateTask(description, goal string, llmProfileID *int64, timeoutSeconds, planHeartbeatSeconds int) (*Task, error) {
-<<<<<<< Updated upstream
-=======
 	var ids []int64
 	if llmProfileID != nil {
 		ids = []int64{*llmProfileID}
@@ -68,6 +141,7 @@ func (d *DB) CreateTask(description, goal string, llmProfileID *int64, timeoutSe
 // with the task/exploration row.
 type TaskCreateOptions struct {
 	Name                 string // 可选任务名称;空=未命名
+	CategoryID           *int64
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
 	LLMProfileIDs        []int64
@@ -89,7 +163,6 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
->>>>>>> Stashed changes
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -114,22 +187,30 @@ INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, or
 VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); err != nil {
 		return nil, err
 	}
-<<<<<<< Updated upstream
-	if timeoutSeconds < 0 {
-		timeoutSeconds = 0
-=======
 	if opts.TimeoutSeconds < 0 {
 		opts.TimeoutSeconds = 0
 	}
 	opts.PlanHeartbeatSeconds = normalizeHeartbeat(opts.PlanHeartbeatSeconds)
 	coverageEnabled := opts.CoverageEnabled == nil || *opts.CoverageEnabled
+	var categoryName string
+	if opts.CategoryID != nil {
+		if *opts.CategoryID <= 0 {
+			return nil, fmt.Errorf("%w: category id must be positive", ErrTaskCategoryInvalid)
+		}
+		if err := tx.QueryRow(`SELECT name FROM task_categories WHERE id=$1`, *opts.CategoryID).Scan(&categoryName); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, ErrTaskCategoryNotFound
+			}
+			return nil, err
+		}
+	}
 	var active *int64
 	if len(opts.LLMProfileIDs) > 0 {
 		id := opts.LLMProfileIDs[0]
 		active = &id
 	}
 	t := &Task{
-		Name:        opts.Name,
+		Name: opts.Name, CategoryID: opts.CategoryID, CategoryName: categoryName,
 		Description: description, Goal: goal, ExplorationID: expID,
 		LLMProfileID: active, ActiveLLMProfileID: active,
 		LLMProfileIDs:  append([]int64(nil), opts.LLMProfileIDs...),
@@ -137,31 +218,30 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CompanyIDs:     append([]int64(nil), opts.CompanyIDs...),
 		TimeoutSeconds: opts.TimeoutSeconds, PlanHeartbeatSeconds: opts.PlanHeartbeatSeconds,
 		CoverageEnabled: coverageEnabled,
->>>>>>> Stashed changes
 	}
-	planHeartbeatSeconds = normalizeHeartbeat(planHeartbeatSeconds) // <=0→300，<30→30
-	t := &Task{Description: description, Goal: goal, ExplorationID: expID, LLMProfileID: llmProfileID, TimeoutSeconds: timeoutSeconds, PlanHeartbeatSeconds: planHeartbeatSeconds}
 	if err := tx.QueryRow(`
-<<<<<<< Updated upstream
-INSERT INTO tasks(description, goal, exploration_id, llm_profile_id, timeout_seconds, plan_heartbeat_seconds) VALUES ($1,$2,$3,$4,$5,$6)
-RETURNING id, status, paused, created_at`, description, goal, expID, llmProfileID, timeoutSeconds, planHeartbeatSeconds).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
-=======
-INSERT INTO tasks(name, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
-VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8)
-RETURNING id, status, paused, created_at`, opts.Name, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
->>>>>>> Stashed changes
+INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
+VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9)
+RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
+	}
+	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
+		return nil, err
+	}
+	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
+		return nil, err
+	}
+	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
+		return nil, err
+	}
+	if len(opts.LLMProfileIDs) == 0 {
+		t.LLMFailoverState = "default"
+	} else {
+		t.LLMFailoverState = "ready"
 	}
 	return t, tx.Commit()
 }
 
-<<<<<<< Updated upstream
-const taskCols = `id, description, goal, exploration_id, status, paused, llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), first_run_at, deadline_at`
-
-func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
-	var t Task
-	if err := sc.Scan(&t.ID, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.LLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.FirstRunAt, &t.DeadlineAt); err != nil {
-=======
 func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {
 	if len(companyIDs) == 0 {
 		return nil
@@ -222,12 +302,13 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 	return nil
 }
 
-const taskCols = `id, COALESCE(name,''), description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
+const taskCols = `id, COALESCE(name,''), category_id,
+COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
->>>>>>> Stashed changes
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -254,7 +335,16 @@ func (d *DB) ListTasks() ([]*Task, error) {
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for _, task := range out {
+		if err := d.hydrateTaskContext(task); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // GetTask returns one alive task (nil if not found/deleted).
@@ -266,6 +356,9 @@ func (d *DB) GetTask(id int64) (*Task, error) {
 		}
 		return nil, err
 	}
+	if err := d.hydrateTaskContext(t); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -273,6 +366,43 @@ func (d *DB) GetTask(id int64) (*Task, error) {
 func (d *DB) SetPaused(id int64, paused bool) error {
 	_, err := d.Exec(`UPDATE tasks SET paused=$1 WHERE id=$2`, paused, id)
 	return err
+}
+
+// Enqueue places a task at the tail of the persistent admission queue. Repeating
+// the operation while it is already queued keeps its original FIFO position.
+func (d *DB) Enqueue(id int64, mode string) error {
+	if mode != "bootstrap" && mode != "resume" {
+		return fmt.Errorf("invalid queue mode %q", mode)
+	}
+	_, err := d.Exec(`UPDATE tasks
+SET queued=true,
+    queued_at=CASE WHEN queued THEN COALESCE(queued_at, now()) ELSE now() END,
+    queue_mode=CASE
+        WHEN queue_mode='bootstrap' OR $2='bootstrap' THEN 'bootstrap'
+        ELSE 'resume'
+    END
+WHERE id=$1`, id, mode)
+	return err
+}
+
+// Dequeue removes the concurrency hold. clearMode is false when a user pauses a
+// queued task, preserving whether its next admission must bootstrap or resume.
+func (d *DB) Dequeue(id int64, clearMode bool) error {
+	_, err := d.Exec(`UPDATE tasks
+SET queued=false,
+    queued_at=NULL,
+    queue_mode=CASE WHEN $2 THEN '' ELSE queue_mode END
+WHERE id=$1`, id, clearMode)
+	return err
+}
+
+// SetQueued is the compatibility helper used by older callers and tests. New
+// scheduling code should use Enqueue/Dequeue so FIFO metadata is explicit.
+func (d *DB) SetQueued(id int64, queued bool) error {
+	if queued {
+		return d.Enqueue(id, "bootstrap")
+	}
+	return d.Dequeue(id, true)
 }
 
 // SetStatus updates a task's lifecycle status. Entering a terminal state
@@ -323,28 +453,134 @@ UPDATE tasks
 	return deadline, err
 }
 
-// DeleteTask hard-deletes a task and its exploration subgraph (nodes/edges/
-// activity via ON DELETE CASCADE). The task row is removed first so the
-// ON DELETE RESTRICT on tasks.exploration_id does not block the exploration delete.
-// Global assets are NOT touched.
+// DeleteTask preserves the historical behavior: remove the task and its
+// exploration subgraph while retaining global assets.
 func (d *DB) DeleteTask(id int64) error {
+	_, err := d.DeleteTaskCascade(id, false, false)
+	return err
+}
+
+// DeleteTaskCascade hard-deletes a task and its exploration subgraph
+// (nodes/edges/activity via ON DELETE CASCADE). Optional standalone findings and
+// assets owned only by this task are deleted in the same transaction; shared
+// assets are retained and only have this task id detached. deleteLLMRecords is
+// optional to preserve callers of the original two-option API.
+func (d *DB) DeleteTaskCascade(id int64, deleteAssets, deleteFindings bool, deleteLLMRecords ...bool) (TaskDeleteResult, error) {
+	deleteRecords := len(deleteLLMRecords) > 0 && deleteLLMRecords[0]
+	return d.DeleteTaskCascadePrepared(id, deleteAssets, deleteFindings, deleteRecords, nil)
+}
+
+// DeleteTaskCascadePrepared coordinates reversible external deletion with the
+// PostgreSQL cascade. When prepare is non-nil, host ownership is resolved and
+// prepare is invoked inside this transaction while asset and anchor writers are
+// excluded. The locks remain held through commit, closing the window where a
+// host could become shared after its traffic had already been staged.
+//
+// prepare must only stage reversible work. Any returned error or later database
+// error rolls PostgreSQL back; the caller remains responsible for rolling back
+// external work that its callback staged successfully.
+func (d *DB) DeleteTaskCascadePrepared(
+	id int64,
+	deleteAssets, deleteFindings, deleteLLMRecords bool,
+	prepare func(TaskDeletePreparation) error,
+) (TaskDeleteResult, error) {
+	var result TaskDeleteResult
 	tx, err := d.Begin()
 	if err != nil {
-		return err
+		return result, err
 	}
 	defer tx.Rollback()
 	var expID int64
-	if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1`, id).Scan(&expID); err != nil {
-		if err.Error() == "sql: no rows in result set" {
-			return nil // already gone
+	if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 FOR UPDATE`, id).Scan(&expID); err != nil {
+		if err == sql.ErrNoRows {
+			return result, nil // already gone
 		}
-		return err
+		return result, err
 	}
+
+	// SHARE ROW EXCLUSIVE conflicts with every INSERT/UPDATE/DELETE on these
+	// tables and with another coordinated deletion. Taking both in one fixed order
+	// prevents phantoms (a distinct asset row for the same host) as well as new
+	// ownership/anchor references until the deletion transaction commits.
+	if deleteAssets || prepare != nil {
+		if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			return result, err
+		}
+	}
+	if prepare != nil {
+		hosts, err := hostsForTaskDeletion(tx, id, expID)
+		if err != nil {
+			return result, err
+		}
+		if err := prepare(TaskDeletePreparation{
+			ExplorationID: expID,
+			TrafficHosts:  hosts,
+		}); err != nil {
+			return result, err
+		}
+	}
+	if deleteAssets {
+		// Ownership is the union of explicit task_ids and this exploration's anchors.
+		// An asset is deletable only when no other live task references it through
+		// either mechanism. This covers legacy anchor-only seeds without destroying
+		// evidence anchored by another task.
+		res, err := tx.Exec(`
+WITH candidate_assets AS (
+  SELECT id FROM assets WHERE $1 = ANY(task_ids)
+  UNION
+  SELECT ea.asset_id
+  FROM exploration_anchors ea
+  JOIN exploration_nodes n ON n.id=ea.node_id
+  WHERE n.exploration_id=$2
+),
+deletable AS (
+  SELECT a.id
+  FROM assets a
+  JOIN candidate_assets c ON c.id=a.id
+  WHERE NOT EXISTS (
+    SELECT 1 FROM tasks t
+    WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
+  ) AND NOT EXISTS (
+    SELECT 1
+    FROM exploration_anchors ea
+    JOIN exploration_nodes n ON n.id=ea.node_id
+    JOIN tasks t ON t.exploration_id=n.exploration_id
+    WHERE ea.asset_id=a.id AND t.id<>$1 AND t.deleted_at IS NULL
+  )
+)
+DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
+		if err != nil {
+			return result, err
+		}
+		result.AssetsDeleted, _ = res.RowsAffected()
+
+		res, err = tx.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, id)
+		if err != nil {
+			return result, err
+		}
+		result.AssetsDetached, _ = res.RowsAffected()
+	}
+	if deleteFindings {
+		res, err := tx.Exec(`DELETE FROM findings WHERE task_id = $1`, id)
+		if err != nil {
+			return result, err
+		}
+		result.FindingsDeleted, _ = res.RowsAffected()
+	}
+	if deleteLLMRecords {
+		res, err := tx.Exec(`DELETE FROM llm_records WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(id, 10))
+		if err != nil {
+			return result, err
+		}
+		result.LLMRecordsDeleted, _ = res.RowsAffected()
+	}
+	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
+	// task — it is kept as historical accounting even after the task is gone.
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id=$1`, id); err != nil {
-		return err
+		return result, err
 	}
 	if _, err := tx.Exec(`DELETE FROM explorations WHERE id=$1`, expID); err != nil {
-		return err
+		return result, err
 	}
-	return tx.Commit()
+	return result, tx.Commit()
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -284,6 +285,18 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++
 				t.anchorOwner(id)
+				if taskID > 0 {
+					var sourceNodeID *int64
+					if t.ownerNode > 0 {
+						nodeID := t.ownerNode
+						sourceNodeID = &nodeID
+					}
+					summary := "Agent 通过 insert_assets 登记"
+					if t.ownerNode > 0 {
+						summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_assets 登记", t.ownerNode)
+					}
+					_ = t.as.SetTaskAssetSource(taskID, id, "agent", summary, sourceNodeID)
+				}
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
 				// 资产覆盖度功能关闭时不再累积测试范围(分母)；related=false(与当前任务无关)
@@ -310,14 +323,14 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 func (t *ToolSet) addCompanyScope() actool.CoreTool {
 	return writeTool(
 		"add_company_scope",
-		"把根域名/IP/IP段(CIDR)加入某公司的【资产范围】——加入后系统自动认领所有命中的资产(现有+未来)。\n"+
+		"把域名/IP/CIDR/ICP备案/企业关键词加入某公司的【资产范围】——域名、网络和ICP会自动认领命中的资产，关键词只提供给Agent作为范围提示。\n"+
 			"公司名唯一：company 不存在则新建，已存在则复用(只把范围并进去)。\n"+
-			"scope 一行一条，支持：根域名 / 单个 IP / CIDR 网段(如 1.2.3.0/24)。\n"+
+			"scope 一行一条，系统自动识别：根域名 / URL / 单个 IP / CIDR 网段 / ICP备案 / 企业关键词。\n"+
 			"务必给 reason 说明归属依据(whois/证书/ASN 等)。\n"+
-			"护栏：拒绝裸 TLD 与过宽网段(IPv4<=/16、IPv6<=/32)，非法行会被跳过并在 errors 返回。",
+			"护栏：拒绝裸 TLD 与过宽网段(IPv4前缀需为/16-/32、IPv6前缀需为/32-/128)，非法行会被跳过并在 errors 返回。",
 		obj(map[string]any{
 			"company": str("公司名(不存在则新建、存在则复用；名称唯一)"),
-			"scope":   str("资产范围，一行一条：根域名 / IP / CIDR"),
+			"scope":   str("资产范围，一行一条：域名 / URL / IP / CIDR / ICP备案 / 企业关键词"),
 			"reason":  str("归属依据(证据/来源)，务必填写"),
 			"logo":    str("公司图标 URL(可选；仅新建公司时生效)"),
 		}, "company", "scope"),
@@ -365,14 +378,14 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 	return writeTool(
 		"add_task_scope",
 		"把测试范围加入【本任务】——这是资产测试覆盖度的分母，也是本任务的授权边界。\n"+
-			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr。\n"+
+			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword。\n"+
 			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
-			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段。\n"+
+			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词。\n"+
 			"务必给 reason 说明依据(可审计)。多条用 entries 数组。",
 		obj(map[string]any{
-			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value}]。kind∈company/root_domain/subdomain/ip/cidr；value=公司名或id / 域名 / IP / CIDR。", "items": map[string]any{"type": "object"}},
-			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr"),
-			"value":   str("[单条] 公司名或id / 域名 / IP / CIDR"),
+			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value}]。kind∈company/root_domain/subdomain/ip/cidr/icp/keyword。", "items": map[string]any{"type": "object"}},
+			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr / icp / keyword"),
+			"value":   str("[单条] 公司名或id / 域名 / IP / CIDR / ICP / 关键词"),
 			"reason":  str("加入依据(用于审计)，务必填写"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -399,12 +412,12 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 			var added []map[string]any
 			errs := map[string]string{}
 			for i, e := range items {
-				ts, err := t.as.AddAgentScope(t.taskID, strings.TrimSpace(e.Kind), e.Value, a.Reason)
+				ts, err := t.as.AddAgentScope(t.taskID, strings.TrimSpace(e.Kind), e.Value, a.Reason, "agent")
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
 				}
-				added = append(added, map[string]any{"kind": ts.Kind, "domain": ts.Domain, "net": ts.Net, "company_id": ts.CompanyID})
+				added = append(added, map[string]any{"kind": ts.Kind, "domain": ts.Domain, "net": ts.Net, "value": ts.Value, "company_id": ts.CompanyID})
 			}
 			out := map[string]any{"added": added}
 			if len(errs) > 0 {
@@ -415,13 +428,12 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 	)
 }
 
-// listUntestedAssets lets the plan agent pull the CURRENT TASK's in-scope, not-yet-
-// tested assets on demand (filter by type, paginated) — so it can decide what to
-// test next itself, instead of coverage pushing a backlog list into every prompt.
+// listUntestedAssets lets the plan agent pull the current + directly inherited
+// scope's not-yet-tested assets on demand (filter by type, paginated).
 func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 	return readTool(
 		"list_untested_assets",
-		"查询【本任务】范围内、还没被测过的资产（供你自己判断要不要补测，不代替你决策）。\n"+
+		"查询【本任务及直接关联任务】范围内、还没被事实锚点覆盖的资产（关联范围只读，供你自己判断要不要补测，不代替你决策）。\n"+
 			"可选按资产类型过滤：root_domain/subdomain/service/app/endpoint/ip。\n"+
 			"分页：page 从 1 起、page_size 默认 10。返回 {assets:[{id,type,label}], total, page, page_size}。仅任务上下文可用。",
 		obj(map[string]any{
@@ -449,7 +461,7 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 				a.PageSize = 10
 			}
 			offset := (a.Page - 1) * a.PageSize
-			assets, total, err := t.as.ListUntestedAssets(t.taskID, t.ts.ID(), strings.TrimSpace(a.Type), a.PageSize, offset)
+			assets, total, err := t.as.ListUntestedAssetsWithSources(t.taskID, strings.TrimSpace(a.Type), a.PageSize, offset)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}

@@ -199,12 +199,13 @@ func (s *Server) toolListTasks() actool.CoreTool {
 				if t.ParentRef != "" {
 					row["parent_ref"] = t.ParentRef
 				}
-				if t.LLMProfileID == nil {
+				llmState := t.llmStateSnapshot()
+				if llmState.ProfileID == nil {
 					row["llm_profile"] = "(激活配置)"
-				} else if n, ok := profName[*t.LLMProfileID]; ok {
+				} else if n, ok := profName[*llmState.ProfileID]; ok {
 					row["llm_profile"] = n
 				} else {
-					row["llm_profile"] = fmt.Sprintf("#%d(已删除)", *t.LLMProfileID)
+					row["llm_profile"] = fmt.Sprintf("#%d(已删除)", *llmState.ProfileID)
 				}
 				out = append(out, row)
 			}
@@ -301,10 +302,13 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 				TaskID string `json:"task_id"`
 			}
 			_ = json.Unmarshal(in, &a)
-			if _, ok := s.m.Task(a.TaskID); !ok {
+			t, ok := s.m.Task(a.TaskID)
+			if !ok {
 				return actool.Errorf("task 不存在: " + a.TaskID), nil
 			}
-			s.engine.Pause(a.TaskID)
+			if _, err := s.applyTaskControlWithCause(t, "pause", agent.AbortPausedByOrchestrator); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			return actool.Text("task paused: " + a.TaskID), nil
 		})
 }
@@ -414,12 +418,13 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 
 // deriveTaskStatus mirrors listTasks' status derivation for the list_tasks tool.
 func (s *Server) deriveTaskStatus(t *Task) string {
+	lifecycle := t.lifecycleSnapshot()
 	switch {
-	case isTerminalStatus(t.Status):
-		return t.Status
-	case t.Paused || s.engine.IsPaused(t.ID):
+	case isTerminalStatus(lifecycle.Status):
+		return lifecycle.Status
+	case lifecycle.Paused || s.engine.IsPaused(t.ID):
 		return "paused"
-	case s.engine.Ready() && s.engine.Started(t.ID):
+	case s.engine.ReadyFor(t) && s.engine.Started(t.ID):
 		return "running"
 	}
 	return "created"

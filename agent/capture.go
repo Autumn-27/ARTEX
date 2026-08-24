@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"strings"
+	"time"
+	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/artex/db"
 )
 
 // captureRun drives one agent turn-to-completion over Session.Prompt and emits a
@@ -63,17 +65,20 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		tkind = kind
 		tbuf.WriteString(text)
 	}
+	lastTool := &runTrace{startedAt: time.Now()}
+	var lastUsage *llm.Usage
 
 	var finalText string
 	var rerr error
 	for ev, err := range s.Prompt(ctx, input) {
 		if err != nil {
 			flush()
-			if ctx.Err() != nil { // ctx cancelled = manual stop, not a failure
-				rec(db.Activity{Kind: "result", Summary: "（已手动停止本次运行）"})
+			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
+				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
+				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
 				return finalText, reason, ctx.Err()
 			}
-			rec(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()})
+			rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()}, lastUsage))
 			return finalText, reason, err
 		}
 		switch ev.Kind {
@@ -84,6 +89,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			flush()
 			toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
 			in := string(ev.ToolUse.Input)
+			lastTool.start(ev.ToolUse.ID, ev.ToolUse.Name, in)
 			rec(db.Activity{Kind: "tool_use", Tool: ev.ToolUse.Name, ToolUseID: ev.ToolUse.ID,
 				Summary: ev.ToolUse.Name + " " + firstLine(in, 200), Detail: in})
 		case harness.KindToolResult:
@@ -92,6 +98,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 			flush()
 			out := blocksText(ev.ToolResult.Content)
+			lastTool.done(ev.ToolResult.ToolUseID)
 			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
 				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
 		case harness.KindText:
@@ -105,6 +112,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			// buffered final-answer text must stay for the KindResult de-dup.
 			if ev.Usage != nil {
 				u := *ev.Usage
+				lastUsage = &u
 				rec(db.Activity{Kind: "usage",
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})
@@ -120,25 +128,13 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 					tkind = ""
 				}
 				flush() // flush any trailing thinking / non-final text
-				sum := ev.Terminal.Text
-				if sum == "" {
-					switch ev.Terminal.Reason {
-					case harness.ReasonAbortedTools, harness.ReasonAbortedStreaming:
-						// interruption (task paused / worker killed / backend restart),
-						// not a real completion — the intent is re-queued (open) or
-						// stopped, so the session icon reflects that, not this run.
-						sum = "（运行被中断：任务暂停 / 终止 / 重启所致；未完成）"
-					case harness.ReasonTimeout, harness.ReasonMaxTurns:
-						// budget hit → settlement ran (facts/assets were written back);
-						// only the trailing text summary is missing, not a failure.
-						sum = "（达运行预算上限，已收尾写回事实；本次无文字总结，终态: " + string(ev.Terminal.Reason) + "）"
-					default:
-						sum = "（无总结，终态: " + string(ev.Terminal.Reason) + "）"
-					}
+				sum, detail := ev.Terminal.Text, ev.Terminal.Text
+				if sum == "" || ev.Terminal.Reason == harness.ReasonAbortedTools || ev.Terminal.Reason == harness.ReasonAbortedStreaming {
+					sum, detail = terminalText(ctx, ev.Terminal, lastTool)
 				}
 				u := ev.Terminal.Usage // cumulative token usage for this session
 				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil,
-					Summary: firstLine(sum, 400), Detail: sum,
+					Summary: firstLine(sum, 400), Detail: detail,
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})
 				if ev.Terminal.Err != nil {
@@ -149,6 +145,18 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
 	return finalText, reason, rerr
+}
+
+func activityWithUsage(activity db.Activity, usage *llm.Usage) db.Activity {
+	if usage == nil {
+		return activity
+	}
+	u := *usage
+	activity.InputTokens = &u.InputTokens
+	activity.OutputTokens = &u.OutputTokens
+	activity.CacheReadTokens = &u.CacheReadTokens
+	activity.CacheWriteTokens = &u.CacheWriteTokens
+	return activity
 }
 
 // blocksText concatenates the text of a tool-result's content blocks.
@@ -165,14 +173,14 @@ func blocksText(blocks []llm.ContentBlock) string {
 	return b.String()
 }
 
-// firstLine returns a single-line, length-capped preview for the summary column.
+// firstLine returns a single-line, rune-capped preview for the summary column.
 func firstLine(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
+	if before, _, found := strings.Cut(s, "\n"); found {
+		s = before
 	}
-	if len(s) > max {
-		s = s[:max] + "…"
+	if utf8.RuneCountInString(s) > max {
+		s = string([]rune(s)[:max]) + "…"
 	}
 	return s
 }

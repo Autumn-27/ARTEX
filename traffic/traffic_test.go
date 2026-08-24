@@ -2,11 +2,29 @@ package traffic
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
+
+func TestRequestHeaderLinesIncludesHost(t *testing.T) {
+	req := &mproxy.Request{
+		URL:    &url.URL{Host: "target.example:8443"},
+		Header: http.Header{"Accept": []string{"application/json"}},
+	}
+	got := requestHeaderLines(req)
+	if !strings.Contains(got, "Host: target.example:8443\n") {
+		t.Fatalf("request headers missing Host: %q", got)
+	}
+	if !strings.Contains(got, "Accept: application/json\n") {
+		t.Fatalf("request headers missing regular header: %q", got)
+	}
+}
 
 // TestDeleteHost verifies the delete contract: rows for hosts containing the
 // substring are removed together with their file trees, non-matching hosts are
@@ -159,6 +177,152 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 	}
 	if c != 1 {
 		t.Fatalf("rows=%d, want 1 (api.example.com.cn only)", c)
+	}
+}
+
+func TestDeleteHostsExactReportsTreeRemovalFailure(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	const host = "api.example.com"
+	if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		"1-0001", 1, host, "GET", "/", "http://"+host+"/", 200, "text/html", 0, 0, host+"/GET/1-0001"); err != nil {
+		t.Fatal(err)
+	}
+
+	notDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.dir = notDir
+
+	n, err := tr.DeleteHostsExact([]string{host})
+	if err == nil {
+		t.Fatal("DeleteHostsExact returned nil after traffic tree removal failed")
+	}
+	if n != 0 {
+		t.Fatalf("deleted=%d, want 0 after atomic rollback", n)
+	}
+	var count int
+	if err := tr.DB().QueryRow(`SELECT COUNT(*) FROM exchanges WHERE host=?`, host).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rolled-back index count=%d err=%v, want 1", count, err)
+	}
+}
+
+func TestDeleteHostsExactRollsBackWholeIndexBatch(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	for i, host := range []string{"a.example.com", "b.example.com"} {
+		id := fmt.Sprintf("1-%04d", i+1)
+		if err := os.MkdirAll(filepath.Join(dir, host, "GET", id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, 1, host, "GET", "/", "http://"+host+"/", 200, "text/html", 0, 0, host+"/GET/"+id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tr.DB().Exec(`CREATE TRIGGER fail_second_host BEFORE DELETE ON exchanges
+WHEN OLD.host='b.example.com' BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := tr.DeleteHostsExact([]string{"a.example.com", "b.example.com"}); err == nil || n != 0 {
+		t.Fatalf("DeleteHostsExact failure=(%d,%v), want (0,error)", n, err)
+	}
+	var count int
+	if err := tr.DB().QueryRow(`SELECT COUNT(*) FROM exchanges`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("rolled-back index count=%d err=%v, want 2", count, err)
+	}
+	for _, host := range []string{"a.example.com", "b.example.com"} {
+		if _, err := os.Stat(filepath.Join(dir, host)); err != nil {
+			t.Fatalf("tree %s changed despite index rollback: %v", host, err)
+		}
+	}
+}
+
+func TestStageDeleteHostsExactRollbackRestoresIndexAndTree(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	const host = "rollback.example.com"
+	const id = "1-0001"
+	tree := filepath.Join(dir, host, "GET", id)
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(tree, "request.http")
+	if err := os.WriteFile(marker, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.DB().Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, 1, host, "GET", "/", "http://"+host+"/", 200, "text/html", 0, 0, host+"/GET/"+id); err != nil {
+		t.Fatal(err)
+	}
+
+	stage, err := tr.StageDeleteHostsExact([]string{host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.Deleted() != 1 {
+		t.Fatalf("staged deleted=%d, want 1", stage.Deleted())
+	}
+	if _, err := os.Stat(filepath.Join(dir, host)); !os.IsNotExist(err) {
+		t.Fatalf("host tree was not staged: %v", err)
+	}
+	if err := stage.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "original" {
+		t.Fatalf("restored tree content=%q err=%v", got, err)
+	}
+	var count int
+	if err := tr.DB().QueryRow(`SELECT COUNT(*) FROM exchanges WHERE host=?`, host).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("restored index count=%d err=%v, want 1", count, err)
+	}
+}
+
+func TestStageDeleteHostsExactRollbackReportsRestoreFailure(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	const host = "conflict.example.com"
+	hostDir := filepath.Join(dir, host)
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := tr.StageDeleteHostsExact([]string{host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an out-of-band conflicting destination. Rollback must surface the
+	// failed rename instead of claiming the external data was restored.
+	if err := os.WriteFile(hostDir, []byte("conflict"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.Rollback(); err == nil || !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("rollback err=%v, want restore failure", err)
+	}
+	if _, err := os.Stat(stage.stageDir); err != nil {
+		t.Fatalf("staging was removed after failed restore: %v", err)
 	}
 }
 

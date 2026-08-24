@@ -103,7 +103,7 @@ type builtinAgent struct {
 	key, name, role, desc string
 	vars                  []promptVar
 	interactiveShell      bool // 建行时的默认交互式 shell 开关；ON CONFLICT 不覆盖用户后续手动开关
-	runSeconds            *int // 建行时的单次 run 墙钟上限(秒)；nil=用表默认(600)，0=不限时
+	runSeconds            *int // 建行时的单次 run 墙钟上限(秒)；nil=用种子默认(1200)，0=不限时
 }
 
 type promptVar struct{ name, desc, example, source string }
@@ -145,7 +145,7 @@ func (d *DB) seedBuiltins() error {
 		var agentID int64
 		err := d.QueryRow(`
 INSERT INTO agents(key, name, description, role, builtin, enabled, interactive_shell, run_seconds)
-VALUES ($1, $2, NULLIF($3,''), $4, true, true, $5, COALESCE($6, 600))
+VALUES ($1, $2, NULLIF($3,''), $4, true, true, $5, COALESCE($6, 1200))
 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description
 RETURNING id`, a.key, a.name, a.desc, a.role, a.interactiveShell, a.runSeconds).Scan(&agentID)
 		if err != nil {

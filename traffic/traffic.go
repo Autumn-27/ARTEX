@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -28,9 +29,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	_ "modernc.org/sqlite"
 )
@@ -307,15 +308,6 @@ VALUES(?,?,?,?,?,?,?)`,
 		return
 	}
 
-<<<<<<< Updated upstream
-	reqTxt := fmt.Sprintf("%s %s %s\n%s\n%s", method, f.Request.URL.RequestURI(), f.Request.Proto, headerLines(f.Request.Header), reqBody)
-	respTxt := fmt.Sprintf("HTTP %d\n%s\n%s", f.Response.StatusCode, headerLines(f.Response.Header), respBody)
-	_ = os.WriteFile(filepath.Join(exDir, "request.http"), []byte(reqTxt), 0o644)
-	_ = os.WriteFile(filepath.Join(exDir, "response.http"), []byte(respTxt), 0o644)
-	meta := fmt.Sprintf(`{"id":%q,"host":%q,"method":%q,"url":%q,"template":%q,"status":%d,"content_type":%q}`,
-		id, host, method, f.Request.URL.String(), tmpl, f.Response.StatusCode, ct)
-	_ = os.WriteFile(filepath.Join(exDir, "meta.json"), []byte(meta), 0o644)
-=======
 	for _, h := range []string{reqB.hash, respB.hash} {
 		if h == "" {
 			continue
@@ -325,7 +317,6 @@ VALUES(?,?,?,?,?,?,?)`,
 			return
 		}
 	}
->>>>>>> Stashed changes
 
 	if t.fts {
 		// The index is fed from memory, so a body that spilled to _blobs is still
@@ -477,6 +468,26 @@ func headerLines(h map[string][]string) string {
 			b.WriteByte('\n')
 		}
 	}
+	return b.String()
+}
+
+// requestHeaderLines restores the HTTP Host header, which net/http stores on
+// Request.Host rather than in Header. Keeping it in request.http makes the raw
+// capture complete and directly replayable.
+func requestHeaderLines(req *mproxy.Request) string {
+	headers := req.Header.Clone()
+	headers.Del("Host")
+	host := req.URL.Host
+	if raw := req.Raw(); raw != nil && strings.TrimSpace(raw.Host) != "" {
+		host = raw.Host
+	}
+	var b strings.Builder
+	if host = strings.TrimSpace(host); host != "" {
+		b.WriteString("Host: ")
+		b.WriteString(host)
+		b.WriteByte('\n')
+	}
+	b.WriteString(headerLines(headers))
 	return b.String()
 }
 
@@ -944,14 +955,6 @@ func (t *Traffic) reapStage(stageDir string) {
 // so picking "api.example.com" never sweeps "api.example.com.cn". Returns rows
 // deleted. Duplicate hosts are harmless (idempotent deletes, single tree pass).
 func (t *Traffic) DeleteHostsExact(hosts []string) (int64, error) {
-<<<<<<< Updated upstream
-	t.wmu.Lock()
-	defer t.wmu.Unlock()
-	var deleted int64
-	removed := make(map[string]bool)
-	for _, h := range hosts {
-		res, err := t.db.Exec(`DELETE FROM exchanges WHERE host=?`, h)
-=======
 	stage, err := t.StageDeleteHostsExact(hosts)
 	if err != nil {
 		return 0, err
@@ -1028,30 +1031,9 @@ func (t *Traffic) StageDeleteHostsExact(hosts []string) (*HostDeleteStage, error
 	stage.tx = tx
 	for _, h := range unique {
 		n, err := t.deleteWhere(tx, `host=?`, h)
->>>>>>> Stashed changes
 		if err != nil {
-			return deleted, err
+			return fail(err)
 		}
-<<<<<<< Updated upstream
-		n, _ := res.RowsAffected()
-		deleted += n
-		if !removed[h] {
-			os.RemoveAll(filepath.Join(t.dir, sanitize(h)))
-			removed[h] = true
-		}
-	}
-	if deleted > 0 {
-		_ = t.gcBlobs()
-	}
-	return deleted, nil
-}
-
-// gcBlobs removes content-addressed blobs in _blobs that no remaining exchange
-// tree references. References appear as "@blob sha256:<hex>" lines inside the
-// tree's request.http/response.http files (see bodyOrBlob). Best-effort: walk
-// errors only skip cleanup of the affected files. Callers must hold wmu so this
-// never races a concurrent record() writing a fresh blob + tree.
-=======
 		stage.deleted += n
 	}
 
@@ -1122,7 +1104,6 @@ func (s *HostDeleteStage) Commit() error {
 // left the buckets behind permanently. Best-effort: walk errors only skip the
 // affected entries. Callers must hold wmu so this never races a concurrent
 // record() writing a fresh blob + reference.
->>>>>>> Stashed changes
 func (t *Traffic) gcBlobs() error {
 	refs := make(map[string]struct{})
 	rows, err := t.db.Query(`SELECT DISTINCT hash FROM blob_refs`)

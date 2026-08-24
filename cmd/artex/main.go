@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/server"
 )
@@ -70,8 +71,10 @@ func main() {
 		log.Printf("[config] 配置文件: %s (不存在 — 将仅尝试环境变量 ARTEX_PG_DSN)", cfgPath)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, shutdown := shutdownContext(sigCtx)
+	defer shutdown(agent.AbortShutdown)
 
 	mgr, err := server.NewManager(*dataDir, *proxy)
 	if err != nil {
@@ -103,4 +106,19 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// shutdownContext deliberately does not derive from signalCtx. If it did, the
+// parent's plain context.Canceled could win the race before AbortShutdown was
+// attached to the child, losing the diagnostic cause in every running Agent.
+func shutdownContext(signalCtx context.Context) (context.Context, context.CancelCauseFunc) {
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	go func() {
+		select {
+		case <-signalCtx.Done():
+			shutdown(agent.AbortShutdown)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, shutdown
 }

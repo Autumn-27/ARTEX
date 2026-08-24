@@ -49,6 +49,7 @@ type Worker struct {
 	mem         *memory.Store     // cross-engagement tradecraft memory (G4)
 	tx          *transcript.Store // raw LLM conversation persistence (nil = off)
 	window      int               // context window in tokens (for compaction)
+	windowFn    func() int        // optional dynamic task-chain minimum
 	maxTurns    int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
@@ -93,6 +94,15 @@ func (w *Worker) SetMemory(m *memory.Store) { w.mem = m }
 
 func NewWorker(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int, extra ...actool.CoreTool) *Worker {
 	return &Worker{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, extraTools: extra}
+}
+
+func (w *Worker) SetCompactionWindowResolver(fn func() int) { w.windowFn = fn }
+
+func (w *Worker) compactionWindow() int {
+	if w.windowFn != nil {
+		return w.windowFn()
+	}
+	return w.window
 }
 
 // SetProxy configures the recording proxy address that workers route target
@@ -268,6 +278,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	base = append(base, actool.DefaultTools()...)
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
@@ -324,8 +335,8 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
 		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
 		ToolOutputDir: cmdOutDir(runDir),
-		Compaction:    compactionConfig(w.window), // long tool-heavy runs stay within the window
-		Todos:         actool.NewTodoStore(),      // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
+		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
@@ -371,6 +382,18 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 
+	// Resume prior conversation if this intent was paused/blocked/exhausted and is
+	// being re-run. The transcript ID is deterministic per intent, so if a prior
+	// session exists the worker continues from where it left off instead of
+	// restarting from scratch.
+	if w.tx != nil {
+		_ = s.Resume(opts.SessionID)
+		if len(s.Messages()) > 0 {
+			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
+			input = "继续执行。"
+		}
+	}
+
 	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.
 	// We only add a HARD ctx backstop past the soft wall-clock budget, for the rare
@@ -382,7 +405,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	runCtx := ctx
 	if maxDur > 0 {
 		var runCancel context.CancelFunc
-		runCtx, runCancel = context.WithTimeout(ctx, maxDur+settleHardGrace)
+		runCtx, runCancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
 		defer runCancel()
 	}
 	_, reason, err := captureRunSession(runCtx, s, input, emitWrap)

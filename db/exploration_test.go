@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestExplorationFlow(t *testing.T) {
 	d, err := Open(testDSN(t))
@@ -111,4 +114,135 @@ func TestExplorationFlow(t *testing.T) {
 	if st["intent"] != 2 || st["goal"] != 1 || st["finding"] != 1 {
 		t.Fatalf("stats: %+v", st)
 	}
+}
+
+func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("test", "worker control cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	es := d.Exploration(expID)
+
+	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{
+		Domain: fmt.Sprintf("cancel-intent-%d.invalid", expID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, assetID)
+
+	otherIntent, err := es.AddIntent(map[string]any{"summary": "keep intent"}, 1, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentID, err := es.AddIntent(map[string]any{"summary": "cancel intent"}, 10, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := es.ClaimIntent(intentID, "worker-control-test"); err != nil || !claimed {
+		t.Fatalf("initial claim: claimed=%v err=%v", claimed, err)
+	}
+	if err := es.SetIntentState(intentID, "paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	frontier, err := es.Frontier(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range frontier {
+		if node.ID == intentID {
+			t.Fatalf("paused intent %d must not enter frontier", intentID)
+		}
+	}
+	if claimed, err := es.ClaimIntent(intentID, "worker-while-paused"); err != nil || claimed {
+		t.Fatalf("paused intent claim: claimed=%v err=%v", claimed, err)
+	}
+	if err := es.SetIntentState(intentID, "open"); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := es.ClaimIntent(intentID, "worker-after-resume"); err != nil || !claimed {
+		t.Fatalf("resumed intent claim: claimed=%v err=%v", claimed, err)
+	}
+	if err := es.SetIntentState(intentID, "paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	directFact, err := es.AddNode("fact", map[string]any{"summary": "remove fact"}, 0, "confirmed", "worker", []int64{assetID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directFinding, err := es.AddNode("finding", map[string]any{"summary": "remove finding"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keptFact, err := es.AddNode("fact", map[string]any{"summary": "keep fact"}, 0, "confirmed", "other-worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.Link(intentID, RelYields, directFact); err != nil {
+		t.Fatal(err)
+	}
+	if err := es.Link(intentID, RelYields, directFinding); err != nil {
+		t.Fatal(err)
+	}
+	findingRowID, err := es.AddStandaloneFinding(0, directFinding, "test", "cancelled finding", SeverityHigh, "summary", "evidence", "worker", []int64{assetID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activityID, err := es.AppendActivity(Activity{NodeID: &intentID, Worker: "worker", Kind: "result", Summary: "remove activity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keptActivityID, err := es.AppendActivity(Activity{NodeID: &otherIntent, Worker: "other-worker", Kind: "result", Summary: "keep activity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup, err := es.CancelIntent(intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup.Intents != 1 || cleanup.Facts != 1 || cleanup.Findings != 1 || cleanup.Activities != 1 {
+		t.Fatalf("unexpected cleanup counts: %+v", cleanup)
+	}
+	for _, nodeID := range []int64{intentID, directFact, directFinding} {
+		node, err := es.GetNode(nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if node != nil {
+			t.Fatalf("node %d survived intent cancellation", nodeID)
+		}
+	}
+	for _, nodeID := range []int64{otherIntent, keptFact} {
+		node, err := es.GetNode(nodeID)
+		if err != nil || node == nil {
+			t.Fatalf("unrelated node %d removed: node=%v err=%v", nodeID, node, err)
+		}
+	}
+
+	assertCount := func(query string, want int, args ...any) {
+		t.Helper()
+		var got int
+		if err := d.QueryRow(query, args...).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("query count=%d, want %d: %s", got, want, query)
+		}
+	}
+	assertCount(`SELECT COUNT(*) FROM findings WHERE id=$1`, 0, findingRowID)
+	assertCount(`SELECT COUNT(*) FROM activity WHERE id=$1`, 0, activityID)
+	assertCount(`SELECT COUNT(*) FROM activity WHERE id=$1`, 1, keptActivityID)
+	assertCount(`SELECT COUNT(*) FROM exploration_edges WHERE exploration_id=$1 AND (src_id=$2 OR dst_id=$2)`, 0, expID, intentID)
+	assertCount(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1`, 0, directFact)
+	assertCount(`SELECT COUNT(*) FROM assets WHERE id=$1`, 1, assetID)
 }
