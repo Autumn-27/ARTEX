@@ -8,8 +8,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,9 +42,14 @@ type Config struct {
 	// ContextWindowK is the model's context window in K tokens (user-configured),
 	// used to size compaction thresholds. 0 = default; see CompactionWindow.
 	ContextWindowK int
-	// ReasoningEffort selects the thinking mode: "" = 默认(不发送思考参数);
-	// "off" = 关闭(thinking.type=disabled); "low"/"medium"/"high"/"max" = 开启并设强度.
-	// NewProvider derives the provider-specific request fields from it.
+	// ThinkingType 独立控制思考「开关」字段(thinking.type):
+	//   "" = 不发送(默认,兼容不支持该字段的模型); "disabled" = 显式关闭;
+	//   "enabled" = 开启. 与 ReasoningEffort 完全解耦——有些接口没有 thinking 字段、
+	//   只靠强度参数就能激活思考,故两者可各自单独设置.
+	ThinkingType string
+	// ReasoningEffort 独立控制思考「强度」字段:
+	//   "" = 不发送(默认); "low"/"medium"/"high"/"xhigh"/"max" = 对应强度.
+	//   OpenAI 映射为顶层 reasoning_effort;Anthropic 映射为 output_config.effort.
 	ReasoningEffort string
 }
 
@@ -168,32 +179,27 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
+	client, err := quotaAwareHTTPClient(c.Proxy)
+	if err != nil {
+		return nil, err
+	}
 	lc := llm.Config{
-		Format:  c.Format,
-		BaseURL: c.BaseURL,
-		APIKey:  c.APIKey,
-		Model:   c.Model,
-		Proxy:   c.Proxy,
+		Format:     c.Format,
+		BaseURL:    c.BaseURL,
+		APIKey:     c.APIKey,
+		Model:      c.Model,
+		HTTPClient: client,
 	}
-	// Derive the provider thinking params from the single UI selector:
-	//   "" → omit both (provider default); "off" → disable; else → enable + effort.
-	switch c.ReasoningEffort {
-	case "":
-		// leave both empty → omitted from the request
-	case "off":
-		lc.ThinkingType = "disabled"
-	default:
-		lc.ThinkingType = "enabled"
-		lc.ReasoningEffort = c.ReasoningEffort
-	}
+	// 思考开关与强度两个字段各自透传(空 = 该字段不发送)。二者解耦:
+	// 可只发 thinking.type、只发 effort、都发、或都不发。
+	lc.ThinkingType = c.ThinkingType
+	lc.ReasoningEffort = c.ReasoningEffort
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
 	return llm.NewProvider(lc)
 }
 
-<<<<<<< Updated upstream
-=======
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
 // billing, credit, or quota-exhaustion signals. Generic 429/rate-limit text,
 // authentication failures, network errors, and server failures are excluded.
@@ -281,7 +287,6 @@ func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
 	return &http.Client{Transport: quotaAwareTransport{base: transport}}, nil
 }
 
->>>>>>> Stashed changes
 // TestConnection makes a minimal real completion to verify the provider/model/
 // endpoint/key actually work. Returns the round-trip latency.
 func TestConnection(ctx context.Context, c Config) (time.Duration, error) {
