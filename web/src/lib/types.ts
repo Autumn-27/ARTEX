@@ -1,12 +1,14 @@
 // ARTEX domain model — types used across the UI.
 // Derived from the functional spec (section 7: 关键数据形状).
 
-export type TaskStatus = "created" | "running" | "paused" | "done" | "failed" | "timeout";
+export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
+  category_id?: number;
+  category_name?: string;
   description: string;
   goal: string;
   status: TaskStatus;
@@ -16,6 +18,7 @@ export interface Task {
   completed_unix?: number; // completed_at as unix seconds (0/undef if unfinished)
   last_activity_unix?: number; // unix seconds of the last activity (0/undef if none)
   paused?: boolean;
+  queued?: boolean;
   active?: boolean;
   in_flight?: number;
   last_activity?: string;
@@ -25,8 +28,6 @@ export interface Task {
   engine_mode?: EngineMode;
   tokens?: TokenTotal; // whole-task token consumption
   llm_profile_id?: number; // LLM profile used; absent = default profile
-<<<<<<< Updated upstream
-=======
   llm_profile_ids?: number[]; // ordered task-level failover chain
   active_llm_profile_id?: number; // profile used by the next LLM call
   llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
@@ -34,6 +35,14 @@ export interface Task {
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   company_ids?: number[]; // associated company asset scopes available as task context
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+}
+
+export interface TaskCategory {
+  id: number;
+  name: string;
+  task_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface TaskTemplate {
@@ -62,7 +71,6 @@ export interface DeleteTaskResult {
   findings_deleted: number;
   llm_records_deleted: number;
   cleanup_warning?: string;
->>>>>>> Stashed changes
 }
 
 // ---- Asset graph (global, shared across tasks) ----
@@ -170,6 +178,35 @@ export interface Asset {
   params?: Record<string, unknown>[];
   extra?: Record<string, unknown>;
   last_seen: string;
+  task_source?: string;
+  task_source_summary?: string;
+  task_source_node_id?: number;
+}
+
+export interface IntentAsset {
+  intent_id: number | string;
+  asset_id: number;
+  type: NewAssetType;
+  label: string;
+  source: string;
+  source_summary: string;
+  source_node_id?: number;
+  source_task_id: number;
+  inherited: boolean;
+}
+
+export interface TaskAssetMutation {
+  requested: number;
+  attached: number;
+  existing: number;
+}
+
+export interface TaskAssetScopeMutation {
+  requested: number;
+  assets_linked: number;
+  assets_existing: number;
+  scopes_added: number;
+  scopes_existing: number;
 }
 
 // ---- Asset coverage graph (per task) ----
@@ -210,6 +247,8 @@ export interface CoverageAssetRef {
   kind: string;
   state: string;
   summary: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 export interface CoverageAssetRefs {
   intents: CoverageAssetRef[];
@@ -237,17 +276,16 @@ export interface WorkspaceFile {
   content?: string;
 }
 
-<<<<<<< Updated upstream
-=======
 // 任务测试范围的一条（覆盖度分母 + 授权边界）。
 export interface TaskScopeRow {
   id: number;
   task_id: number;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr";
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword";
   company_id?: number;
   company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
   domain?: string;
   net?: string;
+  value?: string;
   source: "auto" | "agent" | "manual";
   reason?: string;
 }
@@ -260,15 +298,15 @@ export interface CompanyScopeRule {
   value: string;
 }
 
->>>>>>> Stashed changes
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;
   company_id: number;
-  kind: "domain" | "ip" | "cidr";
-  domain?: string;  // kind=domain 时有值
-  net?: string;     // kind=ip|cidr 时有值
-  raw: string;      // 原始用户输入，用于显示和回填
+  kind: CompanyScopeKind;
+  domain?: string; // kind=domain 时有值
+  net?: string; // kind=ip|cidr 时有值
+  value?: string; // kind=icp|keyword 时可能由后端直接返回
+  raw: string; // 原始用户输入，用于显示和回填
   reason?: string;
 }
 
@@ -278,13 +316,13 @@ export interface Company {
   name: string;
   logo?: string; // 远程图标 URL；空则前端用名称首字母
   asset_count: number;
-  scope: ScopeRow[];
+  scope?: ScopeRow[];
 }
 
 // ---- Exploration graph (per task) ----
 export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint";
 export type GoalState = "open" | "met" | "abandoned";
-export type IntentState = "open" | "running" | "done" | "blocked" | "exhausted" | "stopped";
+export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves";
@@ -297,6 +335,8 @@ export interface TaskNode {
   state: string; // GoalState | IntentState | FindingState | HintState
   origin: string;
   ts: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 
 // 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
@@ -354,6 +394,8 @@ export interface Finding {
   param_id?: string;
   task_id?: string;
   task_description?: string;
+  source_task_id?: string;
+  inherited?: boolean;
   assets?: FindingAsset[];
   ts: string;
 }
@@ -366,8 +408,6 @@ export interface FindingsPage {
   page_size: number;
 }
 
-<<<<<<< Updated upstream
-=======
 export interface FindingGroup {
   task_id: string | number | null;
   task_name?: string; // 可选任务名称;空/缺省=未命名
@@ -396,7 +436,6 @@ export interface FindingDeepenResponse {
   queued: boolean;
 }
 
->>>>>>> Stashed changes
 // FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
 export interface FindingStats {
   total: number;
@@ -412,12 +451,8 @@ export interface FindingStats {
 // FindingTaskOption 是发现页「按任务」筛选下拉的一项:有漏洞的任务(描述为空表示任务已删除,
 // 前端回退展示 id)及其漏洞条数。
 export interface FindingTaskOption {
-<<<<<<< Updated upstream
-  id: number;
-=======
   id: string | number;
   name?: string; // 可选任务名称;空/缺省=未命名
->>>>>>> Stashed changes
   description: string;
   count: number;
 }
@@ -441,9 +476,11 @@ export type ActivityKind =
   | "thinking"
   | "result"
   | "user"
-  | "intent"            // LLM-generated exploration objective leading a worker session (UI-synthesized)
-  | "round"             // planner round boundary marker (engine-emitted)
-  | "usage"             // live cumulative token usage (per model turn); not rendered
+  | "intent" // LLM-generated exploration objective leading a worker session (UI-synthesized)
+  | "round" // planner round boundary marker (engine-emitted)
+  | "usage" // live cumulative token usage (per model turn); not rendered
+  | "llm_switch" // automatic/manual task-level LLM switch
+  | "llm_failover" // task-level provider switch / chain exhaustion audit event
   | "intercept_request"; // user-approval request from the intercept layer
 
 // ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
@@ -465,11 +502,46 @@ export interface Activity {
   is_error?: boolean;
   summary: string;
   detail?: string;
+  metadata?: {
+    llm_transition?: LLMTransition;
+  };
+  source_task_id?: string;
+  inherited?: boolean;
   // token usage (present only on kind='result')
   input_tokens?: number;
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+}
+
+export interface LLMAuditProfile {
+  id: number;
+  name: string;
+  format: string;
+  model: string;
+}
+
+export interface LLMTransition {
+  mode: "automatic" | "manual" | "exhausted";
+  reason: string;
+  previous?: LLMAuditProfile;
+  next?: LLMAuditProfile;
+}
+
+export interface TaskLLMResolution {
+  profile_id?: number;
+  name: string;
+  format: string;
+  model: string;
+  source: "task_chain" | "agent_binding" | "global_profile" | "environment" | "global";
+  available: boolean;
+  reason?: string;
+}
+
+export interface TaskLLMResolutions {
+  mainagent: TaskLLMResolution;
+  planner: TaskLLMResolution;
+  worker: TaskLLMResolution;
 }
 
 // ---- Agent triggers (P3 调度，仅自定义 agent) ----
@@ -499,6 +571,8 @@ export interface Conversation {
   agent_key: string;
   title: string;
   llm_profile_id?: number;
+  pinned?: boolean;
+  pinned_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -513,8 +587,8 @@ export interface LogLine {
   text: string;
 }
 
-export type SessionRole = "mainagent" | "planner" | "worker";
-export type SessionStatus = "running" | "done" | "blocked" | "exhausted" | "pending" | "stopped";
+export type SessionRole = "mainagent" | "planner" | "worker" | "system";
+export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped";
 
 // Daily token aggregate bucket (GET /api/tokens/daily).
 export interface DailyTokenBucket {
@@ -534,8 +608,61 @@ export interface TokenUsage {
   cache_write_tokens: number;
 }
 
+export interface SessionTokenUsage {
+  session: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+export interface BatchControlItem {
+  id: string;
+  ok: boolean;
+  status?: string;
+  queued?: boolean;
+  error?: string;
+}
+
 // Whole-task (all agents) token aggregate.
 export interface TokenTotal {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+// Global per-profile token spend from the llm_usage ledger (GET /api/tokens/usage).
+export interface ProfileUsage {
+  profile_name: string;
+  calls: number;
+  tasks: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+// One (profile, UTC day) token bucket for the dashboard's daily chart (new source).
+export interface ProfileDayUsage {
+  profile_name: string;
+  date: string; // YYYY-MM-DD
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+}
+
+// Response of GET /api/tokens/usage — the dashboard's "new" (llm_usage) token view.
+export interface UsageStats {
+  by_profile: ProfileUsage[];
+  daily: ProfileDayUsage[];
+}
+
+// Per-model token usage for one task (GET /api/llm/records/by-model), from the
+// always-on llm_usage metering ledger. calls = number of LLM calls on this model.
+export interface ModelTokenStat {
+  model: string;
+  calls: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
@@ -550,6 +677,8 @@ export interface Session {
   live: boolean;
   last_activity: string;
   intent_id?: string;
+  source_task_id?: string;
+  inherited?: boolean;
 }
 
 // ---- Security ----
@@ -617,8 +746,6 @@ export interface Settings {
   web_search_proxy?: string;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
-<<<<<<< Updated upstream
-=======
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
   task_concurrency_enabled?: boolean; // 默认 false
   task_concurrency_limit?: number; // 开启后默认 5
@@ -630,7 +757,6 @@ export interface Settings {
   // 操作约束注入范围(默认都开):把任务的 allow/deny 约束拼进对应 agent 的系统提示。
   constraints_inject_planner?: boolean;
   constraints_inject_worker?: boolean;
->>>>>>> Stashed changes
 }
 
 // ---- LLM config ----
@@ -645,9 +771,42 @@ export interface LLMProfile {
   rate_per_second: number;
   rate_per_minute: number;
   context_window_k?: number;
-  // 思考模式: ""=默认(不发送) | "off"=关闭 | "low"/"medium"/"high"/"max"=开启并设强度
+  // 思考开关(thinking.type): ""=不发送(默认) | "disabled"=关闭 | "enabled"=开启
+  thinking_type?: string;
+  // 思考强度: ""=不发送(默认) | "low"/"medium"/"high"/"xhigh"/"max"
   reasoning_effort?: string;
   is_default: boolean;
+  // 轮询顺位：越大越先被选中。激活配置恒为链首，与本值无关。
+  priority?: number;
+  // true = 不作为故障转移目标（仍可被 agent/任务显式绑定使用）。
+  pool_exclude?: boolean;
+}
+
+// ---- LLM 轮询（故障转移）----
+// 一个配置在轮询链中的位置与健康状态。state:
+//   ok       正常
+//   degraded 有连续失败但未达熔断阈值
+//   tripped  已熔断，冷却期内被跳过（cooldown_secs 为剩余秒数）
+export interface LLMPoolMember {
+  profile_id: string;
+  name: string;
+  model: string;
+  format: string;
+  priority: number;
+  active: boolean; // 是否为当前激活配置（恒为链首）
+  excluded: boolean; // pool_exclude：不参与轮询
+  state: "ok" | "degraded" | "tripped";
+  fails: number;
+  trips: number;
+  cooldown_secs: number;
+  last_error?: string;
+  last_at?: string;
+}
+
+export interface LLMPoolStatus {
+  enabled: boolean;
+  bind_fallback: boolean;
+  chain: LLMPoolMember[];
 }
 
 // ---- Agents ----
@@ -730,12 +889,34 @@ export interface MCPTool {
 // Fields align with the agentskills.io open specification.
 // description covers both "what the skill does" and "when to use it".
 export interface SkillItem {
-  name: string;           // unique key = directory name
-  description?: string;   // required per spec; covers what + when to use
-  license?: string;       // optional: SPDX identifier or free text
+  name: string; // unique key = directory name
+  description?: string; // required per spec; covers what + when to use
+  license?: string; // optional: SPDX identifier or free text
   compatibility?: string; // optional: environment requirements
-  mcps?: string[];        // MCP server names this skill unlocks on load
-  files: string[];        // files in the skill directory
+  mcps?: string[]; // MCP server names this skill unlocks on load
+  files: string[]; // files in the skill directory
+  // 调用统计（skill_usage 账本）。从未被调用过的 skill：calls=0、last_used 缺省。
+  calls: number;
+  tasks: number; // 加载过它的任务数（chat 会话不计入）
+  usage_agents: string[]; // 加载过它的 agent key
+  last_used?: string;
+}
+
+// SkillCall 是一次 Skill() 调用（单个 skill 的最近调用列表）。
+export interface SkillCall {
+  ts: string;
+  agent_key: string;
+  task_id: number; // 0 = 非任务场景（对话会话）
+  session_id: string;
+  args_len: number;
+}
+
+// MissingSkill 是被点名但不存在的 skill —— "想用但没有"的缺口。
+export interface MissingSkill {
+  skill: string;
+  calls: number;
+  agents: string[];
+  last_used?: string;
 }
 
 // ---- Tools (内置工具目录) ----
@@ -748,12 +929,12 @@ export interface Tool {
   description: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   schema: Record<string, any>; // full JSON-Schema (object with properties)
-  agents: string[];            // bound agent keys
+  agents: string[]; // bound agent keys
   enabled: boolean;
   kind?: "builtin" | "shell" | "command" | "script" | "http"; // 自定义工具类型
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  exec?: Record<string, any>;  // 自定义工具执行规格(kind!=builtin)
-  deferred?: boolean;          // schema 延迟(SearchExtraTools/ExecuteExtraTool)
+  exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
+  deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
 }
 
 // ---- Stats ----
@@ -763,6 +944,7 @@ export interface Stats {
   llm_configured: boolean;
   roe_enabled: boolean;
   findings_confirmed: number;
+  active_task?: Partial<Task>;
 }
 
 // ---- Intercept Rules ----
@@ -815,14 +997,14 @@ export interface JudgeConfig {
 
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.
 export interface InterceptApprovalRow extends InterceptPending {
-  conv_title: string;      // "" if no linked conversation
-  conv_agent_key: string;  // "" if no linked conversation
-  rule_name: string;       // "" if rule was deleted
+  conv_title: string; // "" if no linked conversation
+  conv_agent_key: string; // "" if no linked conversation
+  rule_name: string; // "" if rule was deleted
 }
 
 // ── 资产同步 (ScopeSentry 数据源) ──────────────────────────────────────────────
 export interface SSProject {
-  id: string;        // MongoDB ObjectID — used as filter.project
+  id: string; // MongoDB ObjectID — used as filter.project
   name: string;
   logo?: string;
   AssetCount?: number;
@@ -831,7 +1013,7 @@ export interface SSProject {
 
 export interface SSTask {
   id: string;
-  name: string;      // used as filter.task
+  name: string; // used as filter.task
   status?: number;
   progress?: number;
   creatTime?: string;

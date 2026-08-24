@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -92,14 +94,84 @@ func TestCoreTaskLifecyclePG(t *testing.T) {
 		t.Fatalf("list tasks: %d", code)
 	}
 
-	// delete → cascade removes the exploration subgraph
-	code, _ = doRetry("DELETE", "/api/tasks/"+id, nil)
+	// The task detail header consumes the top-level engine mode while some clients
+	// read the active-task snapshot. Keep both representations in sync.
+	code, out = doRetry("GET", "/api/stats?task="+id, nil)
+	if code != 200 {
+		t.Fatalf("task stats: %d (%v)", code, out)
+	}
+	activeTask, ok := out["active_task"].(map[string]any)
+	if !ok || activeTask["engine_mode"] != out["engine_mode"] {
+		t.Fatalf("engine mode mismatch: top=%v active_task=%v", out["engine_mode"], activeTask)
+	}
+
+	// delete → cascade removes the exploration subgraph and selected related data
+	taskDir := filepath.Join(m.dir, "tasks", id)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "artifact.txt"), []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	transcriptBase := "exp" + strconv.FormatInt(expID, 10) + "-main"
+	transcriptPath := filepath.Join(m.dir, "transcripts", transcriptBase+".jsonl")
+	sidechainPath := filepath.Join(m.dir, "transcripts", transcriptBase)
+	if err := os.MkdirAll(filepath.Join(sidechainPath, "subagents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sidechainPath, "subagents", "child.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nid, _ := strconv.ParseInt(id, 10, 64)
+	findingID, err := m.pg.AddFinding(nid, 0, "__core_task_delete__", "", db.SeverityHigh, "summary", "evidence", "tester", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pg.EnsureLLMRecordsTable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pg.InsertLLMRecord(&db.LLMRecord{TaskID: id, SessionID: "delete-test", Status: "ok", RequestBody: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	// A non-canonical path still resolves to the one canonical task key for the
+	// barrier, workspace, in-memory registry and DB delete.
+	code, out = doRetry("DELETE", "/api/tasks/000"+id, map[string]bool{
+		"delete_files":       true,
+		"delete_findings":    true,
+		"delete_llm_records": true,
+	})
 	if code != 200 {
 		t.Fatalf("delete task: %d", code)
 	}
-	nid, _ := strconv.ParseInt(id, 10, 64)
+	if deleted, _ := out["files_deleted"].(bool); !deleted {
+		t.Fatalf("expected files_deleted response, got %v", out)
+	}
+	if deleted, _ := out["findings_deleted"].(float64); deleted != 1 {
+		t.Fatalf("expected one deleted finding, got %v", out)
+	}
+	if deleted, _ := out["llm_records_deleted"].(float64); deleted != 1 {
+		t.Fatalf("expected one deleted LLM record, got %v", out)
+	}
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Fatalf("task directory should be deleted, stat err=%v", err)
+	}
+	for _, path := range []string{transcriptPath, sidechainPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("task transcript should be deleted (%s), stat err=%v", path, err)
+		}
+	}
 	if got, _ := m.pg.GetTask(nid); got != nil {
 		t.Fatalf("task should be deleted from PG")
+	}
+	if finding, err := m.pg.GetFinding(findingID); err != nil || finding != nil {
+		t.Fatalf("finding should be deleted, got finding=%+v err=%v", finding, err)
+	}
+	var llmRecords int
+	if err := m.pg.QueryRow(`SELECT count(*) FROM llm_records WHERE task_id=$1`, id).Scan(&llmRecords); err != nil || llmRecords != 0 {
+		t.Fatalf("task LLM records should be deleted, count=%d err=%v", llmRecords, err)
 	}
 	var n int
 	m.pg.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, expID).Scan(&n)

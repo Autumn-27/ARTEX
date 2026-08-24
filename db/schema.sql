@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS assets (
                         'root_domain','ip','subdomain','app','service','endpoint'
                     )),
     company_id      BIGINT REFERENCES companies(id) ON DELETE SET NULL,
+    -- explicit: caller/user selected the company; scope: derived from company_scope.
+    -- Existing installations are conservatively migrated as explicit so a scope
+    -- rebuild can never erase a historical manual association.
+    company_source  TEXT NOT NULL DEFAULT 'explicit'
+                    CHECK (company_source IN ('explicit','scope')),
     task_ids        BIGINT[] NOT NULL DEFAULT '{}',
     domain          TEXT,
     root_domain     TEXT,
@@ -84,6 +89,13 @@ CREATE INDEX IF NOT EXISTS idx_av2_bound_domains ON assets USING GIN(bound_domai
 CREATE INDEX IF NOT EXISTS idx_av2_open_ports   ON assets USING GIN(open_ports)    WHERE type = 'ip';
 CREATE INDEX IF NOT EXISTS idx_av2_last_seen    ON assets(last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_av2_type_seen    ON assets(type, last_seen DESC);
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS company_source TEXT;
+UPDATE assets SET company_source = 'explicit' WHERE company_source IS NULL;
+ALTER TABLE assets ALTER COLUMN company_source SET DEFAULT 'explicit';
+ALTER TABLE assets ALTER COLUMN company_source SET NOT NULL;
+ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_company_source_check;
+ALTER TABLE assets ADD CONSTRAINT assets_company_source_check
+    CHECK (company_source IN ('explicit','scope'));
 DROP TRIGGER IF EXISTS trg_av2_upd ON assets;
 CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -91,17 +103,36 @@ CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
 CREATE TABLE IF NOT EXISTS company_scope (
     id         BIGSERIAL PRIMARY KEY,
     company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL CHECK (kind IN ('domain','ip','cidr')),
+    kind       TEXT NOT NULL CHECK (kind IN ('domain','ip','cidr','icp','keyword')),
     domain     TEXT,
     net        CIDR,
+    value      TEXT,
     raw        TEXT NOT NULL,
     reason     TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_sv2_domain UNIQUE (company_id, domain),
-    CONSTRAINT uq_sv2_net    UNIQUE (company_id, net)
+    CONSTRAINT uq_sv2_net    UNIQUE (company_id, net),
+    CONSTRAINT ck_company_scope_payload CHECK (
+        (kind = 'domain' AND domain IS NOT NULL AND net IS NULL AND value IS NULL)
+        OR (kind IN ('ip','cidr') AND domain IS NULL AND net IS NOT NULL AND value IS NULL)
+        OR (kind IN ('icp','keyword') AND domain IS NULL AND net IS NULL AND value IS NOT NULL)
+    )
+);
+-- Existing installations need the new text payload and expanded kind check.
+ALTER TABLE company_scope ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE company_scope DROP CONSTRAINT IF EXISTS company_scope_kind_check;
+ALTER TABLE company_scope ADD CONSTRAINT company_scope_kind_check
+    CHECK (kind IN ('domain','ip','cidr','icp','keyword'));
+ALTER TABLE company_scope DROP CONSTRAINT IF EXISTS ck_company_scope_payload;
+ALTER TABLE company_scope ADD CONSTRAINT ck_company_scope_payload CHECK (
+    (kind = 'domain' AND domain IS NOT NULL AND net IS NULL AND value IS NULL)
+    OR (kind IN ('ip','cidr') AND domain IS NULL AND net IS NOT NULL AND value IS NULL)
+    OR (kind IN ('icp','keyword') AND domain IS NULL AND net IS NULL AND value IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_sv2_domain  ON company_scope(domain)   WHERE kind = 'domain';
 CREATE INDEX IF NOT EXISTS idx_sv2_net     ON company_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sv2_value ON company_scope(company_id, kind, value) WHERE kind IN ('icp','keyword');
+CREATE INDEX IF NOT EXISTS idx_sv2_icp ON company_scope(value) WHERE kind = 'icp';
 CREATE INDEX IF NOT EXISTS idx_sv2_company ON company_scope(company_id);
 
 -- =====================================================================
@@ -129,19 +160,40 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     state          TEXT NOT NULL DEFAULT 'open',
     origin         TEXT,
     owner          TEXT,
+    blocked_reason TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
     CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
-        (kind='intent'  AND state IN ('open','running','done','blocked','exhausted','stopped')) OR
+        (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed'))
     )
 );
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exploration_nodes'::regclass
+          AND conname='ck_node_state'
+          AND pg_get_constraintdef(oid) NOT LIKE '%paused%'
+    ) THEN
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
+            (kind='begin'   AND state IN ('open')) OR
+            (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
+            (kind='goal'    AND state IN ('open','met','abandoned')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='finding' AND state IN ('confirmed','dismissed')) OR
+            (kind='hint'    AND state IN ('active','consumed'))
+        );
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_expnodes_part     ON exploration_nodes(exploration_id, kind);
 CREATE INDEX IF NOT EXISTS idx_expnodes_frontier ON exploration_nodes(exploration_id, priority DESC)
     WHERE kind='intent' AND state='open';
@@ -194,12 +246,14 @@ CREATE TABLE IF NOT EXISTS activity (
     is_error           BOOLEAN NOT NULL DEFAULT false,
     summary            TEXT,
     detail             TEXT,
+    metadata           JSONB NOT NULL DEFAULT '{}',
     input_tokens       INTEGER,
     output_tokens      INTEGER,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
@@ -227,8 +281,16 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     rate_per_second  DOUBLE PRECISION NOT NULL DEFAULT 0,
     rate_per_minute  DOUBLE PRECISION NOT NULL DEFAULT 0,
     context_window_k INTEGER NOT NULL DEFAULT 0,
+    -- 思考参数拆成两个独立字段：thinking_type=思考开关(''/disabled/enabled)，
+    -- reasoning_effort=思考强度(''/low/medium/high/xhigh/max)，互不牵连。
     reasoning_effort TEXT NOT NULL DEFAULT '',
+    thinking_type    TEXT NOT NULL DEFAULT '',
     is_default       BOOLEAN NOT NULL DEFAULT false,
+    -- 轮询(故障转移)参数，见 docs/LLM轮询设计.md：
+    --   priority     顺位，越大越先被选中；激活配置(is_default)永远排链首，与本值无关。
+    --   pool_exclude true=不作为故障转移目标(仍可被 agent/任务显式绑定使用)。
+    priority         INTEGER NOT NULL DEFAULT 0,
+    pool_exclude     BOOLEAN NOT NULL DEFAULT false,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -236,13 +298,63 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default)
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- 轮询顺位/排除标记；补旧库。默认 0 / false = 全部配置都参与轮询。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
+
+-- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
+-- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
+-- 否则每次启动都会把用户后来手动设的组合覆盖回去。旧 reasoning_effort 语义：
+--   'off'                    → 显式关闭  → thinking_type='disabled'，强度清空
+--   'low/medium/high/max'    → 开启+强度 → thinking_type='enabled'，强度保留
+--   ''                       → 不发送    → 两者皆空(默认)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'llm_profiles' AND column_name = 'thinking_type'
+    ) THEN
+        ALTER TABLE llm_profiles ADD COLUMN thinking_type TEXT NOT NULL DEFAULT '';
+        UPDATE llm_profiles SET thinking_type = 'enabled'
+            WHERE reasoning_effort IN ('low','medium','high','max');
+        UPDATE llm_profiles SET thinking_type = 'disabled', reasoning_effort = ''
+            WHERE reasoning_effort = 'off';
+    END IF;
+END $$;
+
+-- LLM 轮询熔断状态：某个配置连续失败(余额不足/key 失效/限流)后进入冷却，冷却期内
+-- 轮询直接跳过它。内存态为准，这里落库只为重启后不丢冷却窗口——加载时只取尚未
+-- 到期的行(open_until > now)，已到期的自然回到"正常"，等下一次调用半开试探。
+CREATE TABLE IF NOT EXISTS llm_profile_health (
+    profile_id  BIGINT PRIMARY KEY REFERENCES llm_profiles(id) ON DELETE CASCADE,
+    fails       INTEGER NOT NULL DEFAULT 0,  -- 当前连续失败次数(成功即清零)
+    trips       INTEGER NOT NULL DEFAULT 0,  -- 累计熔断次数,用于冷却时间指数退避
+    open_until  TIMESTAMPTZ,                 -- 冷却截止;NULL/过期 = 未熔断
+    last_error  TEXT NOT NULL DEFAULT '',
+    last_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- =====================================================================
 -- D. 任务层
 -- =====================================================================
+-- Global task categories are intentionally independent from task templates.
+-- Deleting a category only moves its tasks back to the uncategorized bucket.
+CREATE TABLE IF NOT EXISTS task_categories (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    nkey       TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_categories_name ON task_categories(name, id);
+DROP TRIGGER IF EXISTS trg_task_categories_upd ON task_categories;
+CREATE TRIGGER trg_task_categories_upd BEFORE UPDATE ON task_categories
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
     name           TEXT NOT NULL DEFAULT '',
+    category_id    BIGINT REFERENCES task_categories(id) ON DELETE SET NULL,
     description    TEXT NOT NULL,
     goal           TEXT NOT NULL,
     exploration_id BIGINT NOT NULL UNIQUE
@@ -250,7 +362,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     status         TEXT NOT NULL DEFAULT 'created'
                      CHECK (status IN ('created','running','paused','done','failed','timeout')),
     paused         BOOLEAN NOT NULL DEFAULT false,
+    queued         BOOLEAN NOT NULL DEFAULT false,
+    queued_at      TIMESTAMPTZ,
+    queue_mode     TEXT NOT NULL DEFAULT '',
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    llm_chain_revision BIGINT NOT NULL DEFAULT 0,
     company_id     BIGINT REFERENCES companies(id) ON DELETE SET NULL,
     parent_ref     TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
@@ -270,8 +387,6 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 -- planner 心跳触发间隔(秒);补旧库。默认 300s(5min)。见 docs/planner-trigger-impl-plan.md
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
-<<<<<<< Updated upstream
-=======
 -- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
 -- 资产覆盖度功能开关;补旧库。true(默认)=计算/展示测试覆盖度、自动累积测试范围、
@@ -285,8 +400,11 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queue_mode TEXT NOT NULL DEFAULT '';
 -- 可选的任务名称;补旧库。空串=未命名,前端展示时回退到描述。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES task_categories(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
+    WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 
 -- Reusable task description/goal presets. nkey is the normalized, case-insensitive
 -- identity used to reject visually equivalent duplicate names.
@@ -314,6 +432,55 @@ CREATE TABLE IF NOT EXISTS task_relations (
     CONSTRAINT ck_task_relation_not_self CHECK (task_id <> source_task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_task_relations_source ON task_relations(source_task_id);
+
+-- Task/asset provenance supplements the legacy assets.task_ids association. The
+-- array remains the compatibility source for existing query and cleanup paths;
+-- this relation records how each association was obtained for operator review.
+CREATE TABLE IF NOT EXISTS task_asset_links (
+    task_id        BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    asset_id       BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    source         TEXT NOT NULL DEFAULT 'system',
+    source_summary TEXT NOT NULL DEFAULT '',
+    source_node_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_asset ON task_asset_links(asset_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_node ON task_asset_links(source_node_id)
+    WHERE source_node_id IS NOT NULL;
+DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_asset_links;
+CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Keep provenance rows synchronized when existing asset upsert paths append or
+-- remove task ids. Detailed callers overwrite the generic source after upsert.
+CREATE OR REPLACE FUNCTION sync_task_asset_links() RETURNS trigger AS $$
+BEGIN
+    INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+    SELECT task.id, NEW.id, 'system', '任务执行期间自动关联'
+    FROM unnest(NEW.task_ids) AS requested(task_id)
+    JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
+    ON CONFLICT (task_id, asset_id) DO NOTHING;
+
+    DELETE FROM task_asset_links link
+    WHERE link.asset_id=NEW.id
+      AND NOT (link.task_id=ANY(NEW.task_ids));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_assets_task_links ON assets;
+CREATE TRIGGER trg_assets_task_links AFTER INSERT OR UPDATE OF task_ids ON assets
+    FOR EACH ROW EXECUTE FUNCTION sync_task_asset_links();
+
+-- Existing installations receive an auditable legacy source without rewriting
+-- task_ids. Ignore stale array ids that no longer resolve to a live task.
+INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+SELECT task.id, asset.id, 'legacy', '由历史任务资产关联迁移'
+FROM assets asset
+CROSS JOIN LATERAL unnest(asset.task_ids) AS requested(task_id)
+JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
+ON CONFLICT (task_id, asset_id) DO NOTHING;
 
 -- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
 -- until the user saves/resets the chain, which clears all failure state.
@@ -352,7 +519,6 @@ SET active_llm_profile_id = t.llm_profile_id
 WHERE t.active_llm_profile_id IS NULL
   AND t.llm_profile_id IS NOT NULL
   AND EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id AND x.profile_id=t.llm_profile_id);
->>>>>>> Stashed changes
 
 -- 任务测试范围（资产覆盖度的分母 + 授权边界）。
 --   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围
@@ -363,17 +529,24 @@ WHERE t.active_llm_profile_id IS NULL
 CREATE TABLE IF NOT EXISTS task_scope (
     id          BIGSERIAL PRIMARY KEY,
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr')),
+    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword')),
     company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
     domain      TEXT,          -- root_domain / subdomain
     net         CIDR,          -- ip / cidr
+    value       TEXT,          -- icp / keyword
     source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','agent','manual')),
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 旧库升级：扩展任务范围，使其与企业范围的单文本框识别能力一致。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE task_scope DROP CONSTRAINT IF EXISTS task_scope_kind_check;
+ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
+    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword'));
 -- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0));
+DROP INDEX IF EXISTS uq_task_scope;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
@@ -392,7 +565,7 @@ CREATE TABLE IF NOT EXISTS agents (
     llm_profile_id    BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
     current_prompt_id BIGINT,
     max_turns         INTEGER NOT NULL DEFAULT 0,
-    run_seconds       INTEGER NOT NULL DEFAULT 600,
+    run_seconds       INTEGER NOT NULL DEFAULT 1200,
     web_search        BOOLEAN NOT NULL DEFAULT false,
     interactive_shell BOOLEAN NOT NULL DEFAULT false,
     wrapup_prompt     TEXT NOT NULL DEFAULT '',
@@ -412,6 +585,9 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NUL
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
 -- per-agent LLM 绑定(agent 级默认模型):列自初版即在上方 CREATE 中,此 ALTER 仅为极旧库兜底(幂等)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+-- run_seconds 单次 run 墙钟默认 600→1200:只改列默认(影响将来新插入的行),不动旧库存量行。
+ALTER TABLE agents ALTER COLUMN run_seconds SET DEFAULT 1200;
+CREATE INDEX IF NOT EXISTS idx_agents_llm_profile ON agents(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -501,6 +677,26 @@ CREATE TABLE IF NOT EXISTS agent_skill_visibility (
 );
 CREATE INDEX IF NOT EXISTS idx_askv_skill ON agent_skill_visibility(skill_name);
 
+-- Skill 调用账本（见 db/skill_usage.go）。一次 Skill() 调用一行，只记维度不记正文。
+-- 刻意不设外键：任务/会话删除后统计仍要保留（与 llm_usage 同理），skill 本身也只是
+-- 文件系统上的目录名，没有对应的表。
+CREATE TABLE IF NOT EXISTS skill_usage (
+    id             BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    skill          TEXT NOT NULL,
+    agent_key      TEXT,
+    task_id        BIGINT,
+    exploration_id BIGINT,
+    intent_id      BIGINT,
+    session_id     TEXT,
+    args_len       INTEGER NOT NULL DEFAULT 0,
+    -- false = 模型点名了一个不存在的 skill(未命中)。这类行同样保留：它反映"想用但没有"
+    -- 的缺口，是补 skill 的依据。
+    found          BOOLEAN NOT NULL DEFAULT true
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_skill ON skill_usage(skill, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_task  ON skill_usage(task_id);
+
 -- =====================================================================
 -- H. 内置工具目录
 -- =====================================================================
@@ -528,9 +724,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     agent_key      TEXT NOT NULL,
     title          TEXT NOT NULL DEFAULT '',
     llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+    pinned_at      TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_conversations_llm_profile ON conversations(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_pinned ON conversations(pinned_at DESC) WHERE pinned_at IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_conversations_upd ON conversations;
 CREATE TRIGGER trg_conversations_upd BEFORE UPDATE ON conversations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

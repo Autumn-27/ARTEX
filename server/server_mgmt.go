@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,14 +67,135 @@ func decode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decod
 
 // ---------- tasks (delete) ----------
 
+const taskDeleteDrainTimeout = 10 * time.Second
+
+func canonicalTaskID(raw string) (string, bool) {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return "", false
+	}
+	return strconv.FormatInt(n, 10), true
+}
+
+// beginTaskDelete serializes the delete barrier with pause, resume, admission,
+// and FIFO reconciliation. Every lifecycle path rechecks deleting after taking
+// concMu, so none can commit a contradictory state once this returns.
+func (s *Server) beginTaskDelete(taskID string) bool {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	if s.engine.IsDeleting(taskID) {
+		return false
+	}
+	return s.engine.BeginDelete(taskID)
+}
+
+// abortTaskDelete restores the execution barrier from the committed task row,
+// not from the in-memory state observed before deletion began. Keeping the task
+// paused on an unreadable row is conservative: a later explicit resume can
+// safely recover it without allowing work to escape an uncertain delete.
+func (s *Server) abortTaskDelete(taskID string) {
+	s.concMu.Lock()
+	defer s.concMu.Unlock()
+	keepPaused := true
+	if id, err := strconv.ParseInt(taskID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
+		if persisted, getErr := s.m.pg.GetTask(id); getErr == nil && persisted != nil {
+			keepPaused = persisted.Paused || persisted.Queued
+		} else if task, ok := s.m.Task(taskID); ok {
+			state := task.lifecycleSnapshot()
+			keepPaused = state.Paused || state.Queued
+			if getErr != nil {
+				log.Printf("[task-delete] task %s 读取持久状态失败，使用内存状态恢复屏障: %v", taskID, getErr)
+			}
+		} else if getErr == nil {
+			// The request targeted a task that does not exist. Do not retain a
+			// synthetic pause entry after releasing its temporary delete barrier.
+			keepPaused = false
+		}
+	}
+	s.engine.AbortDelete(taskID, keepPaused)
+}
+
 func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	s.engine.Pause(id) // cancel running loops before removing
-	if err := s.m.DeleteTask(id); err != nil {
+	id, ok := canonicalTaskID(r.PathValue("id"))
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "任务 id 无效")
+		return
+	}
+	var opts DeleteTaskOptions
+	if err := decode(r, &opts); err != nil && err != io.EOF {
+		writeErr(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if !s.beginTaskDelete(id) {
+		writeErr(w, http.StatusConflict, "任务正在删除")
+		return
+	}
+	deleted := false
+	defer func() {
+		if !deleted {
+			s.abortTaskDelete(id)
+		}
+	}()
+
+	// Main-agent runs use a separate context from planner/workers. Cancel it, then
+	// wait until both execution domains have returned before removing transcripts.
+	s.cancelTaskChat(id, agent.AbortTaskDeleted)
+	drainCtx, cancelDrain := context.WithTimeout(r.Context(), taskDeleteDrainTimeout)
+	defer cancelDrain()
+	if err := s.waitTaskQuiescent(drainCtx, id); err != nil {
+		writeErr(w, http.StatusConflict, "任务仍有运行中的 Agent，删除已取消")
+		return
+	}
+
+	result, err := s.m.DeleteTask(id, opts)
+	if err != nil {
+		var committed *taskDeleteCommittedError
+		if errors.As(err, &committed) {
+			// PostgreSQL is already gone. Complete runtime teardown and return the
+			// auditable counts together with the post-commit cleanup warning.
+			s.engine.StopTask(id)
+			s.taskAgentMu.Lock()
+			delete(s.taskAgents, id)
+			s.taskAgentMu.Unlock()
+			deleted = true
+			writeCommittedTaskDelete(w, result, err)
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": id})
+	// Manager has removed the task from the registry, so no new API operation can
+	// resolve it. Now stop and join every task-owned Engine goroutine and clear its
+	// lifecycle maps before releasing the delete barrier.
+	s.engine.StopTask(id)
+	s.taskAgentMu.Lock()
+	delete(s.taskAgents, id)
+	s.taskAgentMu.Unlock()
+	deleted = true
+	writeJSON(w, 200, result)
+}
+
+func writeCommittedTaskDelete(w http.ResponseWriter, result DeleteTaskResult, err error) {
+	result.CleanupWarning = err.Error()
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) waitTaskQuiescent(ctx context.Context, taskID string) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.chatMu.Lock()
+		chatBusy := s.chatBusy[taskID]
+		s.chatMu.Unlock()
+		if s.engine.inflightCount(taskID) == 0 && !chatBusy {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // ---------- agents ----------
@@ -305,6 +427,9 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if profileChanged {
 		s.invalidateProfileAgents()
 	}
+	// Task bundles capture operational Agent settings (turn/time budgets, tools,
+	// web search). Rebuild them even when no global profile is configured.
+	s.invalidateTaskAgents()
 	// rebuild the live agents so the new max_turns/run_seconds/binding apply without a restart.
 	s.cfgMu.Lock()
 	cfg, on := s.llmCfg, s.llmOn
@@ -349,8 +474,8 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"agent": agentDTO(a), "prompt": cur, "variables": vars, "versions": vers,
-		"visibility":               map[string]any{"mcp": mcp, "skill": sk},
-		"llm_profiles":             llmProfiles, // 可绑定的 LLM 配置候选
+		"visibility":   map[string]any{"mcp": mcp, "skill": sk},
+		"llm_profiles": llmProfiles, // 可绑定的 LLM 配置候选
 
 		"wrapup_prompt":            a.WrapupPrompt,                  // 已保存的收尾提示词(空=用内置默认)
 		"wrapup_default":           agent.WrapupDefault(a.Key),      // 内置默认(供占位/恢复默认)
@@ -810,6 +935,12 @@ type skillFileNode struct {
 	Compatibility string   `json:"compatibility,omitempty"`
 	MCPs          []string `json:"mcps,omitempty"`
 	Files         []string `json:"files"`
+	// Usage ledger (db/skill_usage.go). Calls is 0 and LastUsed nil for a skill that
+	// was never invoked — the ledger only has rows for skills agents actually loaded.
+	Calls    int        `json:"calls"`
+	Tasks    int        `json:"tasks"`
+	Agents   []string   `json:"usage_agents"`
+	LastUsed *time.Time `json:"last_used,omitempty"`
 }
 
 func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
@@ -828,13 +959,28 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// Usage is best-effort decoration: a ledger read failure leaves the counts at
+	// zero rather than failing the skill list itself.
+	statBySkill := map[string]db.SkillStat{}
+	if s.m.pg != nil {
+		stats, err := s.m.pg.SkillStats()
+		if err != nil {
+			log.Printf("[skills] 读取调用统计失败: %v", err)
+		}
+		for _, st := range stats {
+			statBySkill[st.Skill] = st
+		}
+	}
 	nodes := []skillFileNode{}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		dirName := e.Name()
-		node := skillFileNode{Name: dirName}
+		node := skillFileNode{Name: dirName, Agents: []string{}}
+		if st, ok := statBySkill[dirName]; ok {
+			node.Calls, node.Tasks, node.Agents, node.LastUsed = st.Calls, st.Tasks, st.Agents, st.LastUsed
+		}
 		if meta, ok := metaByDir[dirName]; ok {
 			node.Description = meta.Description
 			node.License = meta.License
@@ -848,6 +994,42 @@ func (s *Server) fsListSkills(w http.ResponseWriter, r *http.Request) {
 		nodes = append(nodes, node)
 	}
 	writeJSON(w, 200, map[string]any{"skills": nodes})
+}
+
+// fsSkillUsage returns one skill's recent invocations, newest first (detail panel).
+func (s *Server) fsSkillUsage(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	name := r.PathValue("name")
+	if !validSkillName(name) {
+		writeErr(w, 400, "非法 skill 名")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	calls, err := pg.RecentSkillCalls(name, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"calls": calls})
+}
+
+// fsMissingSkills lists skill names agents asked for that do not exist — the gap
+// list, i.e. which procedures are worth writing next.
+func (s *Server) fsMissingSkills(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	missing, err := pg.MissingSkillStats(limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"missing": missing})
 }
 
 // cleanStrs trims each string and drops empties.
@@ -1560,12 +1742,14 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	// Editing a profile rebuilds any task pinned to it on its next round.
+	// Editing a profile rebuilds any task pinned to it on its next round. Reapply
+	// the active profile too: the global fallback and explicit task chains must
+	// repopulate the same provider-cache entry and therefore share one limiter.
 	s.invalidateProfileAgents()
-	// If we just edited the active profile, hot-apply so changes take effect now.
-	if act, _ := pg.ActiveProfile(); act != nil && act.ID == id {
-		s.reapplyActiveProfile()
-	}
+	// Hot-apply. Not just when the ACTIVE profile changed: with failover on, any
+	// profile's key/model/priority/pool_exclude edit reshapes the chain, so the
+	// engine's provider has to be rebuilt either way.
+	s.reapplyActiveProfile()
 	writeJSON(w, 200, map[string]any{"id": id})
 }
 
@@ -1575,12 +1759,48 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := pathInt(r, "id")
-	if err := pg.DeleteProfile(id); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := pg.DeleteProfileContext(r.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, db.ErrActiveLLMProfileDelete):
+			writeErr(w, 409, "当前激活的 LLM 配置不能删除，请先激活其他配置")
+		case errors.Is(err, db.ErrLLMProfileReferencesChanged):
+			writeErr(w, 409, "LLM 配置正在被任务或会话修改，请重试")
+		case errors.Is(err, context.DeadlineExceeded):
+			writeErr(w, 409, "等待 LLM 配置引用释放超时，请重试")
+		case errors.Is(err, db.ErrLLMProfileNotFound):
+			writeErr(w, 404, err.Error())
+		default:
+			writeErr(w, 500, err.Error())
+		}
 		return
 	}
 	s.invalidateProfileAgents() // drop cached agents for the removed profile
+	s.llmHealth.Reset(id)       // its breaker state is meaningless now (row is FK-cascaded away)
+	s.restoreTasksAfterProfileDelete(pg)
+	// Cache invalidation also removed the active profile's shared provider entry.
+	// Reapply after task-state sync so the wake-up observes the post-delete chain.
+	s.reapplyActiveProfile()
 	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {
+	for _, task := range s.m.List() {
+		if taskID, err := strconv.ParseInt(task.ID, 10, 64); err == nil {
+			if pt, err := pg.GetTask(taskID); err == nil && pt != nil {
+				s.syncTaskLLMState(pt)
+				// Deleting the active entry may advance the task to a ready successor,
+				// or clear the explicit chain and restore its Agent/global fallback.
+				// Resume only intents that were blocked by the exhausted chain; a
+				// paused task remains paused and terminal tasks remain immutable.
+				if !isTerminalStatus(task.lifecycleSnapshot().Status) && s.taskRuntimeAvailable(task, "planner", "worker") {
+					if _, reopenErr := task.Store.ReopenIntentsByBlockedReason(db.IntentBlockedLLMQuota); reopenErr != nil {
+						log.Printf("[llm-profile] task %s reopen quota-blocked intents after profile delete: %v", task.ID, reopenErr)
+					}
+				}
+				task.Notify()
+			}
+		}
+	}
 }
 
 func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
@@ -1602,6 +1822,40 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 	s.invalidateProfileAgents() // active change may affect pinned-task fallbacks
 	s.reapplyActiveProfile()    // switch the running engine to the newly activated profile
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// pgLLMPoolStatus reports the failover ("轮询") switches, the resolved chain order
+// and every profile's circuit-breaker state — what the LLM page renders as the
+// "轮询顺序" strip and the per-card health badges.
+func (s *Server) pgLLMPoolStatus(w http.ResponseWriter, r *http.Request) {
+	if s.pg(w) == nil {
+		return
+	}
+	writeJSON(w, 200, s.llmPoolStatus())
+}
+
+// pgLLMPoolReset clears a tripped profile's circuit breaker so the next call
+// tries it again immediately ("立即恢复"). id=0 clears every profile.
+func (s *Server) pgLLMPoolReset(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var body struct {
+		ID int64 `json:"id"` // 0 / omitted = all
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if body.ID > 0 {
+		s.llmHealth.Reset(body.ID)
+	} else {
+		for id := range s.llmHealth.Snapshot() {
+			s.llmHealth.Reset(id)
+		}
+	}
+	writeJSON(w, 200, s.llmPoolStatus())
 }
 
 // pgListModels fetches available models from the provider's API endpoint.

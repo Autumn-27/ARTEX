@@ -2,29 +2,81 @@
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
 
+import {
+  classifyCompanyScopeLine,
+  companyScopeRuleError,
+  isCompanyScopeKind,
+  MAX_COMPANY_SCOPE_RULES,
+  normalizeCompanyScopeValue,
+} from "../company-scope";
+import type {
+  Asset,
+  BatchControlItem,
+  Company,
+  CompanyScopeRule,
+  Conversation,
+  IntentAsset,
+  ScopeRow,
+  Task,
+  TaskAssetMutation,
+  TaskAssetScopeMutation,
+  TaskCategory,
+  TaskLLMResolution,
+  TaskScopeRow,
+  TaskTemplate,
+} from "../types";
 import * as D from "./data";
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
-<<<<<<< Updated upstream
-=======
 // Requests mutate a runtime copy, never the exported fixtures. This keeps module
 // initialization deterministic for tests/HMR while preserving state across mock calls.
 const mockTasks = structuredClone(D.tasks);
 const mockFindings = structuredClone(D.findings);
 const mockLLMRecords = structuredClone(D.llmRecords);
 const mockTaskTemplates = structuredClone(D.taskTemplates);
+const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
+const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
+const mockTaskScopes = new Map<string, TaskScopeRow[]>();
+let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
 
-function mockAssetCounts(): Record<string, number> {
+function mockTaskAssetID(taskID: string): number | undefined {
+  const numeric = Number(taskID);
+  if (Number.isInteger(numeric) && numeric > 0) return numeric;
+  return mockTaskAssetIDs.get(taskID);
+}
+
+function mockAssetCounts(taskID?: string | null): Record<string, number> {
+  const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
   return mockAssets.reduce<Record<string, number>>((counts, asset) => {
+    if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return counts;
     counts[asset.type] = (counts[asset.type] ?? 0) + 1;
     return counts;
   }, {});
+}
+
+function mockAssetMatchesDSL(asset: Asset, dsl: string): boolean {
+  const query = dsl
+    .replaceAll(/[()"]/g, " ")
+    .replaceAll(/\b(?:AND|OR)\b/gi, " ")
+    .replaceAll(/\b[a-z_][a-z0-9_]*(?:==|!=|>=|<=|=|>|<)/gi, " ")
+    .trim()
+    .toLowerCase();
+  if (!query) return true;
+  const haystack = JSON.stringify(asset).toLowerCase();
+  return query.split(/\s+/).every((term) => haystack.includes(term));
+}
+
+function mockTaskCategorySnapshot(): TaskCategory[] {
+  return mockTaskCategories.map((category) => ({
+    ...category,
+    task_count: mockTasks.filter((task) => task.category_id === category.id).length,
+  }));
 }
 
 function mockScopeRows(
@@ -188,7 +240,6 @@ function normalizedTemplateName(value: unknown): string {
     .join(" ");
 }
 
->>>>>>> Stashed changes
 function parseBody(body?: BodyInit | null): Record<string, unknown> {
   if (typeof body !== "string") return {};
   try {
@@ -217,13 +268,6 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/auth/change-password") return { ok: true };
 
   // ── tasks ──
-<<<<<<< Updated upstream
-  if (path === "/tasks" && m === "GET") return { tasks: D.tasks, active: D.ACTIVE_TASK };
-  if (path === "/tasks" && m === "POST")
-    return { ...D.tasks[0], id: "t-new", description: String(b.description ?? "新任务"), goal: String(b.goal ?? ""), status: "created" };
-  if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") return { deleted: 1 };
-  if (seg[0] === "tasks" && seg[2] === "control") return { id: seg[1], paused: b.action === "pause" };
-=======
   if (path === "/tasks" && m === "GET") return { tasks: mockTasks, active: mockActiveTask };
   if (path === "/tasks" && m === "POST") {
     let suffix = 1;
@@ -233,9 +277,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const profileIDs = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
     const sourceTaskIDs = [...((b.source_task_ids as string[] | undefined) ?? [])];
     const companyIDs = [...((b.company_ids as number[] | undefined) ?? [])];
+    const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
+    const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
+    if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
     const created: Task = {
       id,
       name: String(b.name ?? ""),
+      category_id: category?.id,
+      category_name: category?.name,
       description: String(b.description ?? "新任务"),
       goal: String(b.goal ?? ""),
       status: "created",
@@ -256,10 +305,66 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       source_task_ids: sourceTaskIDs,
       company_ids: companyIDs,
     };
+    mockTaskAssetIDs.set(id, nextMockTaskAssetID++);
     for (const item of mockTasks) item.active = false;
     mockTasks.unshift(created);
     mockActiveTask = id;
     return created;
+  }
+  if (path === "/task-categories" && m === "GET") return { categories: mockTaskCategorySnapshot() };
+  if (path === "/task-categories" && m === "POST") {
+    const name = normalizedTemplateName(b.name);
+    if (!name) throw new Error("分类名称不能为空");
+    if (mockTaskCategories.some((category) => category.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("分类名称已存在");
+    }
+    const now = new Date().toISOString();
+    const category: TaskCategory = {
+      id: mockTaskCategories.reduce((maximum, item) => Math.max(maximum, item.id), 0) + 1,
+      name,
+      task_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+    mockTaskCategories.push(category);
+    return category;
+  }
+  if (seg[0] === "task-categories" && seg.length === 2 && m === "PATCH") {
+    const category = mockTaskCategories.find((item) => item.id === Number(seg[1]));
+    if (!category) throw new Error("任务分类不存在");
+    const name = normalizedTemplateName(b.name);
+    if (!name) throw new Error("分类名称不能为空");
+    if (mockTaskCategories.some((item) => item.id !== category.id && item.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("分类名称已存在");
+    }
+    category.name = name;
+    category.updated_at = new Date().toISOString();
+    for (const task of mockTasks) {
+      if (task.category_id === category.id) task.category_name = name;
+    }
+    return { ...category, task_count: mockTasks.filter((task) => task.category_id === category.id).length };
+  }
+  if (seg[0] === "task-categories" && seg.length === 2 && m === "DELETE") {
+    const categoryID = Number(seg[1]);
+    const index = mockTaskCategories.findIndex((item) => item.id === categoryID);
+    if (index < 0) throw new Error("任务分类不存在");
+    mockTaskCategories.splice(index, 1);
+    for (const task of mockTasks) {
+      if (task.category_id !== categoryID) continue;
+      task.category_id = undefined;
+      task.category_name = undefined;
+    }
+    return { deleted: categoryID };
+  }
+  if (seg[0] === "tasks" && seg[2] === "category" && seg.length === 3 && m === "PATCH") {
+    const task = mockTasks.find((item) => item.id === seg[1]);
+    if (!task) throw new Error("任务不存在");
+    const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
+    const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
+    if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
+    task.category_id = category?.id;
+    task.category_name = category?.name;
+    return task;
   }
   if (path === "/task-templates" && m === "GET") return { templates: mockTaskTemplates };
   if (path === "/task-templates" && m === "POST") {
@@ -316,6 +421,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const id = seg[1];
     const index = mockTasks.findIndex((item) => item.id === id);
     if (index >= 0) mockTasks.splice(index, 1);
+    mockTaskAssetIDs.delete(id);
 
     let findingsDeleted = 0;
     if (b.delete_findings) {
@@ -423,71 +529,373 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return { id: seg[1], paused: Boolean(task?.paused), queued: Boolean(task?.queued), status: task?.status ?? "" };
   }
   if (seg[0] === "tasks" && seg[2] === "chat" && seg[3] === "status") return { running: false };
->>>>>>> Stashed changes
   if (seg[0] === "tasks" && seg[2] === "chat" && seg[3] === "stop") return { status: "stopped" };
-  if (path === "/active") return { active: String(b.id ?? D.ACTIVE_TASK) };
+  if (path === "/active") {
+    const id = String(b.id ?? mockActiveTask);
+    if (mockTasks.some((item) => item.id === id)) {
+      mockActiveTask = id;
+      for (const item of mockTasks) item.active = item.id === id;
+    }
+    return { active: mockActiveTask };
+  }
 
   // ── 覆盖度 / 覆盖图 / 资产关联（任务维度）──
   if (seg[0] === "tasks" && seg[2] === "coverage" && seg.length === 3) return D.coverage;
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
   if (seg[0] === "tasks" && seg[2] === "asset-refs") return D.assetRefsFor(Number(q.get("asset_id") ?? 0));
 
+  // ── 任务测试范围（增删查）──
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") {
+    return { scope: mockTaskScopes.get(seg[1]) ?? [] };
+  }
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "POST") {
+    const current = mockTaskScopes.get(seg[1]) ?? [];
+    const kind = String(b.kind ?? "") as TaskScopeRow["kind"];
+    const value = String(b.value ?? "").trim();
+    const row: TaskScopeRow = {
+      id: Date.now(),
+      task_id: mockTaskAssetID(seg[1]) ?? Number(seg[1]),
+      kind,
+      source: "manual",
+    };
+    if (kind === "root_domain" || kind === "subdomain") row.domain = value;
+    else if (kind === "ip" || kind === "cidr") row.net = value;
+    else row.value = value;
+    mockTaskScopes.set(seg[1], [...current, row]);
+    return row;
+  }
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 4 && m === "DELETE") {
+    const id = Number(seg[3]);
+    mockTaskScopes.set(
+      seg[1],
+      (mockTaskScopes.get(seg[1]) ?? []).filter((row) => row.id !== id),
+    );
+    return { ok: true };
+  }
+
+  // ── 全局 llm_usage 聚合（仪表盘新版视图，demo）──
+  if (path === "/tokens/usage")
+    return {
+      by_profile: [
+        {
+          profile_name: "default",
+          calls: 60,
+          tasks: 4,
+          input_tokens: 1570000,
+          output_tokens: 110000,
+          cache_read_tokens: 1120000,
+          cache_write_tokens: 140000,
+        },
+      ],
+      daily: [
+        {
+          profile_name: "default",
+          date: "2026-08-18",
+          input_tokens: 520000,
+          output_tokens: 38000,
+          cache_read_tokens: 370000,
+        },
+        {
+          profile_name: "default",
+          date: "2026-08-19",
+          input_tokens: 640000,
+          output_tokens: 45000,
+          cache_read_tokens: 460000,
+        },
+        {
+          profile_name: "default",
+          date: "2026-08-20",
+          input_tokens: 410000,
+          output_tokens: 27000,
+          cache_read_tokens: 290000,
+        },
+      ],
+    };
+
+  // ── 按模型 token 用量（demo：一条示例）──
+  if (path === "/llm/records/by-model")
+    return {
+      models: [
+        {
+          model: "claude-opus-4-6",
+          calls: 42,
+          input_tokens: 1250000,
+          output_tokens: 86000,
+          cache_read_tokens: 940000,
+          cache_write_tokens: 120000,
+        },
+        {
+          model: "claude-haiku-4-5",
+          calls: 18,
+          input_tokens: 320000,
+          output_tokens: 24000,
+          cache_read_tokens: 180000,
+          cache_write_tokens: 20000,
+        },
+      ],
+    };
+
   // ── 工作空间文件管理器（demo：静态示例树；写/建/删走下方写兜底 {ok:true}）──
   if (path === "/workspace/list") return D.workspaceList(q.get("path") ?? "");
   if (path === "/workspace/read") return D.workspaceRead(q.get("path") ?? "");
 
   // ── stats ──
-  if (path === "/stats") return D.stats(task);
+  if (path === "/stats") {
+    return D.stats(task, { tasks: mockTasks, findings: mockFindings, activeTask: mockActiveTask });
+  }
 
   // ── assets ──
-  if (path === "/assets/counts") return D.assetCounts;
+  if (path === "/assets/counts") return mockAssetCounts(q.get("task_id"));
   if (path === "/assets" && m === "GET") {
     const type = q.get("type") ?? "";
-    const list = type ? D.assets.filter((a) => a.type === type) : D.assets;
+    const taskID = q.get("task_id");
+    const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
+    const dsl = q.get("dsl") ?? "";
+    const list = mockAssets.filter((asset) => {
+      if (type && asset.type !== type) return false;
+      if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return false;
+      return !dsl || mockAssetMatchesDSL(asset, dsl);
+    });
     const limit = Number(q.get("limit") ?? 50);
     const offset = Number(q.get("offset") ?? 0);
-    return { count: list.length, total: list.length, assets: list.slice(offset, offset + limit) };
+    const page = list.slice(offset, offset + limit);
+    return { count: page.length, total: list.length, assets: page };
   }
-  if (path === "/assets" && m === "DELETE") return { deleted: (b.ids as unknown[])?.length ?? 0 };
+  if (path === "/assets" && m === "DELETE") {
+    const ids = new Set(Array.isArray(b.ids) ? b.ids.map(Number) : []);
+    let deleted = 0;
+    for (let index = mockAssets.length - 1; index >= 0; index--) {
+      if (!ids.has(mockAssets[index].id)) continue;
+      mockAssets.splice(index, 1);
+      deleted++;
+    }
+    return { deleted };
+  }
+  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 3 && m === "POST") {
+    const task = mockTasks.find((item) => item.id === seg[1]);
+    const numericTaskID = mockTaskAssetID(seg[1]);
+    if (!task || numericTaskID === undefined) throw new Error("任务不存在");
+    if (Array.isArray(b.scope)) {
+      if (b.scope.length === 0 || b.scope.length > MAX_COMPANY_SCOPE_RULES) throw new Error("请填写有效测试范围");
+      const rules: CompanyScopeRule[] = b.scope.map((candidate, index) => {
+        if (typeof candidate === "string") {
+          const issue = classifyCompanyScopeLine(candidate, index + 1);
+          if (!issue.rule || issue.error) throw new Error(`第 ${index + 1} 条范围无效：${issue.error ?? "无法识别"}`);
+          return issue.rule;
+        }
+        const item = candidate as { kind?: unknown; value?: unknown };
+        const value = String(item?.value ?? "").trim();
+        const rule =
+          item?.kind && isCompanyScopeKind(item.kind)
+            ? { kind: item.kind, value }
+            : classifyCompanyScopeLine(value, index + 1).rule;
+        const error = rule ? companyScopeRuleError(rule) : "无法识别";
+        if (!rule || error) throw new Error(`第 ${index + 1} 条范围无效：${error}`);
+        return rule;
+      });
+      const mutation: TaskAssetScopeMutation = {
+        requested: rules.length,
+        assets_linked: 0,
+        assets_existing: 0,
+        scopes_added: 0,
+        scopes_existing: 0,
+      };
+      const currentScopes = mockTaskScopes.get(seg[1]) ?? [];
+      const scopeKeys = new Set(
+        currentScopes.map((row) => `${row.kind}|${row.domain ?? row.net ?? row.value ?? row.company_id ?? ""}`),
+      );
+      for (const rule of rules) {
+        const normalized = normalizeCompanyScopeValue(rule);
+        const scope: TaskScopeRow = {
+          id: Date.now() + currentScopes.length,
+          task_id: numericTaskID,
+          kind: rule.kind === "domain" ? "root_domain" : rule.kind,
+          source: "manual",
+          reason: "用户在测试资产页手工新增",
+        };
+        if (rule.kind === "domain") scope.domain = normalized;
+        else if (rule.kind === "ip") scope.net = `${normalized}/${normalized.includes(":") ? 128 : 32}`;
+        else if (rule.kind === "cidr") scope.net = normalized;
+        else scope.value = normalized;
+        const scopeKey = `${scope.kind}|${scope.domain ?? scope.net ?? scope.value ?? ""}`;
+        if (scopeKeys.has(scopeKey)) mutation.scopes_existing++;
+        else {
+          scopeKeys.add(scopeKey);
+          currentScopes.push(scope);
+          mutation.scopes_added++;
+        }
+
+        if (rule.kind !== "domain" && rule.kind !== "ip") continue;
+        const type = rule.kind === "domain" ? "root_domain" : "ip";
+        let asset = mockAssets.find((item) =>
+          type === "root_domain"
+            ? item.type === type && item.domain === normalized
+            : item.type === type && item.ip === normalized,
+        );
+        const alreadyLinked = asset?.task_ids.includes(numericTaskID) ?? false;
+        if (!asset) {
+          const nextID = mockAssets.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+          asset = {
+            id: nextID,
+            type,
+            task_ids: [],
+            ...(type === "root_domain" ? { domain: normalized, root_domain: normalized } : { ip: normalized }),
+            last_seen: new Date().toISOString(),
+          };
+          mockAssets.push(asset);
+        }
+        if (alreadyLinked) mutation.assets_existing++;
+        else {
+          asset.task_ids.push(numericTaskID);
+          mutation.assets_linked++;
+        }
+        asset.task_source = "manual";
+        asset.task_source_summary = "用户在测试资产页手工新增";
+        asset.task_source_node_id = undefined;
+      }
+      mockTaskScopes.set(seg[1], currentScopes);
+      return mutation;
+    }
+    const ids = [...new Set(Array.isArray(b.asset_ids) ? b.asset_ids.map(Number) : [])];
+    const sourceSummary = String(b.source_summary ?? "").trim();
+    if (ids.length === 0 || ids.length > 100 || !sourceSummary) throw new Error("请选择资产并填写来源说明");
+    const requestedAssets = ids.map((id) => mockAssets.find((asset) => asset.id === id));
+    if (requestedAssets.some((asset) => !asset)) throw new Error("资产不存在");
+    const mutation: TaskAssetMutation = { requested: ids.length, attached: 0, existing: 0 };
+    for (const asset of requestedAssets) {
+      if (!asset) continue;
+      if (asset.task_ids.includes(numericTaskID)) mutation.existing++;
+      else {
+        asset.task_ids.push(numericTaskID);
+        mutation.attached++;
+      }
+      asset.task_source = "manual";
+      asset.task_source_summary = sourceSummary;
+      asset.task_source_node_id = undefined;
+    }
+    return mutation;
+  }
+  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 4 && m === "DELETE") {
+    const numericTaskID = mockTaskAssetID(seg[1]);
+    const asset = mockAssets.find((item) => item.id === Number(seg[3]));
+    if (numericTaskID === undefined || !asset) throw new Error("任务或资产不存在");
+    if (!asset.task_ids.includes(numericTaskID)) throw new Error("资产未关联当前任务");
+    asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
+    if (asset.task_ids.length === 0) {
+      asset.task_source = undefined;
+      asset.task_source_summary = undefined;
+      asset.task_source_node_id = undefined;
+    }
+    return { detached: asset.id };
+  }
+  if (seg[0] === "tasks" && seg[2] === "intent-assets" && seg.length === 3 && m === "GET") {
+    let mappings: Array<{ intentID: string; assetID: number; summary: string }> = [];
+    if (seg[1] === "t-acme-web") {
+      mappings = [
+        { intentID: "i3", assetID: 6, summary: "后台功能枚举意图从前序子域发现中选定" },
+        { intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" },
+      ];
+    } else if (seg[1] === "t-acme-api") {
+      mappings = [{ intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" }];
+    }
+    const sourceTaskID = mockTaskAssetID(seg[1]) ?? 0;
+    const assets: IntentAsset[] = mappings.flatMap((mapping) => {
+      const asset = mockAssets.find((item) => item.id === mapping.assetID);
+      if (!asset) return [];
+      return [
+        {
+          intent_id: mapping.intentID,
+          asset_id: asset.id,
+          type: asset.type,
+          label: asset.domain ?? asset.ip ?? asset.app_name ?? asset.url ?? asset.service_name ?? `#${asset.id}`,
+          source: asset.task_source ?? "agent",
+          source_summary: asset.task_source_summary ?? mapping.summary,
+          source_node_id: asset.task_source_node_id,
+          source_task_id: sourceTaskID,
+          inherited: false,
+        },
+      ];
+    });
+    return { assets };
+  }
 
   // ── companies ──
-  if (path === "/companies" && m === "GET") return D.companies;
-  if (path === "/companies" && m === "POST") return { id: 2, created: true, scope_added: 0 };
-  if (seg[0] === "companies" && seg[2] === "scope") return { added: 0, skipped: 0, invalid: 0 };
-  if (seg[0] === "companies" && seg.length === 2 && m === "DELETE") return { deleted: 1, assets_deleted: 0 };
+  if (path === "/companies" && m === "GET") return structuredClone(mockCompanies);
+  if (path === "/companies" && m === "POST") {
+    const name = String(b.name ?? "").trim();
+    if (!name) throw new Error("企业名称不能为空");
+    if (mockCompanies.some((company) => company.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("企业已存在");
+    }
+    const id = mockCompanies.reduce((max, company) => Math.max(max, company.id), 0) + 1;
+    const scopeResult = mockScopeRows(id, b.scope);
+    const company: Company = { id, name, asset_count: 0, scope: scopeResult.rows };
+    mockCompanies.push(company);
+    return {
+      id,
+      created: true,
+      scope_added: scopeResult.rows.length,
+      scope_skipped: scopeResult.skipped,
+      scope_invalid: scopeResult.invalid,
+    };
+  }
+  if (seg[0] === "companies" && seg[2] === "scope" && m === "POST") {
+    const company = mockCompanies.find((item) => item.id === Number(seg[1]));
+    if (!company) throw new Error("企业不存在");
+    const reset = b.reset === true;
+    const scopeResult = mockScopeRows(company.id, b.scope, reset ? [] : (company.scope ?? []));
+    if (reset && scopeResult.invalid > 0) throw new Error("企业范围包含无效规则，未覆盖原有范围");
+    company.scope = reset ? scopeResult.rows : [...(company.scope ?? []), ...scopeResult.rows];
+    return { added: scopeResult.rows.length, skipped: scopeResult.skipped, invalid: scopeResult.invalid };
+  }
+  if (seg[0] === "companies" && seg.length === 2 && m === "DELETE") {
+    const id = Number(seg[1]);
+    const index = mockCompanies.findIndex((item) => item.id === id);
+    if (index < 0) throw new Error("企业不存在");
+    mockCompanies.splice(index, 1);
+    let assetsDeleted = 0;
+    for (let assetIndex = mockAssets.length - 1; assetIndex >= 0; assetIndex--) {
+      const asset: Asset = mockAssets[assetIndex];
+      if (asset.company_id !== id) continue;
+      if (b.delete_assets === true) {
+        mockAssets.splice(assetIndex, 1);
+        assetsDeleted++;
+      } else {
+        delete asset.company_id;
+      }
+    }
+    return { deleted: 1, assets_deleted: assetsDeleted };
+  }
 
   // ── exploration ──
   if (path === "/exploration/frontier") return D.frontier;
   if (path === "/exploration/findings/stats") {
-    const vulnclasses = Array.from(new Set(D.findings.map((f) => f.vulnclass))).sort();
+    const vulnclasses = Array.from(new Set(mockFindings.map((f) => f.vulnclass))).sort();
     // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
-<<<<<<< Updated upstream
-    const taskMap = new Map<string, { description: string; count: number }>();
-    for (const f of D.findings) {
-=======
     const taskMap = new Map<string, { name: string; description: string; count: number }>();
     for (const f of mockFindings) {
->>>>>>> Stashed changes
       if (!f.task_id) continue;
       const owner = mockTasks.find((candidate) => candidate.id === f.task_id);
-      const cur = taskMap.get(f.task_id) ?? { name: owner?.name ?? "", description: f.task_description ?? "", count: 0 };
+      const cur = taskMap.get(f.task_id) ?? {
+        name: owner?.name ?? "",
+        description: f.task_description ?? "",
+        count: 0,
+      };
       cur.count++;
       taskMap.set(f.task_id, cur);
     }
     const tasks = Array.from(taskMap, ([id, v]) => ({ id, name: v.name, description: v.description, count: v.count }));
     return {
-      total: D.findings.length,
-      pending: D.findings.filter((f) => f.status === "pending").length,
-      critical: D.findings.filter((f) => f.severity === "critical").length,
-      high: D.findings.filter((f) => f.severity === "high").length,
-      medium: D.findings.filter((f) => f.severity === "medium").length,
-      low: D.findings.filter((f) => f.severity === "low").length,
+      total: mockFindings.length,
+      pending: mockFindings.filter((f) => f.status === "pending").length,
+      critical: mockFindings.filter((f) => f.severity === "critical").length,
+      high: mockFindings.filter((f) => f.severity === "high").length,
+      medium: mockFindings.filter((f) => f.severity === "medium").length,
+      low: mockFindings.filter((f) => f.severity === "low").length,
       vulnclasses,
       tasks,
     };
   }
-<<<<<<< Updated upstream
-=======
   if (path === "/exploration/findings/groups") {
     const severityOrder = { critical: 4, high: 3, medium: 2, low: 1 } as const;
     let list = mockFindings.slice();
@@ -555,38 +963,52 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       queued: false,
     };
   }
->>>>>>> Stashed changes
   // 单条 finding:GET 详情 / PATCH 改状态/严重度/名称/类别(demo 直接改内存对象)。
-  if (
-    seg[0] === "exploration" &&
-    seg[1] === "findings" &&
-    seg.length === 3 &&
-    seg[2] !== "stats"
-  ) {
-    const f = D.findings.find((x) => x.id === seg[2]);
+  if (seg[0] === "exploration" && seg[1] === "findings" && seg.length === 3 && seg[2] !== "stats") {
+    const f = mockFindings.find((x) => x.id === seg[2]);
     if (!f) return {};
     if (m === "PATCH") {
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
-      if (typeof b.severity === "string")
-        f.severity = b.severity as typeof f.severity;
+      if (typeof b.severity === "string") f.severity = b.severity as typeof f.severity;
       if (typeof b.name === "string") f.name = b.name;
       if (typeof b.vulnclass === "string") f.vulnclass = b.vulnclass;
     }
-    return { ...f, finding_id: f.id };
+    const contextTaskId = q.get("context_task");
+    const contextTask = contextTaskId ? mockTasks.find((item) => item.id === contextTaskId) : undefined;
+    const inherited = !!(
+      contextTask &&
+      f.task_id &&
+      f.task_id !== contextTask.id &&
+      contextTask.source_task_ids?.includes(f.task_id)
+    );
+    return {
+      ...f,
+      finding_id: f.id,
+      ...(inherited ? { inherited: true, source_task_id: f.task_id } : {}),
+    };
   }
   if (path === "/exploration/findings") {
     // finding_id=id：真后端用独立表行 id 作为状态/详情句柄,mock 里用自身 id 顶上。
     // report 仅详情接口返回,列表剥掉(与后端一致)。
-    const withFid = (f: (typeof D.findings)[number]) => ({
+    const withFid = (f: (typeof mockFindings)[number]) => ({
       ...f,
       report: undefined,
       finding_id: f.id,
     });
-    if (task) return D.findings.filter((f) => f.task_id === task).map(withFid);
+    if (task) {
+      const owner = mockTasks.find((item) => item.id === task);
+      const sources = new Set(owner?.source_task_ids ?? []);
+      return mockFindings
+        .filter((f) => f.task_id === task || (!!f.task_id && sources.has(f.task_id)))
+        .map((f) => ({
+          ...withFid(f),
+          ...(f.task_id !== task ? { inherited: true, source_task_id: f.task_id } : {}),
+        }));
+    }
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
-    if (!q.has("page") && !q.has("limit")) return D.findings.map(withFid);
+    if (!q.has("page") && !q.has("limit")) return mockFindings.map(withFid);
     const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
-    let list = D.findings.slice();
+    let list = mockFindings.slice();
     const fSev = q.get("severity");
     const fStatus = q.get("status");
     const fVuln = q.get("vulnclass");
@@ -594,14 +1016,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (fSev) list = list.filter((f) => f.severity === fSev);
     if (fStatus) list = list.filter((f) => f.status === fStatus);
     if (fVuln) list = list.filter((f) => f.vulnclass === fVuln);
-    if (fTask) list = list.filter((f) => f.task_id === fTask);
+    if (fTask === "__unassigned__") list = list.filter((f) => !f.task_id);
+    else if (fTask) list = list.filter((f) => f.task_id === fTask);
     list.sort((a, b) =>
       q.get("sort") === "severity"
         ? sev[b.severity] - sev[a.severity] || +new Date(b.ts) - +new Date(a.ts)
         : +new Date(b.ts) - +new Date(a.ts),
     );
-    const page = Number(q.get("page") ?? 1);
-    const pageSize = Number(q.get("limit") ?? 20);
+    const rawPage = Number(q.get("page") ?? 1);
+    const rawPageSize = Number(q.get("limit") ?? 20);
+    const page = Number.isFinite(rawPage) && rawPage > 0 ? Math.floor(rawPage) : 1;
+    const pageSize = Number.isFinite(rawPageSize) && rawPageSize > 0 ? Math.min(200, Math.floor(rawPageSize)) : 20;
     return {
       items: list.slice((page - 1) * pageSize, page * pageSize).map(withFid),
       total: list.length,
@@ -609,12 +1034,32 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       page_size: pageSize,
     };
   }
-  if (path === "/exploration/intents") return D.intents;
-  if (path === "/exploration/tokens") return { workers: D.tokenWorkers, total: D.tokenTotal };
+  if (path === "/exploration/intents") {
+    if (q.has("page")) {
+      const before = Number(q.get("before") ?? 0);
+      const limit = Math.max(1, Number(q.get("limit") ?? 300));
+      let list = mockIntents;
+      if (before > 0) list = list.filter((intent) => Number(intent.id.replace(/\D/g, "") || intent.id) < before);
+      return { items: list.slice(0, limit), has_more: list.length > limit };
+    }
+    return mockIntents;
+  }
+  if (path === "/exploration/tokens") {
+    const selectedTask = task ? mockTasks.find((item) => item.id === task) : undefined;
+    return {
+      workers: D.tokenWorkers,
+      sessions: D.tokenSessions,
+      total: selectedTask?.tokens ?? D.tokenTotal,
+    };
+  }
   if (path === "/exploration/graph") return D.explorationGraph;
   if (path === "/exploration/activity" && seg.length === 2) {
-    const items = D.activityForTask();
-    return { items, cursor: items.length ? items[items.length - 1].seq : 0 };
+    const since = Number(q.get("since") ?? 0);
+    const limit = Math.max(1, Number(q.get("limit") ?? 300));
+    const items = D.activityForTask()
+      .filter((item) => item.seq > since)
+      .slice(0, limit);
+    return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
   if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
     const a = D.activity.find((x) => x.seq === Number(seg[2]));
@@ -634,28 +1079,49 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings" && m === "PUT") return { ...D.settings, ...b };
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
   if (path === "/settings/python/detect") return { python_interpreter: "/usr/bin/python3" };
-  if (path === "/chat") return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
+  if (path === "/chat")
+    return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
   if (path === "/gc") return { removed: 0 };
 
   // ── 工具执行历史 ──
   if (path === "/commands" && m === "GET") return { commands: D.commandRecords, total: D.commandRecords.length };
 
   // ── LLM ──
-  if (path === "/llm/records" && m === "GET") return { records: D.llmRecords, total: D.llmRecords.length };
+  if (path === "/llm/records" && m === "GET") return { records: mockLLMRecords, total: mockLLMRecords.length };
   if (path === "/llm/records" && m === "DELETE") return { deleted: 0 };
-  if (path === "/llm/records/tasks") return { tasks: D.llmTasks };
-  if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") return D.llmRecordDetail(Number(seg[2]));
+  if (path === "/llm/records/tasks") {
+    const counts = new Map<string, number>();
+    for (const record of mockLLMRecords) {
+      if (record.task_id) counts.set(record.task_id, (counts.get(record.task_id) ?? 0) + 1);
+    }
+    return { tasks: [...counts].map(([task_id, count]) => ({ task_id, count })) };
+  }
+  if (seg[0] === "llm" && seg[1] === "records" && seg.length === 3 && m === "GET") {
+    return D.llmRecordDetail(Number(seg[2]), mockLLMRecords);
+  }
   if (path === "/llm" && m === "GET") return D.llmConfig;
   if (path === "/llm" && m === "POST") return { ok: true };
   if (path === "/llm/test") return { ok: true, latency_ms: 128, model: String(b.model ?? "claude-opus-4-8") };
   if (path === "/llm/profiles" && m === "GET") return { profiles: D.llmProfiles };
   if (path === "/llm/profiles" && m === "POST") return { id: Number(b.id) || 3 };
   if (path === "/llm/profiles/active") return { ok: true };
-  if (seg[0] === "llm" && seg[1] === "profiles" && seg.length === 3 && m === "DELETE") return { deleted: Number(seg[2]) };
+  if (path === "/llm/pool" && m === "GET") return D.llmPool;
+  if (path === "/llm/pool/reset")
+    return { ...D.llmPool, chain: D.llmPool.chain.map((c) => ({ ...c, state: "ok", fails: 0, cooldown_secs: 0 })) };
+  if (seg[0] === "llm" && seg[1] === "profiles" && seg.length === 3 && m === "DELETE")
+    return { deleted: Number(seg[2]) };
 
   // ── agents ──
   if (path === "/agents" && m === "GET") return { agents: D.agents };
-  if (path === "/agents" && m === "POST") return { id: "9", key: String(b.key ?? "custom"), name: String(b.name ?? ""), role: "custom", builtin: false, enabled: true };
+  if (path === "/agents" && m === "POST")
+    return {
+      id: "9",
+      key: String(b.key ?? "custom"),
+      name: String(b.name ?? ""),
+      role: "custom",
+      builtin: false,
+      enabled: true,
+    };
   if (seg[0] === "agents" && seg.length === 2 && m === "GET") return D.agentDetail(seg[1]);
   if (seg[0] === "agents" && seg[2] === "triggers" && m === "GET") return { triggers: [] };
   if (seg[0] === "agents" && seg[2] === "prompts") return { versions: D.agentDetail(seg[1]).versions };
@@ -665,8 +1131,43 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "agents" && seg[2] === "visibility" && m === "GET") return D.agentDetail(seg[1]).visibility;
 
   // ── conversations ──
-  if (path === "/conversations" && m === "GET") return { conversations: D.conversations };
-  if (path === "/conversations" && m === "POST") return { id: 3, agent_key: String(b.agent_key ?? "mainagent"), title: String(b.title ?? "新会话"), created_at: "2026-07-26T04:00:00Z", updated_at: "2026-07-26T04:00:00Z" };
+  if (path === "/conversations" && m === "GET") {
+    sortMockConversations();
+    return { conversations: structuredClone(mockConversations) };
+  }
+  if (path === "/conversations" && m === "POST") {
+    const now = new Date().toISOString();
+    const title = String(b.title ?? "").trim() || "新对话";
+    const conversation: Conversation = {
+      id: mockConversations.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+      agent_key: String(b.agent_key ?? "mainagent"),
+      title,
+      llm_profile_id: typeof b.llm_profile_id === "number" ? b.llm_profile_id : undefined,
+      pinned: false,
+      created_at: now,
+      updated_at: now,
+    };
+    mockConversations.unshift(conversation);
+    return structuredClone(conversation);
+  }
+  if (seg[0] === "conversations" && seg.length === 2 && m === "PATCH") {
+    const conversation = mockConversations.find((item) => item.id === Number(seg[1]));
+    if (!conversation) return {};
+    if (typeof b.title === "string") conversation.title = b.title.trim();
+    if (typeof b.pinned === "boolean") {
+      conversation.pinned = b.pinned;
+      conversation.pinned_at = b.pinned ? (conversation.pinned_at ?? new Date().toISOString()) : null;
+    }
+    conversation.updated_at = new Date().toISOString();
+    sortMockConversations();
+    return structuredClone(conversation);
+  }
+  if (seg[0] === "conversations" && seg.length === 2 && m === "DELETE") {
+    const id = Number(seg[1]);
+    const index = mockConversations.findIndex((item) => item.id === id);
+    if (index >= 0) mockConversations.splice(index, 1);
+    return { deleted: id };
+  }
   if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 3 && m === "GET") {
     const items = D.conversationMessages[Number(seg[1])] ?? [];
     return { items, cursor: items.length ? items[items.length - 1].seq : 0, running: false };
@@ -692,13 +1193,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "mcp" && seg.length === 2 && m === "DELETE") return { deleted: Number(seg[1]) };
 
   // ── scopesentry（demo：未配置）──
-  if (path === "/sync/scopesentry/status") return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
+  if (path === "/sync/scopesentry/status")
+    return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
   if (path === "/sync/scopesentry/projects") return { projects: [], tag: {} };
   if (path === "/sync/scopesentry/tasks") return { tasks: [] };
   if (path === "/sync/scopesentry/sync") return { synced: {}, companies: null, warnings: null, errors: null };
 
   // ── skills ──
   if (path === "/skills" && m === "GET") return { skills: D.skills };
+  if (path === "/skills/missing") return { missing: D.missingSkills };
+  if (seg[0] === "skills" && seg[2] === "usage") return { calls: D.skillCalls };
   if (path === "/skills" && m === "POST") return { name: String(b.name ?? "new-skill") };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length === 3) return { files: ["SKILL.md"] };
   if (seg[0] === "skills" && seg[2] === "files" && seg.length >= 4)
@@ -709,7 +1213,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── intercept ──
   if (path === "/intercept/rules" && m === "GET") return { rules: D.interceptRules };
-  if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle") return { ok: true, enabled: b.enabled ?? true };
+  if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle")
+    return { ok: true, enabled: b.enabled ?? true };
   if (path === "/intercept/pending" && m === "GET") return { pending: D.interceptPending };
   if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") return { ok: true };
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
@@ -734,5 +1239,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (["POST", "PUT", "PATCH", "DELETE"].includes(m)) return { ok: true };
 
   // ── 读兜底：集合类给 []，其余 {} ──
-  return /(\/(tasks|profiles|conversations|rules|history|projects|tokens|agents|servers|skills|tools|findings|intents)s?$)|s$/.test(path) ? [] : {};
+  return /(\/(tasks|profiles|conversations|rules|history|projects|tokens|agents|servers|skills|tools|findings|intents)s?$)|s$/.test(
+    path,
+  )
+    ? []
+    : {};
 }
