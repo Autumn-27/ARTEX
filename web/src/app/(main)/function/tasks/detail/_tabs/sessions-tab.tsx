@@ -443,11 +443,12 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   if (displayAssets.length === 0) return null;
 
   const first = displayAssets[0];
-  const firstLabel = truncateWorkerAssetLabel(first.label || `#${first.asset_id}`);
+  const firstRawLabel = first.label.trim() || `#${first.asset_id}`;
+  const firstLabel = truncateWorkerAssetLabel(firstRawLabel);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="outline" className="max-w-60 shrink-0 font-normal" title={first.label}>
+        <Badge variant="outline" className="max-w-60 shrink-0 font-normal" title={firstRawLabel}>
           <span className="truncate">当前资产：{firstLabel}</span>
           {displayAssets.length > 1 && <span className="shrink-0 tabular-nums">+{displayAssets.length - 1}</span>}
         </Badge>
@@ -456,7 +457,7 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
         <div className="flex flex-col gap-2">
           {displayAssets.map((asset) => (
             <div key={`${asset.intent_id}-${asset.asset_id}`} className="min-w-0">
-              <div className="break-all font-mono text-xs">{asset.label || `#${asset.asset_id}`}</div>
+              <div className="break-all font-mono text-xs">{asset.label.trim() || `#${asset.asset_id}`}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 {taskAssetTypeLabel(asset.type)} · {taskAssetSourceLabel(asset.source)}
                 {asset.inherited ? ` · 来源任务 #${asset.source_task_id}` : ""}
