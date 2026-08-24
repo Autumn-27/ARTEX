@@ -8,16 +8,19 @@ import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
 
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
+import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
 import { FindingLineageView } from "./lineage";
 import { statusMeta } from "@/lib/status";
@@ -63,6 +66,7 @@ function FieldRow({
 function FindingDetailInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
+  const contextTaskId = searchParams.get("context_task") ?? "";
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
@@ -73,18 +77,18 @@ function FindingDetailInner() {
       return;
     }
     api
-      .getFinding(id)
+      .getFinding(id, contextTaskId || undefined)
       .then((f) => setFinding(f))
       .catch(() => setFinding(null))
       .finally(() => setLoaded(true));
-  }, [id]);
+  }, [contextTaskId, id]);
   React.useEffect(() => {
     load();
   }, [load]);
 
   const changeSeverity = React.useCallback(
     async (next: Severity) => {
-      if (!finding || next === finding.severity) return;
+      if (!finding || finding.inherited || next === finding.severity) return;
       const prev = finding.severity;
       setFinding({ ...finding, severity: next });
       try {
@@ -101,7 +105,7 @@ function FindingDetailInner() {
 
   const changeStatus = React.useCallback(
     async (next: FindingStatus) => {
-      if (!finding || next === finding.status) return;
+      if (!finding || finding.inherited || next === finding.status) return;
       const prev = finding.status;
       setFinding({ ...finding, status: next });
       try {
@@ -160,6 +164,11 @@ function FindingDetailInner() {
           <Separator orientation="vertical" className="mx-1 h-4" />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
+          {finding.inherited && finding.source_task_id && (
+            <Badge variant="outline">
+              来源任务 #{finding.source_task_id} · 只读
+            </Badge>
+          )}
         </div>
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
@@ -200,8 +209,11 @@ function FindingDetailInner() {
               </Card>
               {/* 证据下方：详细报告(Markdown 渲染) */}
               <Card>
-                <CardHeader>
+                <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm">详细报告</CardTitle>
+                  {finding.report && (
+                    <CopyButton text={finding.report} successMessage="已复制详细报告" />
+                  )}
                 </CardHeader>
                 <CardContent>
                   {finding.report ? (
@@ -228,48 +240,60 @@ function FindingDetailInner() {
                   </code>
                 </FieldRow>
 
-                {/* 严重等级（可改） */}
+                {/* 严重等级 */}
                 <FieldRow label="严重等级">
-                  <Select
-                    value={finding.severity}
-                    onValueChange={(v) => changeSeverity(v as Severity)}
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0"
+                  {finding.inherited ? (
+                    <StatusBadge domain="severity" value={finding.severity} dot />
+                  ) : (
+                    <Select
+                      value={finding.severity}
+                      onValueChange={(v) => changeSeverity(v as Severity)}
                     >
-                      <StatusBadge domain="severity" value={finding.severity} dot />
-                    </SelectTrigger>
-                    <SelectContent position="popper" align="end">
-                      {SEVERITIES.map((sv) => (
-                        <SelectItem key={sv} value={sv}>
-                          {statusMeta("severity", sv).label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                      <SelectTrigger
+                        size="sm"
+                        className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0"
+                      >
+                        <StatusBadge domain="severity" value={finding.severity} dot />
+                      </SelectTrigger>
+                      <SelectContent position="popper" align="end">
+                        <SelectGroup>
+                          {SEVERITIES.map((sv) => (
+                            <SelectItem key={sv} value={sv}>
+                              {statusMeta("severity", sv).label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  )}
                 </FieldRow>
 
-                {/* 处理状态（可改） */}
+                {/* 处理状态 */}
                 <FieldRow label="处理状态">
-                  <Select
-                    value={finding.status}
-                    onValueChange={(v) => changeStatus(v as FindingStatus)}
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0"
+                  {finding.inherited ? (
+                    <StatusBadge domain="finding" value={finding.status} dot />
+                  ) : (
+                    <Select
+                      value={finding.status}
+                      onValueChange={(v) => changeStatus(v as FindingStatus)}
                     >
-                      <StatusBadge domain="finding" value={finding.status} dot />
-                    </SelectTrigger>
-                    <SelectContent position="popper" align="end">
-                      {FINDING_STATUSES.map((st) => (
-                        <SelectItem key={st} value={st}>
-                          {statusMeta("finding", st).label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                      <SelectTrigger
+                        size="sm"
+                        className="h-7 w-auto border-none px-1 shadow-none focus-visible:ring-0"
+                      >
+                        <StatusBadge domain="finding" value={finding.status} dot />
+                      </SelectTrigger>
+                      <SelectContent position="popper" align="end">
+                        <SelectGroup>
+                          {FINDING_STATUSES.map((st) => (
+                            <SelectItem key={st} value={st}>
+                              {statusMeta("finding", st).label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  )}
                 </FieldRow>
 
                 {/* 漏洞类型 */}

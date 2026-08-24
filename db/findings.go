@@ -3,13 +3,15 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// DBFinding is a row in the standalone findings table (persists across task deletion).
+// DBFinding is a row in the standalone findings table. It persists across task
+// deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
 	ID              int64
 	TaskID          *int64
@@ -146,6 +148,11 @@ type FindingFilter struct {
 	Sort      string // "severity" | "time"
 }
 
+// FindingUnassignedTask is the task filter sentinel for findings whose task is
+// absent. That includes rows created without a task and rows retained after their
+// originating task was deleted (the findings FK is ON DELETE SET NULL).
+const FindingUnassignedTask = "__unassigned__"
+
 // where builds the WHERE clause (shared by the page and count queries) plus its
 // positional args. Only equality filters, all parameterized.
 func (f FindingFilter) where() (string, []any) {
@@ -162,7 +169,9 @@ func (f FindingFilter) where() (string, []any) {
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
 	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
-	if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
+	if f.TaskID == FindingUnassignedTask {
+		conds = append(conds, "(f.task_id IS NULL OR t.id IS NULL)")
+	} else if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
 		args = append(args, tid)
 		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
 	}
@@ -184,14 +193,19 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	where, args := f.where()
 
 	var total int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM findings f`+where, args...).Scan(&total); err != nil {
+	if err := d.QueryRow(`SELECT COUNT(*) FROM findings f LEFT JOIN tasks t ON f.task_id=t.id`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	// Avoid overflowing (page-1)*pageSize for an arbitrarily large page number.
+	// Once the requested page is beyond the exact count, no data query is needed.
+	if total == 0 || page > (total-1)/pageSize+1 {
+		return []*DBFinding{}, total, nil
+	}
 
-	order := "f.created_at DESC"
+	order := "f.created_at DESC, f.id DESC"
 	if f.Sort == "severity" {
 		// critical > high > medium > low > 其它, then newest first.
-		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
+		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	q := fmt.Sprintf(`
@@ -209,8 +223,6 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	return out, total, err
 }
 
-<<<<<<< Updated upstream
-=======
 // FindingGroup is one task-level bucket in the global findings view. TaskID is
 // nil for both findings that never had a task and findings retained after task
 // deletion; those records intentionally share one "unassigned/deleted" bucket.
@@ -446,7 +458,6 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	return out, rows.Err()
 }
 
->>>>>>> Stashed changes
 // FindingStats is the whole-table aggregate powering the 发现 page's stat cards
 // and vuln-class filter — computed server-side so it stays exact regardless of
 // pagination.
@@ -545,6 +556,38 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
 	return f, nil
+}
+
+// DeleteFinding removes a finding entirely: the standalone findings row and its
+// originating exploration node (kind='finding'), so it disappears from the findings
+// list, the per-task 发现 Tab, and the exploration graph alike. Deleting the node
+// cascades its edges + node_assets and nulls any activity referencing it. Returns
+// rows affected (0 = no finding with that id).
+func (d *DB) DeleteFinding(id int64) (int64, error) {
+	var nodeID *int64
+	err := d.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if nodeID != nil {
+		// best-effort: the finding is already gone; a stray node must not fail the op.
+		_, _ = d.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, *nodeID)
+	}
+	return 1, nil
+}
+
+// DeleteFindingsByTask removes all findings rows of a task. The originating
+// exploration finding nodes are cascade-deleted separately when the task's
+// exploration subgraph is dropped. Returns rows deleted.
+func (d *DB) DeleteFindingsByTask(taskID int64) (int64, error) {
+	res, err := d.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // SetFindingStatus updates one finding's triage state. Returns rows affected.

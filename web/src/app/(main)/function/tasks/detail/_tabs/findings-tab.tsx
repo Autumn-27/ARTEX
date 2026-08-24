@@ -5,10 +5,12 @@ import Link from "next/link";
 import { ArrowUpRightIcon, ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/status-badge";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
 } from "@/components/ui/select";
@@ -30,9 +32,11 @@ const FINDING_STATUSES: FindingStatus[] = [
 
 function Row({
   f,
+  contextTaskId,
   onStatus,
 }: {
   f: Finding;
+  contextTaskId: string;
   onStatus: (f: Finding, next: FindingStatus) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -51,10 +55,17 @@ function Row({
             )}
           />
           <StatusBadge domain="severity" value={f.severity} dot />
-          <div className="flex min-w-0 flex-col">
-            <span className="truncate font-medium">
-              {f.name || f.vulnclass || "未分类"}
-            </span>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate font-medium">
+                {f.name || f.vulnclass || "未分类"}
+              </span>
+              {f.inherited && f.source_task_id && (
+                <Badge variant="outline" className="shrink-0">
+                  来源 #{f.source_task_id} · 只读
+                </Badge>
+              )}
+            </div>
             <span className="truncate text-xs text-muted-foreground">
               {f.summary}
             </span>
@@ -78,7 +89,7 @@ function Row({
             )}
           </div>
         )}
-        {f.finding_id ? (
+        {f.finding_id && !f.inherited ? (
           <Select
             value={f.status}
             onValueChange={(v) => onStatus(f, v as FindingStatus)}
@@ -90,11 +101,13 @@ function Row({
               <StatusBadge domain="finding" value={f.status} dot />
             </SelectTrigger>
             <SelectContent position="popper" align="end">
-              {FINDING_STATUSES.map((st) => (
-                <SelectItem key={st} value={st}>
-                  {statusMeta("finding", st).label}
-                </SelectItem>
-              ))}
+              <SelectGroup>
+                {FINDING_STATUSES.map((st) => (
+                  <SelectItem key={st} value={st}>
+                    {statusMeta("finding", st).label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
         ) : (
@@ -105,7 +118,11 @@ function Row({
         </span>
         {f.finding_id && (
           <Link
-            href={`/function/findings/detail?id=${f.finding_id}`}
+            href={
+              f.inherited
+                ? `/function/findings/detail?id=${f.finding_id}&context_task=${contextTaskId}`
+                : `/function/findings/detail?id=${f.finding_id}`
+            }
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
             title="查看漏洞详情"
           >
@@ -151,7 +168,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
 
   const onStatus = React.useCallback(
     async (f: Finding, next: FindingStatus) => {
-      if (!f.finding_id || next === f.status) return;
+      if (f.inherited || !f.finding_id || next === f.status) return;
       const prev = f.status;
       setFindings((cur) =>
         cur.map((x) => (x.id === f.id ? { ...x, status: next } : x)),
@@ -170,7 +187,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
   );
 
   const items = findings
-    .filter((f) => f.task_id === taskId)
+    .filter((f) => f.task_id === taskId || f.inherited)
     .sort((a, b) => {
       const order = { critical: 0, high: 1, medium: 2, low: 3 };
       return order[a.severity] - order[b.severity];
@@ -180,11 +197,11 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     <Card className="overflow-hidden py-0">
       <CardContent className="px-0">
         {items.map((f) => (
-          <Row key={f.id} f={f} onStatus={onStatus} />
+          <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
         ))}
         {items.length === 0 && (
           <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-            本任务暂无确认发现。
+            本任务及直接关联任务暂无确认发现。
           </p>
         )}
       </CardContent>
