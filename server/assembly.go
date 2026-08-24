@@ -137,7 +137,11 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				}
 				return actool.RenderDeferredToolsBlock(reveal)
 			}
-			extra = append(extra, reg.Tool())
+			// Attribution for the usage ledger: ToolAugment only gets (ctx, agentKey),
+			// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
+			// once here — this closure is rebuilt per run, so the captured value always
+			// belongs to this run.
+			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, agent.RunInfoFrom(ctx)))
 		}
 
 		// host tools (traffic / orchestration / custom) — added to every agent's base;
