@@ -6,9 +6,9 @@ import { usePathname } from "next/navigation";
 
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { useCurrentUser } from "@/hooks/use-current-user";
 
 import { AccountSwitcher } from "./sidebar/account-switcher";
 import { LayoutControls } from "./sidebar/layout-controls";
@@ -35,7 +35,7 @@ export function MainContent({ children }: { children: ReactNode }) {
   useEffect(() => {
     api
       .health()
-      .then((h) => setVersion(h.version ?? ""))
+      .then((h) => setVersion((h.version ?? "").replace(/^v(?=\d)/, "")))
       .catch(() => setVersion(""));
   }, []);
 
@@ -62,7 +62,7 @@ export function MainContent({ children }: { children: ReactNode }) {
           </div>
           <div className="flex items-center gap-2">
             {version && (
-              <span className="text-muted-foreground text-xs font-medium tabular-nums">版本·v{version}</span>
+              <span className="font-medium text-muted-foreground text-xs tabular-nums">版本 · {version}</span>
             )}
             <LayoutControls />
             <ThemeSwitcher />
