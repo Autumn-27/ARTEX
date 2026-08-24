@@ -25,6 +25,7 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
+<<<<<<< Updated upstream
 	ID           string `json:"id"`
 	ExpID        int64  `json:"exploration_id"`
 	Description  string `json:"description"`
@@ -43,6 +44,43 @@ type Task struct {
 	Store          *pgdb.ExplorationStore `json:"-"`
 	Guard          *guard.Guard           `json:"-"`
 	notify         chan struct{}
+=======
+	ID          string `json:"id"`
+	ExpID       int64  `json:"exploration_id"`
+	Name        string `json:"name"` // 可选任务名称;空=未命名
+	Description string `json:"description"`
+	Goal        string `json:"goal"`
+	CreatedAt   int64  `json:"created_at"`
+	CompletedAt int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused      bool   `json:"paused"`
+	Queued      bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
+	// finer than CreatedAt so several tasks enqueued in the same second retain
+	// their real FIFO order.
+	QueuedAt           int64   `json:"queued_at,omitempty"`
+	QueueMode          string  `json:"queue_mode,omitempty"`
+	ParentRef          string  `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
+	LLMProfileID       *int64  `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
+	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
+	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64   `json:"-"`
+	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64 `json:"company_ids,omitempty"`
+	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
+	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
+	TimeoutSeconds       int                    `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
+	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
+	Store                *pgdb.ExplorationStore `json:"-"`
+	Guard                *guard.Guard           `json:"-"`
+	notify               chan struct{}
+	lifecycleMu          sync.RWMutex
+	llmMu                sync.RWMutex
+>>>>>>> Stashed changes
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
@@ -457,11 +495,18 @@ func unixOrZero(t *time.Time) int64 {
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
+<<<<<<< Updated upstream
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused,
+=======
+		Name:        pt.Name,
+		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
+		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
+>>>>>>> Stashed changes
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:   pt.LLMProfileID,
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
-		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		CoverageEnabled: pt.CoverageEnabled,
+		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }
@@ -731,6 +776,46 @@ func (t *Task) NotifyGoal(texts []string) {
 	t.trigMu.Lock()
 	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal", Goals: texts})
 	t.trigMu.Unlock()
+	t.Notify()
+}
+
+// NotifyGoalDeleted records that the human deleted a goal (via 总览的目标管理), then
+// wakes the planner so the next round spells out which goal was removed. The event
+// survives an early-returning terminal round (drain happens after the gate).
+func (t *Task) NotifyGoalDeleted(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal_deleted", Detail: text})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
+// NotifyGoalEdited records that the human edited a goal (via 总览的目标管理), then wakes
+// the planner so the next round spells out the old→new change. The event survives an
+// early-returning terminal round (drain happens after the gate).
+func (t *Task) NotifyGoalEdited(oldText, newText string) {
+	oldText, newText = strings.TrimSpace(oldText), strings.TrimSpace(newText)
+	if newText == "" {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal_edited", OldGoal: oldText, NewGoal: newText})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
+// NotifyCancelled records that the human deleted intentID (reason = 删除原因), then
+// wakes the planner so the next round spells out which intent was removed and why.
+// The intent is stopped (not deleted); the reason is attached to it as a fact.
+func (t *Task) NotifyCancelled(intentID int64, reason string) {
+	if intentID > 0 {
+		t.trigMu.Lock()
+		t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "cancelled", IntentID: intentID, Detail: reason})
+		t.trigMu.Unlock()
+	}
 	t.Notify()
 }
 

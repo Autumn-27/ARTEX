@@ -6,6 +6,7 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
   id: string;
+  name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   description: string;
   goal: string;
   status: TaskStatus;
@@ -24,6 +25,44 @@ export interface Task {
   engine_mode?: EngineMode;
   tokens?: TokenTotal; // whole-task token consumption
   llm_profile_id?: number; // LLM profile used; absent = default profile
+<<<<<<< Updated upstream
+=======
+  llm_profile_ids?: number[]; // ordered task-level failover chain
+  active_llm_profile_id?: number; // profile used by the next LLM call
+  llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
+  llm_failover_reason?: string;
+  source_task_ids?: string[]; // directly related tasks inherited as read-only context
+  company_ids?: number[]; // associated company asset scopes available as task context
+  coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+}
+
+export interface TaskTemplate {
+  id: number;
+  name: string;
+  description: string;
+  goal: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeleteTaskOptions {
+  delete_assets: boolean;
+  delete_traffic: boolean;
+  delete_files: boolean;
+  delete_findings: boolean;
+  delete_llm_records: boolean;
+}
+
+export interface DeleteTaskResult {
+  deleted: string;
+  assets_deleted: number;
+  assets_detached: number;
+  traffic_deleted: number;
+  files_deleted: boolean;
+  findings_deleted: number;
+  llm_records_deleted: number;
+  cleanup_warning?: string;
+>>>>>>> Stashed changes
 }
 
 // ---- Asset graph (global, shared across tasks) ----
@@ -198,6 +237,30 @@ export interface WorkspaceFile {
   content?: string;
 }
 
+<<<<<<< Updated upstream
+=======
+// 任务测试范围的一条（覆盖度分母 + 授权边界）。
+export interface TaskScopeRow {
+  id: number;
+  task_id: number;
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr";
+  company_id?: number;
+  company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
+  domain?: string;
+  net?: string;
+  source: "auto" | "agent" | "manual";
+  reason?: string;
+}
+
+export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
+
+// 新增企业时提交的结构化资产范围规则。
+export interface CompanyScopeRule {
+  kind: CompanyScopeKind;
+  value: string;
+}
+
+>>>>>>> Stashed changes
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;
@@ -234,6 +297,26 @@ export interface TaskNode {
   state: string; // GoalState | IntentState | FindingState | HintState
   origin: string;
   ts: string;
+}
+
+// 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
+export interface TaskGoal {
+  id: string;
+  text: string;
+  vulnclass?: string;
+  state: string; // GoalState
+  origin?: string;
+  ts: string;
+}
+
+// 约束管理卡片用的操作约束(allow=允许 / deny=禁止)。
+export type ConstraintKind = "allow" | "deny";
+export interface TaskConstraint {
+  id: string;
+  kind: ConstraintKind;
+  text: string;
+  origin?: string;
+  ts?: string;
 }
 
 // ---- Findings ----
@@ -283,6 +366,37 @@ export interface FindingsPage {
   page_size: number;
 }
 
+<<<<<<< Updated upstream
+=======
+export interface FindingGroup {
+  task_id: string | number | null;
+  task_name?: string; // 可选任务名称;空/缺省=未命名
+  task_description: string;
+  task_status: string;
+  count: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  last_found_at: string;
+}
+
+export interface FindingGroupsPage {
+  items: FindingGroup[];
+  total: number;
+  finding_total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface FindingDeepenResponse {
+  task_id: string;
+  intent_id: string;
+  state: IntentState;
+  queued: boolean;
+}
+
+>>>>>>> Stashed changes
 // FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
 export interface FindingStats {
   total: number;
@@ -298,7 +412,12 @@ export interface FindingStats {
 // FindingTaskOption 是发现页「按任务」筛选下拉的一项:有漏洞的任务(描述为空表示任务已删除,
 // 前端回退展示 id)及其漏洞条数。
 export interface FindingTaskOption {
+<<<<<<< Updated upstream
   id: number;
+=======
+  id: string | number;
+  name?: string; // 可选任务名称;空/缺省=未命名
+>>>>>>> Stashed changes
   description: string;
   count: number;
 }
@@ -498,6 +617,20 @@ export interface Settings {
   web_search_proxy?: string;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
+<<<<<<< Updated upstream
+=======
+  // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
+  task_concurrency_enabled?: boolean; // 默认 false
+  task_concurrency_limit?: number; // 开启后默认 5
+  // LLM 轮询(故障转移)。默认关；开启后「未指定模型」的 agent 在当前配置不可用
+  // （余额不足/key 失效/限流/服务异常）时自动切到下一个配置。
+  llm_pool_enabled?: boolean; // 默认 false
+  // 绑定了指定配置的 agent/任务失败时是否也回落到轮询链。默认 false = 绑定即独占。
+  llm_pool_bind_fallback?: boolean;
+  // 操作约束注入范围(默认都开):把任务的 allow/deny 约束拼进对应 agent 的系统提示。
+  constraints_inject_planner?: boolean;
+  constraints_inject_worker?: boolean;
+>>>>>>> Stashed changes
 }
 
 // ---- LLM config ----
@@ -664,8 +797,20 @@ export interface InterceptPending {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tool_input: Record<string, any>;
   status: "pending" | "allowed" | "denied" | "timeout";
+  reason: string; // 规则 message 或模型判定理由(模型判定带 [模型] 前缀)
   decided_at?: string;
   created_at: string;
+}
+
+// JudgeConfig: 模型兜底审批(仅当没有任何拦截规则命中时由模型判断)的全局配置。
+export interface JudgeConfig {
+  enabled: boolean;
+  profile_id: number; // 0 = 跟随激活/默认配置
+  prompt: string; // 判定提示词;GET 未设置时后端回填内置模板全文
+  timeout_seconds: number; // 模型调用超时
+  fail_action: "allow" | "ask" | "deny"; // 模型出错/超时/不可解析时的回退
+  ask_timeout_seconds: number; // 模型判 ask 转人工后的审批等待超时
+  ask_timeout_action: "allow" | "deny"; // 审批超时后的默认动作
 }
 
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.

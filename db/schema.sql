@@ -168,6 +168,21 @@ CREATE TABLE IF NOT EXISTS exploration_anchors (
 );
 CREATE INDEX IF NOT EXISTS idx_anchor_asset ON exploration_anchors(asset_id);
 
+-- task_constraints: operator-authored operation constraints (allow/deny) for a task.
+-- Extracted by the goals decomposer at round 0 (from goal/description), editable at
+-- runtime by the main agent + 总览「约束管理」. Injected into the planner/worker system
+-- prompt each round (config-gated) to keep exploration within the operator's boundary.
+CREATE TABLE IF NOT EXISTS task_constraints (
+    id             BIGSERIAL PRIMARY KEY,
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('allow','deny')),
+    text           TEXT NOT NULL,
+    origin         TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_constraints_exp ON task_constraints(exploration_id);
+
 CREATE TABLE IF NOT EXISTS activity (
     id                 BIGSERIAL PRIMARY KEY,
     exploration_id     BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
@@ -227,6 +242,7 @@ CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
     description    TEXT NOT NULL,
     goal           TEXT NOT NULL,
     exploration_id BIGINT NOT NULL UNIQUE
@@ -239,6 +255,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     parent_ref     TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
     plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300,
+    coverage_enabled BOOLEAN NOT NULL DEFAULT true,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
     deleted_at     TIMESTAMPTZ,
@@ -253,6 +270,89 @@ CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 -- planner 心跳触发间隔(秒);补旧库。默认 300s(5min)。见 docs/planner-trigger-impl-plan.md
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300;
+<<<<<<< Updated upstream
+=======
+-- 并发上限挂起态;补旧库。true=因并发上限排队、等待空位自动启动。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false;
+-- 资产覆盖度功能开关;补旧库。true(默认)=计算/展示测试覆盖度、自动累积测试范围、
+-- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
+-- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- queued_at makes admission FIFO reflect the actual enqueue order rather than the
+-- task creation order. queue_mode distinguishes first bootstrap from resuming an
+-- exploration that already owns goals/history.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queue_mode TEXT NOT NULL DEFAULT '';
+-- 可选的任务名称;补旧库。空串=未命名,前端展示时回退到描述。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+
+-- Reusable task description/goal presets. nkey is the normalized, case-insensitive
+-- identity used to reject visually equivalent duplicate names.
+CREATE TABLE IF NOT EXISTS task_templates (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    nkey        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL,
+    goal        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_templates_updated ON task_templates(updated_at DESC, id DESC);
+DROP TRIGGER IF EXISTS trg_task_templates_upd ON task_templates;
+CREATE TRIGGER trg_task_templates_upd BEFORE UPDATE ON task_templates
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Direct, read-only task context inheritance. Relations are intentionally not
+-- recursive: a task sees only the source tasks explicitly chosen at creation.
+CREATE TABLE IF NOT EXISTS task_relations (
+    task_id        BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    source_task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, source_task_id),
+    CONSTRAINT ck_task_relation_not_self CHECK (task_id <> source_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_relations_source ON task_relations(source_task_id);
+
+-- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
+-- until the user saves/resets the chain, which clears all failure state.
+CREATE TABLE IF NOT EXISTS task_llm_profiles (
+    task_id          BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    profile_id       BIGINT NOT NULL REFERENCES llm_profiles(id) ON DELETE CASCADE,
+    position         INTEGER NOT NULL CHECK (position >= 0),
+    status           TEXT NOT NULL DEFAULT 'ready'
+                       CHECK (status IN ('ready','quota_exhausted')),
+    last_error       TEXT,
+    exhausted_at     TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, profile_id),
+    UNIQUE (task_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_order ON task_llm_profiles(task_id, position);
+CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_profile ON task_llm_profiles(profile_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_llm_profile ON tasks(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_active_llm_profile ON tasks(active_llm_profile_id) WHERE active_llm_profile_id IS NOT NULL;
+DROP TRIGGER IF EXISTS trg_task_llm_profiles_upd ON task_llm_profiles;
+CREATE TRIGGER trg_task_llm_profiles_upd BEFORE UPDATE ON task_llm_profiles
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- One-time-compatible backfill: old pinned tasks become one-entry chains. A user
+-- can still clear the chain later because the update path also clears the legacy
+-- llm_profile_id column, preventing this block from re-adding it on restart.
+INSERT INTO task_llm_profiles(task_id, profile_id, position)
+SELECT t.id, t.llm_profile_id, 0
+FROM tasks t
+WHERE t.llm_profile_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id)
+ON CONFLICT DO NOTHING;
+UPDATE tasks t
+SET active_llm_profile_id = t.llm_profile_id
+WHERE t.active_llm_profile_id IS NULL
+  AND t.llm_profile_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM task_llm_profiles x WHERE x.task_id=t.id AND x.profile_id=t.llm_profile_id);
+>>>>>>> Stashed changes
 
 -- 任务测试范围（资产覆盖度的分母 + 授权边界）。
 --   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围
@@ -526,11 +626,15 @@ CREATE TABLE IF NOT EXISTS intercept_pending (
     tool_input      JSONB NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'allowed', 'denied', 'timeout')),
+    -- 判定理由:规则命中时为规则 message;LLM 兜底判定时为模型给的简短理由(前缀 [模型])。
+    reason          TEXT NOT NULL DEFAULT '',
     decided_at      TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_status ON intercept_pending(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_task   ON intercept_pending(task_id, created_at DESC);
+-- 补旧库:reason 列(已发版,加列要带 IF NOT EXISTS)。
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
 
 -- =====================================================================
 -- L. 漏洞发现持久化

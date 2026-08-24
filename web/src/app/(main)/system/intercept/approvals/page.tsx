@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CheckIcon, ClipboardListIcon, RefreshCwIcon, ShieldAlertIcon, XIcon } from "lucide-react";
+import { BotIcon, CheckIcon, ClipboardListIcon, RefreshCwIcon, ShieldAlertIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import type { InterceptApprovalRow } from "@/lib/types";
@@ -38,6 +38,33 @@ function SourceCell({ row }: { row: InterceptApprovalRow }) {
     );
   }
   return <span className="text-muted-foreground">—</span>;
+}
+
+// MatchCell shows the matched rule name, or a "模型判定" badge when the decision
+// came from the LLM fallback judge (rule_id null). The reason (rule message or
+// model rationale, minus the [模型] prefix) is shown beneath.
+function MatchCell({ row }: { row: InterceptApprovalRow }) {
+  const isModel = !row.rule_id;
+  const reason = row.reason?.replace(/^\[模型\]\s*/, "").trim();
+  return (
+    <div className="space-y-0.5">
+      {row.rule_name ? (
+        <span className="text-sm">{row.rule_name}</span>
+      ) : isModel ? (
+        <Badge variant="outline" className="gap-1 border-violet-400 text-violet-600">
+          <BotIcon className="h-3 w-3" />
+          模型判定
+        </Badge>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      )}
+      {reason && (
+        <p className="line-clamp-1 text-[11px] text-muted-foreground" title={reason}>
+          {reason}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -155,11 +182,7 @@ export default function ApprovalsPage() {
                     <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">{row.tool_name}</code>
                   </TableCell>
                   <TableCell><SourceCell row={row} /></TableCell>
-                  <TableCell>
-                    {row.rule_name
-                      ? <span className="text-sm">{row.rule_name}</span>
-                      : <span className="text-muted-foreground">—</span>}
-                  </TableCell>
+                  <TableCell><MatchCell row={row} /></TableCell>
                   <TableCell className="w-48 max-w-[12rem]"><InputPreview input={row.tool_input} /></TableCell>
                   <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                   <TableCell className="text-right">
@@ -221,11 +244,7 @@ export default function ApprovalsPage() {
                     <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">{row.tool_name}</code>
                   </TableCell>
                   <TableCell><SourceCell row={row} /></TableCell>
-                  <TableCell>
-                    {row.rule_name
-                      ? <span className="text-sm">{row.rule_name}</span>
-                      : <span className="text-muted-foreground">—</span>}
-                  </TableCell>
+                  <TableCell><MatchCell row={row} /></TableCell>
                   <TableCell className="w-48 max-w-[12rem]"><InputPreview input={row.tool_input} /></TableCell>
                   <TableCell><StatusBadge status={row.status} /></TableCell>
                   <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{fmtTime(row.created_at)}</TableCell>

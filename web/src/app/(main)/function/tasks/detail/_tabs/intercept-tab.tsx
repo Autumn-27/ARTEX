@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CheckIcon, RefreshCwIcon, ShieldAlertIcon, XIcon } from "lucide-react";
+import { BotIcon, CheckIcon, RefreshCwIcon, ShieldAlertIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import type { InterceptApprovalRow } from "@/lib/types";
@@ -36,6 +36,30 @@ function StatusBadge({ status }: { status: string }) {
   if (status === "allowed") return <Badge variant="outline" className="border-emerald-500 text-emerald-600">已允许</Badge>;
   if (status === "denied")  return <Badge variant="outline" className="border-red-500 text-red-600">已拒绝</Badge>;
   return <Badge variant="outline" className="text-muted-foreground">已超时</Badge>;
+}
+
+function MatchCell({ row }: { row: InterceptApprovalRow }) {
+  const isModel = !row.rule_id;
+  const reason = row.reason?.replace(/^\[模型\]\s*/, "").trim();
+  return (
+    <div className="space-y-0.5">
+      {row.rule_name ? (
+        <span className="text-xs text-muted-foreground">{row.rule_name}</span>
+      ) : isModel ? (
+        <Badge variant="outline" className="gap-1 border-violet-400 text-violet-600">
+          <BotIcon className="h-3 w-3" />
+          模型判定
+        </Badge>
+      ) : (
+        <span className="text-xs text-muted-foreground">—</span>
+      )}
+      {reason && (
+        <p className="line-clamp-1 text-[11px] text-muted-foreground" title={reason}>
+          {reason}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function InputPreview({ input }: { input: Record<string, unknown> }) {
@@ -153,7 +177,7 @@ export function InterceptTab({ taskId }: Props) {
                   <TableCell>
                     <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">{row.tool_name}</code>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{row.rule_name || "—"}</TableCell>
+                  <TableCell><MatchCell row={row} /></TableCell>
                   <TableCell className="w-48 max-w-[12rem]"><InputPreview input={row.tool_input} /></TableCell>
                   <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{fmtTime(row.created_at)}</TableCell>
                   <TableCell className="text-right">
@@ -199,7 +223,7 @@ export function InterceptTab({ taskId }: Props) {
                 <TableCell>
                   <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">{row.tool_name}</code>
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{row.rule_name || "—"}</TableCell>
+                <TableCell><MatchCell row={row} /></TableCell>
                 <TableCell className="w-48 max-w-[12rem]"><InputPreview input={row.tool_input} /></TableCell>
                 <TableCell><StatusBadge status={row.status} /></TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{fmtTime(row.created_at)}</TableCell>

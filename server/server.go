@@ -230,6 +230,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if t := m.ActiveTask(); t != nil {
 		s.engine.Run(ctx, t)
 	}
+<<<<<<< Updated upstream
+=======
+	go s.reconcileConcurrency()
+	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+>>>>>>> Stashed changes
 	return s
 }
 
@@ -344,12 +349,14 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
-	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
-	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
-	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
+	pl.SetKillWork(s.engine.KillWork)                  // planner kill_work → terminate a running work
+	pl.SetSteerWork(s.engine.SteerWork)               // planner steer_work → inject mid-run course-correction
+	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())   // WebFetch through the recording proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
+	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
 	return pl, wk
 }
 
@@ -378,6 +385,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
+	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -581,6 +589,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspace/download", s.wsDownload)
 	mux.HandleFunc("POST /api/workspace/upload", s.wsUpload)
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
+<<<<<<< Updated upstream
+=======
+	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
+	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
+	mux.HandleFunc("GET /api/tasks/{id}/goals", s.listGoals)              // 目标管理:列出本任务全部目标
+	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)              // 目标管理:人工新增目标(复活任务)
+	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)      // 目标管理:修改目标(复活任务)
+	mux.HandleFunc("DELETE /api/tasks/{id}/goals/{gid}", s.deleteGoal)   // 目标管理:硬删除目标(不复活)
+	mux.HandleFunc("GET /api/tasks/{id}/constraints", s.listConstraints)           // 约束管理:列出本任务操作约束
+	mux.HandleFunc("POST /api/tasks/{id}/constraints", s.addConstraint)            // 约束管理:新增约束(不通知 planner)
+	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)    // 约束管理:修改约束
+	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint) // 约束管理:删除约束
+>>>>>>> Stashed changes
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)    // 重跑单条 blocked/exhausted/stopped 意图
 	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked) // 批量重跑本任务全部 blocked 意图
@@ -627,6 +648,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/traffic", s.deleteTraffic)
 	mux.HandleFunc("DELETE /api/traffic/hosts", s.deleteTrafficHosts)
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
+	mux.HandleFunc("GET /api/traffic/blob", s.getTrafficBlob)
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
@@ -734,6 +756,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/task/{taskID}", s.interceptListTaskItems)
 	mux.HandleFunc("GET /api/intercept/tool-config", s.interceptGetToolConfig)
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
+	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
+	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
@@ -915,8 +939,53 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	if err := s.m.SetTaskPaused(t.ID, paused); err != nil { // persist (survives restart)
 		log.Printf("[control] persist paused %s: %v", t.ID, err)
 	}
+<<<<<<< Updated upstream
 	log.Printf("[task] #%s %s", t.ID, map[bool]string{true: "已暂停", false: "已恢复"}[paused])
 	writeJSON(w, 200, map[string]any{"id": t.ID, "paused": paused})
+=======
+	writeJSON(w, 200, result)
+}
+
+// controlIntent pauses, resumes, or cancels one local worker intent. A running
+// worker is always stopped before state mutation/cleanup, preventing tool output
+// that arrives after the user action from recreating deleted blackboard records.
+func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		writeErr(w, 409, "任务正在删除，无法控制意图")
+		return
+	}
+	defer s.engine.decInflight(t.ID)
+
+	iid, err := strconv.ParseInt(r.PathValue("iid"), 10, 64)
+	if err != nil || iid <= 0 {
+		writeErr(w, 400, "bad intent id")
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"` // cancel(删除)时必填:删除原因,挂为事实并告知 planner
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	if req.Action != "pause" && req.Action != "resume" && req.Action != "cancel" {
+		writeErr(w, 400, "action must be pause|resume|cancel")
+		return
+	}
+
+	result, err := s.applyIntentControl(r.Context(), t, iid, req.Action, req.Reason)
+	if err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, result)
+>>>>>>> Stashed changes
 }
 
 // rerunIntent 重跑一条没跑成功的意图(blocked/exhausted/stopped):把它置回 open,worker
@@ -1073,12 +1142,26 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskReq struct {
+<<<<<<< Updated upstream
 	Description          string `json:"description"`
 	Goal                 string `json:"goal"`
 	LLMProfileID         *int64 `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
 	TimeoutSeconds       int    `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int    `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool  `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+=======
+	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
+	Description          string   `json:"description"`
+	Goal                 string   `json:"goal"`
+	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
+	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
+	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业资产范围;不复制资产或强制生成意图
+	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
+	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+>>>>>>> Stashed changes
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1103,6 +1186,24 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := s.m.CreateTask(req.Description, req.Goal, req.LLMProfileID, req.TimeoutSeconds, req.PlanHeartbeatSeconds)
 	if err != nil {
+<<<<<<< Updated upstream
+=======
+		writeErr(w, 400, fmt.Sprintf("关联企业无效：最多选择 %d 个有效企业", db.MaxTaskCompanyCount))
+		return
+	}
+	req.CompanyIDs = companyIDs
+	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
+		Name:          strings.TrimSpace(req.Name),
+		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
+		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
+		CoverageEnabled: req.CoverageEnabled,
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrTaskCompanyIDsInvalid) || errors.Is(err, db.ErrTaskCompanyNotFound) {
+			writeErr(w, 400, "关联企业不存在或无效")
+			return
+		}
+>>>>>>> Stashed changes
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -1258,12 +1359,18 @@ func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "asset store 未启用")
 		return
 	}
+	// 资产覆盖度功能关闭 → 短路返回 {enabled:false}，前端据此隐藏覆盖度卡片/进度。
+	if !t.CoverageEnabled {
+		writeJSON(w, 200, &db.Coverage{Enabled: false, ByType: []db.CoverageByType{}})
+		return
+	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	cov, err := as.TaskCoverage(taskID, t.ExpID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	cov.Enabled = true
 	writeJSON(w, 200, cov)
 }
 
@@ -2135,6 +2242,35 @@ func (s *Server) getTrafficExchange(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"req": req, "resp": resp})
 }
 
+// getTrafficBlob streams one oversized body by its sha256. Bodies past the inline
+// threshold are not carried by the exchange endpoint — it returns a preview plus
+// an "@blob sha256:<hash>" pointer — so this is how the UI fetches them whole.
+// Streamed rather than buffered: these are the bodies too large to hold in memory.
+func (s *Server) getTrafficBlob(w http.ResponseWriter, r *http.Request) {
+	tr := s.m.Traffic()
+	if tr == nil {
+		writeErr(w, 404, "traffic disabled")
+		return
+	}
+	hash := strings.TrimSpace(r.URL.Query().Get("hash"))
+	if hash == "" {
+		writeErr(w, 400, "missing hash")
+		return
+	}
+	f, size, err := tr.Blob(hash)
+	if err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", hash+".bin"))
+	if _, err := io.Copy(w, f); err != nil {
+		log.Printf("[traffic] 下载 blob %s 中断：%v", hash, err)
+	}
+}
+
 // getSettings returns the runtime app settings the UI toggles. The Brave API key
 // is returned as a boolean presence flag (brave_key_set), never the value itself,
 // so the UI can show "configured" without echoing the secret back.
@@ -2146,6 +2282,7 @@ func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	return map[string]any{
+<<<<<<< Updated upstream
 		"traffic_capture":    s.m.TrafficEnabled(),
 		"llm_record":         s.m.LLMRecordEnabled(),
 		"web_search_enabled": on,
@@ -2155,6 +2292,26 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_proxy":   proxy,                       // 独立出口代理(http/https/socks5)，空=直连
 		"python_interpreter": strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":            s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+=======
+		"traffic_capture":          s.m.TrafficEnabled(),
+		"llm_record":               s.m.LLMRecordEnabled(),
+		"web_search_enabled":       on,
+		"web_search_backend":       backend,
+		"brave_key_set":            strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
+		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
+		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
+		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
+		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
+		// 操作约束注入范围(默认都开):把本任务的 allow/deny 约束拼进对应 agent 的系统提示。
+		"constraints_inject_planner": s.constraintInjectPlanner(),
+		"constraints_inject_worker":  s.constraintInjectWorker(),
+>>>>>>> Stashed changes
 	}
 }
 
@@ -2188,10 +2345,35 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+<<<<<<< Updated upstream
+=======
+		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
+		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
+		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
+		// LLM 轮询(故障转移)开关 + 「绑定配置失败也兜底回轮询链」开关。两者都需要
+		// 重建 provider 链才生效，走下面的 changed → applyLLM 路径。
+		LLMPoolEnabled      *bool `json:"llm_pool_enabled"`
+		LLMPoolBindFallback *bool `json:"llm_pool_bind_fallback"`
+		// 操作约束注入范围开关(默认都开);即时生效(planner/worker 每轮读),无需重建 agent。
+		ConstraintsInjectPlanner *bool `json:"constraints_inject_planner"`
+		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
+>>>>>>> Stashed changes
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.ConstraintsInjectPlanner != nil {
+		if err := s.m.pg.SetBool(settingConstraintsInjectPlanner, *req.ConstraintsInjectPlanner); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.ConstraintsInjectWorker != nil {
+		if err := s.m.pg.SetBool(settingConstraintsInjectWorker, *req.ConstraintsInjectWorker); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.Workers != nil {
 		if err := s.m.SetWorkers(*req.Workers); err != nil {

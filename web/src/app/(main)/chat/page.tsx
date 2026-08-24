@@ -34,6 +34,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { api } from "@/lib/api";
+import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -111,11 +112,19 @@ function Composer({
 }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
+  // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
+  const sendMode = useChatSendMode();
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+<<<<<<< Updated upstream
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       onSend();
     }
+=======
+    if (!shouldSubmitOnKey(e, sendMode)) return;
+    e.preventDefault();
+    onSend();
+>>>>>>> Stashed changes
   }
   return (
     <div className="border-t p-3">

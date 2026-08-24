@@ -125,8 +125,13 @@ function TaskDetailInner() {
               <ArrowLeftIcon />
             </Link>
           </Button>
+<<<<<<< Updated upstream
           <h1 className="max-w-md truncate text-sm font-semibold" title={task.description}>
             {task.description}
+=======
+          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={task.name || task.description}>
+            {task.name || task.description}
+>>>>>>> Stashed changes
           </h1>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
             {task.id}
@@ -182,7 +187,7 @@ function TaskDetailInner() {
           <AssetsTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} />
+          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
         </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />

@@ -698,14 +698,14 @@ export const interceptRules: InterceptRule[] = [
 ];
 
 export const interceptPending: InterceptPending[] = [
-  { id: 101, rule_id: 1, task_id: "t-acme-web", agent_name: "work#3", tool_name: "bash", tool_input: { command: "mysqldump -h 203.0.113.10 -uroot acme_prod > /tmp/dump.sql" }, status: "pending", created_at: T("2026-07-26T03:58:00Z") },
+  { id: 101, rule_id: 1, task_id: "t-acme-web", agent_name: "work#3", tool_name: "bash", tool_input: { command: "mysqldump -h 203.0.113.10 -uroot acme_prod > /tmp/dump.sql" }, status: "pending", reason: "数据外泄门控：整库导出需人工审批", created_at: T("2026-07-26T03:58:00Z") },
 ];
 
 export const interceptHistory: InterceptApprovalRow[] = [
-  { id: 90, rule_id: 1, task_id: "t-acme-web", agent_name: "work#1", tool_name: "bash", tool_input: { command: "dd if=/dev/zero of=/tmp/x" }, status: "denied", created_at: T("2026-07-25T20:00:00Z"), decided_at: T("2026-07-25T20:01:00Z"), conv_title: "", conv_agent_key: "", rule_name: "破坏性命令需审批" },
-  { id: 91, task_id: "t-acme-api", agent_name: "work#2", tool_name: "bash", tool_input: { command: "nmap -sV 203.0.113.11" }, status: "allowed", created_at: T("2026-07-25T18:00:00Z"), decided_at: T("2026-07-25T18:00:05Z"), conv_title: "", conv_agent_key: "", rule_name: "" },
-  { id: 92, rule_id: 2, task_id: "t-acme-web", agent_name: "work#13", tool_name: "bash", tool_input: { command: "impacket-secretsdump acme.local/svc_deploy@10.10.10.10 -just-dc" }, status: "allowed", created_at: T("2026-07-26T00:05:00Z"), decided_at: T("2026-07-26T00:06:00Z"), conv_title: "", conv_agent_key: "", rule_name: "外发流量直接拒绝" },
-  { id: 93, rule_id: 1, task_id: "t-acme-web", agent_name: "work#7", tool_name: "bash", tool_input: { command: "java -jar JNDIExploit.jar -i <vps> -l 1389" }, status: "allowed", created_at: T("2026-07-25T15:14:00Z"), decided_at: T("2026-07-25T15:15:00Z"), conv_title: "", conv_agent_key: "", rule_name: "破坏性命令需审批" },
+  { id: 90, rule_id: 1, task_id: "t-acme-web", agent_name: "work#1", tool_name: "bash", tool_input: { command: "dd if=/dev/zero of=/tmp/x" }, status: "denied", reason: "破坏性命令需审批", created_at: T("2026-07-25T20:00:00Z"), decided_at: T("2026-07-25T20:01:00Z"), conv_title: "", conv_agent_key: "", rule_name: "破坏性命令需审批" },
+  { id: 91, task_id: "t-acme-api", agent_name: "work#2", tool_name: "bash", tool_input: { command: "rm -rf /var/www/html" }, status: "denied", reason: "[模型] 删除目标生产文件(D4)", created_at: T("2026-07-25T18:00:00Z"), decided_at: T("2026-07-25T18:00:05Z"), conv_title: "", conv_agent_key: "", rule_name: "" },
+  { id: 92, rule_id: 2, task_id: "t-acme-web", agent_name: "work#13", tool_name: "bash", tool_input: { command: "impacket-secretsdump acme.local/svc_deploy@10.10.10.10 -just-dc" }, status: "allowed", reason: "外发流量直接拒绝", created_at: T("2026-07-26T00:05:00Z"), decided_at: T("2026-07-26T00:06:00Z"), conv_title: "", conv_agent_key: "", rule_name: "外发流量直接拒绝" },
+  { id: 93, task_id: "t-acme-web", agent_name: "work#7", tool_name: "bash", tool_input: { command: "mysql -e \"DROP TABLE users_bak_0921\"" }, status: "pending", reason: "[模型] 疑似备份表,无法确定是否生产数据", created_at: T("2026-07-25T15:14:00Z"), conv_title: "", conv_agent_key: "", rule_name: "" },
 ];
 
 // ── Conversations (chat) ─────────────────────────────────────────────────────
@@ -753,6 +753,7 @@ export const conversationMessages: Record<number, Activity[]> = {
 
 // ── 资产测试覆盖度（/tasks/{id}/coverage）──
 export const coverage = {
+  enabled: true,
   scope_rows: 4,
   denominator: 26,
   tested: 11,

@@ -30,6 +30,7 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
+<<<<<<< Updated upstream
 	ID            string        `json:"id"`
 	ExplorationID int64         `json:"exploration_id"`
 	Description   string        `json:"description"`
@@ -45,6 +46,32 @@ type TaskDTO struct {
 	GoalsTotal    int           `json:"goals_total"`
 	GoalsMet      int           `json:"goals_met"`
 	LLMProfileID  *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
+=======
+	ID                 string        `json:"id"`
+	ExplorationID      int64         `json:"exploration_id"`
+	Name               string        `json:"name"` // 可选任务名称;空=未命名
+	Description        string        `json:"description"`
+	Goal               string        `json:"goal"`
+	Status             string        `json:"status"` // created | running | paused | done | failed
+	CreatedAt          string        `json:"created_at"`
+	CreatedUnix        int64         `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
+	CompletedAt        string        `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
+	CompletedUnix      int64         `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
+	LastActivity       int64         `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
+	Paused             bool          `json:"paused"`
+	Queued             bool          `json:"queued"`
+	Tokens             TokenTotalDTO `json:"tokens"` // whole-task token consumption
+	GoalsTotal         int           `json:"goals_total"`
+	GoalsMet           int           `json:"goals_met"`
+	LLMProfileID       *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
+	LLMProfileIDs      []int64       `json:"llm_profile_ids"`
+	ActiveLLMProfileID *int64        `json:"active_llm_profile_id,omitempty"`
+	LLMFailoverState   string        `json:"llm_failover_state"`
+	LLMFailoverReason  string        `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []string      `json:"source_task_ids"`
+	CompanyIDs         []int64       `json:"company_ids"`
+	CoverageEnabled    bool          `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+>>>>>>> Stashed changes
 }
 
 // TokenTotalDTO is a whole-task (all agents) token aggregate.
@@ -66,6 +93,7 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 
 func taskDTO(t *Task, status string) TaskDTO {
 	return TaskDTO{
+<<<<<<< Updated upstream
 		ID:            t.ID,
 		ExplorationID: t.ExpID,
 		Description:   t.Description,
@@ -77,6 +105,28 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CompletedUnix: t.CompletedAt,
 		Paused:        t.Paused,
 		LLMProfileID:  t.LLMProfileID,
+=======
+		ID:                 t.ID,
+		ExplorationID:      t.ExpID,
+		Name:               t.Name,
+		Description:        t.Description,
+		Goal:               t.Goal,
+		Status:             status,
+		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
+		CreatedUnix:        t.CreatedAt,
+		CompletedAt:        completedRFC(lifecycle.CompletedAt),
+		CompletedUnix:      lifecycle.CompletedAt,
+		Paused:             lifecycle.Paused,
+		Queued:             lifecycle.Queued,
+		LLMProfileID:       llmState.ProfileID,
+		LLMProfileIDs:      profileIDs,
+		ActiveLLMProfileID: llmState.ActiveID,
+		LLMFailoverState:   llmState.FailoverState,
+		LLMFailoverReason:  llmState.FailoverReason,
+		SourceTaskIDs:      sourceIDs,
+		CompanyIDs:         lifecycle.CompanyIDs,
+		CoverageEnabled:    t.CoverageEnabled,
+>>>>>>> Stashed changes
 	}
 }
 
@@ -139,6 +189,50 @@ func taskNodeDTO(n *db.Node) TaskNodeDTO {
 		Origin:   n.Origin,
 		TS:       rfc3339(n.CreatedAt),
 	}
+}
+
+// GoalDTO is a goal node with its payload unpacked into text/vulnclass — the shape
+// the 总览「目标管理」UI works with (vs TaskNodeDTO which carries raw payload JSON).
+type GoalDTO struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	VulnClass string `json:"vulnclass,omitempty"`
+	State     string `json:"state"`
+	Origin    string `json:"origin,omitempty"`
+	TS        string `json:"ts"`
+}
+
+func goalDTO(n *db.Node) GoalDTO {
+	var p struct {
+		Text      string `json:"text"`
+		VulnClass string `json:"vulnclass"`
+	}
+	_ = json.Unmarshal(n.Payload, &p)
+	return GoalDTO{
+		ID:        i64s(n.ID),
+		Text:      p.Text,
+		VulnClass: p.VulnClass,
+		State:     n.State,
+		Origin:    n.Origin,
+		TS:        rfc3339(n.CreatedAt),
+	}
+}
+
+func goalDTOs(in []*db.Node) []GoalDTO {
+	out := make([]GoalDTO, 0, len(in))
+	for _, n := range in {
+		out = append(out, goalDTO(n))
+	}
+	return out
+}
+
+// ConstraintDTO is one operation constraint (allow/deny) for the 总览「约束管理」UI.
+type ConstraintDTO struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"` // allow | deny
+	Text   string `json:"text"`
+	Origin string `json:"origin,omitempty"`
+	TS     string `json:"ts,omitempty"`
 }
 
 func taskNodeDTOs(in []*db.Node) []TaskNodeDTO {

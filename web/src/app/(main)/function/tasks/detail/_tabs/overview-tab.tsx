@@ -5,10 +5,24 @@ import {
   ActivityIcon,
   AlertTriangleIcon,
   BugIcon,
+  CheckIcon,
   ClockIcon,
+<<<<<<< Updated upstream
+=======
+  CoinsIcon,
+  ListChecksIcon,
+  PencilIcon,
+  PlusIcon,
+>>>>>>> Stashed changes
   RefreshCwIcon,
+  ShieldAlertIcon,
   ShieldCheckIcon,
   TargetIcon,
+<<<<<<< Updated upstream
+=======
+  Trash2Icon,
+  XIcon,
+>>>>>>> Stashed changes
 } from "lucide-react";
 import {
   Card,
@@ -21,7 +35,55 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
+<<<<<<< Updated upstream
 import type { Task, Stats, TaskNode, Finding } from "@/lib/types";
+=======
+import type {
+  Finding,
+  ModelTokenStat,
+  Stats,
+  Task,
+  TaskConstraint,
+  TaskGoal,
+  TaskNode,
+  TaskScopeRow,
+} from "@/lib/types";
+
+// 紧凑格式化 token 数（12345 → 12.3k，2000000 → 2M）。
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+  return String(n);
+}
+
+// 缓存命中率 = 缓存读 / 输入（InputTokens 已含 cache_read 子集，故比值在 0–100%）。
+function cacheHitRate(cacheRead: number, input: number): string {
+  if (input <= 0) return "—";
+  return Math.round((cacheRead / input) * 100) + "%";
+}
+
+// 测试范围一条的显示值：域名 / 网段 / 公司。
+function scopeValue(row: TaskScopeRow): string {
+  if (row.domain) return row.domain;
+  if (row.net) return row.net;
+  if (row.company_id) return row.company_name || `企业 #${row.company_id}`;
+  return "—";
+}
+
+const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
+  company: "公司",
+  root_domain: "根域名",
+  subdomain: "子域名",
+  ip: "IP",
+  cidr: "网段",
+};
+
+const SCOPE_SOURCE_LABELS: Record<TaskScopeRow["source"], string> = {
+  auto: "自动",
+  agent: "Agent",
+  manual: "手动",
+};
+>>>>>>> Stashed changes
 
 function StatCard({
   label,
@@ -55,6 +117,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [coverage, setCoverage] = React.useState<{
+    enabled: boolean;
     scope_rows: number;
     denominator: number;
     tested: number;
@@ -63,6 +126,203 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   } | null>(null);
   // 正在重跑的意图 id（含 "__all__" 表示批量），用于禁用按钮 + 转圈。
   const [rerunning, setRerunning] = React.useState<Set<string>>(new Set());
+<<<<<<< Updated upstream
+=======
+  // 测试范围列表 + 新增表单状态。
+  const [scope, setScope] = React.useState<TaskScopeRow[]>([]);
+  const [scopeKind, setScopeKind] = React.useState<TaskScopeRow["kind"]>("root_domain");
+  const [scopeValueInput, setScopeValueInput] = React.useState("");
+  const [scopeBusy, setScopeBusy] = React.useState(false);
+  const [scopeErr, setScopeErr] = React.useState("");
+  // 按模型的 token 用量（来自常开的 llm_usage 计量账本，逐次精确）。
+  const [modelTokens, setModelTokens] = React.useState<ModelTokenStat[]>([]);
+  // 目标管理：目标列表 + 新增表单 + 行内编辑状态。
+  const [goals, setGoals] = React.useState<TaskGoal[]>([]);
+  const [goalText, setGoalText] = React.useState("");
+  const [goalVuln, setGoalVuln] = React.useState("");
+  const [goalBusy, setGoalBusy] = React.useState(false);
+  const [goalErr, setGoalErr] = React.useState("");
+  const [editingGoalId, setEditingGoalId] = React.useState<string | null>(null);
+  const [editText, setEditText] = React.useState("");
+  const [editVuln, setEditVuln] = React.useState("");
+  // 约束管理：约束列表 + 新增表单 + 行内编辑状态。
+  const [constraints, setConstraints] = React.useState<TaskConstraint[]>([]);
+  const [conText, setConText] = React.useState("");
+  const [conKind, setConKind] = React.useState<TaskConstraint["kind"]>("deny");
+  const [conBusy, setConBusy] = React.useState(false);
+  const [conErr, setConErr] = React.useState("");
+  const [editingConId, setEditingConId] = React.useState<string | null>(null);
+  const [editConText, setEditConText] = React.useState("");
+  const [editConKind, setEditConKind] = React.useState<TaskConstraint["kind"]>("deny");
+
+  const loadTokens = React.useCallback(async () => {
+    try {
+      const resp = await api.tokensByModel(taskId);
+      setModelTokens(resp.models);
+    } catch {
+      // 忽略：无 PG 时接口报错，卡片自然为空
+    }
+  }, [taskId]);
+
+  const loadScope = React.useCallback(async () => {
+    try {
+      const resp = await api.taskScope(taskId);
+      setScope(resp.scope);
+    } catch {
+      // 忽略：无 asset store 时接口 503，范围卡片自然为空
+    }
+  }, [taskId]);
+
+  const loadGoals = React.useCallback(async () => {
+    try {
+      const resp = await api.taskGoals(taskId);
+      setGoals(resp.goals);
+    } catch {
+      // 忽略：瞬时错误，下次轮询重试
+    }
+  }, [taskId]);
+
+  const addGoal = async () => {
+    const text = goalText.trim();
+    if (!text) return;
+    setGoalBusy(true);
+    setGoalErr("");
+    try {
+      await api.addGoal(taskId, text, goalVuln.trim() || undefined);
+      setGoalText("");
+      setGoalVuln("");
+      await loadGoals();
+    } catch (e) {
+      setGoalErr(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setGoalBusy(false);
+    }
+  };
+
+  const startEditGoal = (g: TaskGoal) => {
+    setEditingGoalId(g.id);
+    setEditText(g.text);
+    setEditVuln(g.vulnclass ?? "");
+  };
+
+  const cancelEditGoal = () => {
+    setEditingGoalId(null);
+    setEditText("");
+    setEditVuln("");
+  };
+
+  const saveEditGoal = async (g: TaskGoal) => {
+    const text = editText.trim();
+    if (!text) return;
+    setGoalBusy(true);
+    setGoalErr("");
+    try {
+      await api.updateGoal(taskId, g.id, text, editVuln.trim() || undefined);
+      cancelEditGoal();
+      await loadGoals();
+    } catch (e) {
+      setGoalErr(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setGoalBusy(false);
+    }
+  };
+
+  const removeGoal = async (g: TaskGoal) => {
+    setGoals((prev) => prev.filter((x) => x.id !== g.id));
+    try {
+      await api.deleteGoal(taskId, g.id);
+    } catch {
+      await loadGoals(); // 删除失败：重新拉取还原
+    }
+  };
+
+  const loadConstraints = React.useCallback(async () => {
+    try {
+      const resp = await api.taskConstraints(taskId);
+      setConstraints(resp.constraints);
+    } catch {
+      // 忽略：瞬时错误，下次轮询重试
+    }
+  }, [taskId]);
+
+  const addConstraint = async () => {
+    const text = conText.trim();
+    if (!text) return;
+    setConBusy(true);
+    setConErr("");
+    try {
+      await api.addConstraint(taskId, text, conKind);
+      setConText("");
+      await loadConstraints();
+    } catch (e) {
+      setConErr(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setConBusy(false);
+    }
+  };
+
+  const startEditConstraint = (c: TaskConstraint) => {
+    setEditingConId(c.id);
+    setEditConText(c.text);
+    setEditConKind(c.kind);
+  };
+
+  const cancelEditConstraint = () => {
+    setEditingConId(null);
+    setEditConText("");
+    setEditConKind("deny");
+  };
+
+  const saveEditConstraint = async (c: TaskConstraint) => {
+    const text = editConText.trim();
+    if (!text) return;
+    setConBusy(true);
+    setConErr("");
+    try {
+      await api.updateConstraint(taskId, c.id, text, editConKind);
+      cancelEditConstraint();
+      await loadConstraints();
+    } catch (e) {
+      setConErr(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setConBusy(false);
+    }
+  };
+
+  const removeConstraint = async (c: TaskConstraint) => {
+    setConstraints((prev) => prev.filter((x) => x.id !== c.id));
+    try {
+      await api.deleteConstraint(taskId, c.id);
+    } catch {
+      await loadConstraints(); // 删除失败：重新拉取还原
+    }
+  };
+
+  const addScope = async () => {
+    const value = scopeValueInput.trim();
+    if (!value) return;
+    setScopeBusy(true);
+    setScopeErr("");
+    try {
+      await api.addTaskScope(taskId, scopeKind, value);
+      setScopeValueInput("");
+      await loadScope();
+    } catch (e) {
+      setScopeErr(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setScopeBusy(false);
+    }
+  };
+
+  const removeScope = async (row: TaskScopeRow) => {
+    setScope((prev) => prev.filter((s) => s.id !== row.id));
+    try {
+      await api.deleteTaskScope(taskId, row.id);
+    } catch {
+      await loadScope(); // 删除失败：重新拉取还原
+    }
+  };
+>>>>>>> Stashed changes
 
   const markRerun = (key: string, on: boolean) =>
     setRerunning((prev) => {
@@ -133,12 +393,29 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     };
 
     load();
+<<<<<<< Updated upstream
     const timer = setInterval(load, 3000);
+=======
+    void loadScope();
+    void loadTokens();
+    void loadGoals();
+    void loadConstraints();
+    const timer = setInterval(() => {
+      void load();
+      void loadTokens();
+      void loadGoals();
+      void loadConstraints();
+    }, 3000);
+>>>>>>> Stashed changes
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
+<<<<<<< Updated upstream
   }, [taskId]);
+=======
+  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
+>>>>>>> Stashed changes
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
@@ -172,7 +449,252 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
         </CardContent>
       </Card>
-      {coverage && coverage.scope_rows > 0 && (
+      {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
+          删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ListChecksIcon className="size-4 text-primary" /> 目标管理
+            <span className="text-muted-foreground text-xs font-normal">
+              （最终可核验的目标，共 {goals.length} 条；新增/修改会通知规划者并复活任务）
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {/* 新增表单 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              className="h-7 min-w-56 flex-1 text-sm"
+              placeholder="新增目标，如『拿到管理员账号的越权访问』"
+              value={goalText}
+              onChange={(e) => setGoalText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void addGoal();
+              }}
+              disabled={goalBusy}
+            />
+            <Input
+              className="h-7 w-32 text-sm"
+              placeholder="漏洞类(可选)"
+              value={goalVuln}
+              onChange={(e) => setGoalVuln(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void addGoal();
+              }}
+              disabled={goalBusy}
+            />
+            <Button size="sm" variant="outline" disabled={goalBusy || !goalText.trim()} onClick={() => void addGoal()}>
+              <PlusIcon className="size-3.5" /> 添加
+            </Button>
+            {goalErr && <span className="text-xs text-red-500">{goalErr}</span>}
+          </div>
+          {/* 目标列表 */}
+          {goals.length > 0 ? (
+            <div className="flex flex-col gap-1.5">
+              {goals.map((g) =>
+                editingGoalId === g.id ? (
+                  <div key={g.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5">
+                    <Input
+                      className="h-7 min-w-56 flex-1 text-sm"
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveEditGoal(g);
+                        if (e.key === "Escape") cancelEditGoal();
+                      }}
+                      disabled={goalBusy}
+                      autoFocus
+                    />
+                    <Input
+                      className="h-7 w-32 text-sm"
+                      placeholder="漏洞类(可选)"
+                      value={editVuln}
+                      onChange={(e) => setEditVuln(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveEditGoal(g);
+                        if (e.key === "Escape") cancelEditGoal();
+                      }}
+                      disabled={goalBusy}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={goalBusy || !editText.trim()}
+                      onClick={() => void saveEditGoal(g)}
+                    >
+                      <CheckIcon className="size-3.5 text-emerald-500" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={goalBusy}
+                      onClick={cancelEditGoal}
+                    >
+                      <XIcon className="size-3.5" />
+                    </Button>
+                  </div>
+                ) : (
+                  <div key={g.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
+                    <StatusBadge domain="goal" value={g.state} />
+                    <span className="min-w-0 flex-1 break-words">{g.text}</span>
+                    {g.vulnclass && (
+                      <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
+                        {g.vulnclass}
+                      </span>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={goalBusy}
+                      onClick={() => startEditGoal(g)}
+                    >
+                      <PencilIcon className="size-3.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={goalBusy}
+                      onClick={() => void removeGoal(g)}
+                    >
+                      <Trash2Icon className="size-3.5 text-red-500" />
+                    </Button>
+                  </div>
+                ),
+              )}
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">暂无目标，添加后规划者会据此派发探索意图并判定达成。</p>
+          )}
+        </CardContent>
+      </Card>
+      {/* 操作约束管理：allow=允许 / deny=禁止。约束会在下一轮规划时注入 planner/worker 的系统
+          提示以框定探索边界（注入范围可在 系统设置 里按 planner/worker 开关）。改动不即时打断，
+          下一轮规划自然读到。 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ShieldAlertIcon className="size-4 text-amber-500" /> 操作约束
+            <span className="text-muted-foreground text-xs font-normal">
+              （框定 planner/worker 的探索边界，共 {constraints.length} 条；改动下一轮规划生效）
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {/* 新增表单 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <NativeSelect
+              size="sm"
+              value={conKind}
+              onChange={(e) => setConKind(e.target.value as TaskConstraint["kind"])}
+            >
+              <NativeSelectOption value="deny">禁止</NativeSelectOption>
+              <NativeSelectOption value="allow">允许</NativeSelectOption>
+            </NativeSelect>
+            <Input
+              className="h-7 min-w-56 flex-1 text-sm"
+              placeholder="一条操作约束，如『仅测当前端口，不扫其他端口』"
+              value={conText}
+              onChange={(e) => setConText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void addConstraint();
+              }}
+              disabled={conBusy}
+            />
+            <Button size="sm" variant="outline" disabled={conBusy || !conText.trim()} onClick={() => void addConstraint()}>
+              <PlusIcon className="size-3.5" /> 添加
+            </Button>
+            {conErr && <span className="text-xs text-red-500">{conErr}</span>}
+          </div>
+          {/* 约束列表 */}
+          {constraints.length > 0 ? (
+            <div className="flex flex-col gap-1.5">
+              {constraints.map((c) =>
+                editingConId === c.id ? (
+                  <div key={c.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5">
+                    <NativeSelect
+                      size="sm"
+                      value={editConKind}
+                      onChange={(e) => setEditConKind(e.target.value as TaskConstraint["kind"])}
+                    >
+                      <NativeSelectOption value="deny">禁止</NativeSelectOption>
+                      <NativeSelectOption value="allow">允许</NativeSelectOption>
+                    </NativeSelect>
+                    <Input
+                      className="h-7 min-w-56 flex-1 text-sm"
+                      value={editConText}
+                      onChange={(e) => setEditConText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveEditConstraint(c);
+                        if (e.key === "Escape") cancelEditConstraint();
+                      }}
+                      disabled={conBusy}
+                      autoFocus
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={conBusy || !editConText.trim()}
+                      onClick={() => void saveEditConstraint(c)}
+                    >
+                      <CheckIcon className="size-3.5 text-emerald-500" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={conBusy}
+                      onClick={cancelEditConstraint}
+                    >
+                      <XIcon className="size-3.5" />
+                    </Button>
+                  </div>
+                ) : (
+                  <div key={c.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
+                        c.kind === "allow"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : "bg-red-500/15 text-red-600 dark:text-red-400"
+                      }`}
+                    >
+                      {c.kind === "allow" ? "允许" : "禁止"}
+                    </span>
+                    <span className="min-w-0 flex-1 break-words">{c.text}</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={conBusy}
+                      onClick={() => startEditConstraint(c)}
+                    >
+                      <PencilIcon className="size-3.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 shrink-0 px-1.5"
+                      disabled={conBusy}
+                      onClick={() => void removeConstraint(c)}
+                    >
+                      <Trash2Icon className="size-3.5 text-red-500" />
+                    </Button>
+                  </div>
+                ),
+              )}
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              暂无操作约束。建任务时会自动从描述/目标抽取；也可在此手动增删改，用来框定「允许/禁止做哪些操作」。
+            </p>
+          )}
+        </CardContent>
+      </Card>
+      {coverage && coverage.enabled && coverage.scope_rows > 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">

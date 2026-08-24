@@ -461,7 +461,305 @@ export default function LLMPage() {
     }
   }
 
+<<<<<<< Updated upstream
   async function activate(id: string) {
+=======
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="flex flex-col gap-0 p-0 data-[side=right]:min-w-[420px] data-[side=right]:sm:max-w-xl"
+        // 表单填到一半时点外面不该丢内容（Esc / ✕ 仍可关闭）。
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <SheetHeader className="px-4">
+          <SheetTitle className="flex items-center gap-2">
+            {isNew ? "新建模型配置" : `编辑：${profile?.name}`}
+            {profile?.is_default && (
+              <Badge variant="outline" className="border-amber-400/50 text-amber-500">
+                激活中
+              </Badge>
+            )}
+          </SheetTitle>
+          <SheetDescription>
+            {isNew
+              ? "新建后不会自动激活，请在卡片上「设为激活」以启用。"
+              : "修改后点击保存；激活配置保存后对全部 Agent 立即生效。"}
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-2">
+              <Label htmlFor="p-name">名称</Label>
+              <Input
+                id="p-name"
+                placeholder="例如：OpenAI 生产"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>格式</Label>
+              <Select value={format} onValueChange={(v) => setFormat(v as "anthropic" | "openai")}>
+                <SelectTrigger>
+                  <SelectValue placeholder="选择格式" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="anthropic">Anthropic</SelectItem>
+                  <SelectItem value="openai">OpenAI</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-model">模型</Label>
+            <div className="flex gap-2">
+              <Input
+                id="p-model"
+                className="font-mono"
+                placeholder="claude-opus-4-8"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              />
+              {/* modal: 这个 Popover 的内容被 portal 到 <body>，在 Sheet 的滚动锁之外，
+                  不加 modal 时列表能渲染却滚不动。modal 让它自己持有最上层滚动锁。 */}
+              <Popover open={modelsOpen} onOpenChange={setModelsOpen} modal>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0"
+                    disabled={loadingModels}
+                    onClick={loadModels}
+                    title="从 API 加载可用模型"
+                  >
+                    {loadingModels ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                  </Button>
+                </PopoverTrigger>
+                {models.length > 0 && (
+                  <PopoverContent className="max-h-72 w-72 gap-0 overflow-y-auto overscroll-contain p-1" align="end">
+                    {models.map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        className="w-full shrink-0 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
+                        onClick={() => {
+                          setModel(m);
+                          setModelsOpen(false);
+                        }}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </PopoverContent>
+                )}
+              </Popover>
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-base-url">Base URL（可选）</Label>
+            <Input
+              id="p-base-url"
+              className="font-mono"
+              placeholder="https://api.openai.com/v1"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-proxy">代理（可选）</Label>
+            <Input
+              id="p-proxy"
+              className="font-mono"
+              placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
+              value={proxy}
+              onChange={(e) => setProxy(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如 socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
+            </p>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-api-key">API Key</Label>
+            <Input
+              id="p-api-key"
+              type="password"
+              placeholder={keyHint ? `已设置（${keyHint}），留空保持不变` : "sk-…"}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid gap-2">
+              <Label htmlFor="p-rps">每秒限速</Label>
+              <Input id="p-rps" type="number" min={0} value={rps} onChange={(e) => setRps(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="p-rpm">每分钟限速</Label>
+              <Input id="p-rpm" type="number" min={0} value={rpm} onChange={(e) => setRpm(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="p-cw">上下文窗口(K)</Label>
+              <Input
+                id="p-cw"
+                type="number"
+                min={0}
+                max={1000}
+                value={cw}
+                onChange={(e) => setCw(e.target.value)}
+                placeholder="200"
+              />
+            </div>
+          </div>
+          <p className="-mt-2 text-muted-foreground text-xs">
+            限速 0 = 不限，全 Agent 共享。上下文窗口单位 K（千 token），0 = 默认 200K，上限 1000（即
+            1M）；设太高会导致压缩不触发。
+          </p>
+
+          <div className="grid gap-3 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-0.5">
+                <Label htmlFor="p-priority" className="text-sm">
+                  轮询优先级
+                </Label>
+                <p className="text-muted-foreground text-xs">
+                  数字越大越先被选中；激活配置恒为第 1 顺位，与本值无关。相同优先级的配置会轮流打头，天然分摊额度。
+                </p>
+              </div>
+              <Input
+                id="p-priority"
+                type="number"
+                className="w-24 shrink-0"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">不参与轮询</Label>
+                <p className="text-muted-foreground text-xs">
+                  开启后不会被当作故障转移目标（仍可被 Agent / 任务显式指定使用）。 适合「只给某个 Agent
+                  专用、不希望别人失败时烧掉」的昂贵配置。
+                </p>
+              </div>
+              <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
+            </div>
+          </div>
+
+          <div className="grid gap-3 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">思考开关 · thinking.type</Label>
+                <p className="text-muted-foreground text-xs">
+                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持
+                  的模型）；关闭=发 disabled；开启=发 enabled。与下面的强度互相独立。
+                </p>
+              </div>
+              <Select value={thinkingType} onValueChange={setThinkingType}>
+                <SelectTrigger className="w-32 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {THINKING_TYPES.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">思考强度 · reasoning_effort</Label>
+                <p className="text-muted-foreground text-xs">
+                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。
+                  有些接口没有 thinking 字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
+                </p>
+              </div>
+              <Select value={effort} onValueChange={setEffort}>
+                <SelectTrigger className="w-32 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {EFFORT_LEVELS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex gap-2 border-t px-4 py-3">
+          <Button variant="outline" onClick={testConnection} disabled={testing}>
+            {testing ? <Loader2Icon className="animate-spin" /> : <PlugZapIcon />}
+            {testing ? "测试中…" : "测试连接"}
+          </Button>
+          <Button onClick={save} disabled={saving} className="flex-1">
+            {saving && <Loader2Icon className="animate-spin" />}
+            {!saving && (isNew ? <PlusIcon /> : <SaveIcon />)}
+            {isNew ? "新建" : "保存"}
+          </Button>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function LLMPage() {
+  const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [pool, setPool] = React.useState<LLMPoolStatus | null>(null);
+  const [poolOpen, setPoolOpen] = React.useState(false);
+  // 抽屉的开关和内容分开存：关闭时 editing 保持不变，否则关闭动画期间标题会从
+  // 「编辑 X」闪成「新建」。editing = null 表示新建。
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<LLMProfile | null>(null);
+  const openEditor = React.useCallback((p: LLMProfile | null) => {
+    setEditing(p);
+    setEditOpen(true);
+  }, []);
+
+  const loadPool = React.useCallback(async () => {
+    try {
+      setPool(await api.llmPool());
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const load = React.useCallback(async () => {
+    try {
+      setProfiles(await api.llmProfiles());
+    } catch {
+      /* ignore */
+    }
+    await loadPool();
+  }, [loadPool]);
+
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  // 卡片上的健康徽章按 profile id 取轮询状态。
+  const health = React.useMemo(() => {
+    const m = new Map<string, LLMPoolMember>();
+    for (const c of pool?.chain ?? []) m.set(c.profile_id, c);
+    return m;
+  }, [pool]);
+
+  async function activate(id: string, name: string) {
+>>>>>>> Stashed changes
     try {
       await api.activateLLMProfile(id);
       const p = profiles.find((x) => x.id === id);

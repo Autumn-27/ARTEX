@@ -24,7 +24,12 @@ import { cn } from "@/lib/utils";
 import { Transcript } from "@/components/transcript";
 import { TodoPopover } from "@/components/todo-popover";
 import { Button } from "@/components/ui/button";
+<<<<<<< Updated upstream
 import { Input } from "@/components/ui/input";
+=======
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
+import { Textarea } from "@/components/ui/textarea";
+>>>>>>> Stashed changes
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
@@ -33,6 +38,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api, sseUrl } from "@/lib/api";
+import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import type {
   Activity,
@@ -43,6 +49,13 @@ import type {
   TaskNode,
   TokenTotal,
 } from "@/lib/types";
+
+// resolutionLabel names the LLM a session runs on. The badge shows this alone and
+// keeps the model id in its tooltip. Env-backed configs can arrive without a name,
+// so fall back to the model id rather than rendering an empty badge.
+function resolutionLabel(r: TaskLLMResolution): string {
+  return r.name || r.model || "未命名配置";
+}
 
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
 function fmtBytes(n: number): string {
@@ -233,6 +246,14 @@ function SessionItem({
   hasPending,
   unread,
   onClick,
+<<<<<<< Updated upstream
+=======
+  onPause,
+  onResume,
+  onCancel,
+  controlling,
+  deleted,
+>>>>>>> Stashed changes
 }: {
   s: Session;
   active: boolean;
@@ -240,13 +261,22 @@ function SessionItem({
   hasPending?: boolean;
   unread?: number;
   onClick: () => void;
+<<<<<<< Updated upstream
+=======
+  onPause?: () => void;
+  onResume?: () => void;
+  onCancel?: () => void;
+  controlling?: boolean;
+  deleted?: boolean;
+>>>>>>> Stashed changes
 }) {
-  const icon =
-    s.role === "worker" ? (
-      statusIcon(s.status)
-    ) : s.live ? (
-      <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
-    ) : null;
+  const icon = deleted ? (
+    <Trash2Icon className="size-3.5 text-destructive" />
+  ) : s.role === "worker" ? (
+    statusIcon(s.status)
+  ) : s.live ? (
+    <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
+  ) : null;
 
   return (
     <button
@@ -256,11 +286,91 @@ function SessionItem({
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
+<<<<<<< Updated upstream
       {icon ?? <span className="size-3.5 shrink-0" />}
       {s.intent_id && (
         <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
           #{s.intent_id}
         </span>
+=======
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1.5 text-left text-sm"
+      >
+        {icon ?? <span className="size-3.5 shrink-0" />}
+        {s.intent_id && (
+          <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+            #{s.intent_id}
+          </span>
+        )}
+        {s.inherited && s.source_task_id && (
+          <Badge variant="outline" className="shrink-0">
+            来源 #{s.source_task_id}
+          </Badge>
+        )}
+        <span className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}>
+          {displayTitle}
+        </span>
+        {deleted && (
+          <Badge variant="outline" className="shrink-0 border-destructive/40 text-destructive">
+            已删除
+          </Badge>
+        )}
+        {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
+        {!active && unread ? (
+          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+            {unread > 99 ? "99+" : unread}
+          </span>
+        ) : null}
+        {s.live && (
+          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+            <span className="size-1 animate-pulse rounded-full bg-blue-500" />
+            实时
+          </span>
+        )}
+      </button>
+      {controllable && (
+        <div className="flex shrink-0 items-center gap-0.5 pr-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover/session:opacity-100 sm:group-focus-within/session:opacity-100">
+          {s.status === "running" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={onPause}
+              disabled={controlling}
+              title="暂停 Worker"
+              aria-label="暂停 Worker"
+            >
+              {controlling ? <Loader2Icon className="animate-spin" /> : <PauseIcon />}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={onResume}
+              disabled={controlling}
+              title="恢复 Worker"
+              aria-label="恢复 Worker"
+            >
+              {controlling ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={onCancel}
+            disabled={controlling}
+            title="删除该意图（需填写原因，保留数据）"
+            aria-label="删除该意图（需填写原因，保留数据）"
+            className="text-destructive hover:text-destructive"
+          >
+            <Trash2Icon />
+          </Button>
+        </div>
+>>>>>>> Stashed changes
       )}
       <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
       {hasPending && (
@@ -295,6 +405,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
+<<<<<<< Updated upstream
+=======
+  const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
+  const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
+  const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
+  const [cancelReason, setCancelReason] = React.useState("");
+>>>>>>> Stashed changes
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -313,6 +430,50 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
+<<<<<<< Updated upstream
+=======
+
+  const patchIntentState = React.useCallback((intentId: string, state?: string) => {
+    const patch = (rows: TaskNode[]) =>
+      state
+        ? rows.map((row) => (row.id === intentId ? { ...row, state } : row))
+        : rows.filter((row) => row.id !== intentId);
+    setIntents(patch);
+    setOlderIntents(patch);
+  }, []);
+
+  const controlWorker = React.useCallback(
+    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string) => {
+      if (!session.intent_id || session.inherited || controllingIntent) return;
+      if (action === "cancel" && !reason?.trim()) {
+        toast.error("请填写删除原因");
+        return;
+      }
+      setControllingIntent(session.intent_id);
+      try {
+        await api.controlIntent(taskId, session.intent_id, action, reason);
+        if (action === "pause") {
+          patchIntentState(session.intent_id, "paused");
+          toast.success(`Worker #${session.intent_id} 已暂停`);
+        } else if (action === "resume") {
+          patchIntentState(session.intent_id, "open");
+          toast.success(`Worker #${session.intent_id} 已恢复，等待重新领取`);
+        } else {
+          // 删除 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
+          patchIntentState(session.intent_id, "stopped");
+          toast.success(`Worker #${session.intent_id} 已删除（原因已记录，规划者将据此重新规划）`);
+          setCancelReason("");
+        }
+      } catch (error) {
+        toast.error(`Worker 操作失败：${(error as Error).message}`);
+      } finally {
+        setControllingIntent(null);
+        setCancelIntent(null);
+      }
+    },
+    [controllingIntent, patchIntentState, taskId],
+  );
+>>>>>>> Stashed changes
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
   const [sseLive, setSseLive] = React.useState(false);
@@ -627,21 +788,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // For each worker session (intent), derive the display title from the intent
   // payload summary. Also store the full TaskNode for the hover-JSON tooltip.
   const sessionMeta = React.useMemo(() => {
-    const map = new Map<string, { title: string; json: unknown }>();
+    const map = new Map<string, { title: string; json: unknown; deleted: boolean; deleteReason: string }>();
     for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
+      let deleted = false;
+      let deleteReason = "";
       if (node.payload) {
         try {
           const p = JSON.parse(node.payload);
           parsedPayload = p;
           if (p?.summary) title = String(p.summary);
+          if (p?.cancelled_by_user) {
+            deleted = true;
+            deleteReason = String(p.cancel_reason ?? "");
+          }
         } catch {
           title = node.payload.trim() || title;
         }
       }
       const json = { ...node, payload: parsedPayload };
-      map.set(node.id, { title, json });
+      map.set(node.id, { title, json, deleted, deleteReason });
     }
     return map;
   }, [allIntents]);
@@ -861,6 +1028,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }
 
   const mainLoaded = !!store.main?.loaded;
+  // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
+  const sendMode = useChatSendMode();
   // What the transcript pane should show for the active session.
   const showLoader = !activeState || (activeState.loading && !activeState.loaded);
 
@@ -894,6 +1063,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               </span>
             )}
           </div>
+<<<<<<< Updated upstream
           {taskTokens && (
             <div
               className="mt-1 text-[11px] tabular-nums text-muted-foreground"
@@ -901,6 +1071,62 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             >
               任务总计 · input {fmtTokens(taskTokens.input_tokens)} · cache{" "}
               {fmtTokens(taskTokens.cache_read_tokens)} · output {fmtTokens(taskTokens.output_tokens)}
+=======
+          <ScrollArea type="auto" className="min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+            <div className="flex w-full flex-col gap-3 p-2">
+              {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
+                const items = grouped[role];
+                if (!items.length) return null;
+                const Meta = roleMeta[role];
+                return (
+                  <div key={role} className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
+                      <Meta.icon className="size-3.5" />
+                      {Meta.label}
+                    </div>
+                    {items.map((s) => {
+                      const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
+                      return (
+                        <SessionItem
+                          key={s.id}
+                          s={s}
+                          active={s.id === activeId}
+                          displayTitle={meta?.title ?? s.title}
+                          hasPending={hasPendingForSession(s)}
+                          unread={store[keyForSession(s)]?.unread}
+                          onClick={() => setActiveId(s.id)}
+                          controlling={controllingIntent === s.intent_id}
+                          deleted={meta?.deleted}
+                          onPause={() => void controlWorker(s, "pause")}
+                          onResume={() => void controlWorker(s, "resume")}
+                          onCancel={() => {
+                            setCancelIntent(s);
+                          }}
+                        />
+                      );
+                    })}
+                    {role === "worker" && intentsHasMore && (
+                      <button
+                        type="button"
+                        onClick={loadOlderIntents}
+                        disabled={loadingOlderIntents}
+                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+                      >
+                        {loadingOlderIntents ? (
+                          <Loader2Icon className="size-3.5 animate-spin" />
+                        ) : (
+                          <RotateCwIcon className="size-3.5" />
+                        )}
+                        加载更早的 Worker
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {mainLoaded && !workerSessions.length && (
+                <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
+              )}
+>>>>>>> Stashed changes
             </div>
           )}
         </div>
@@ -968,11 +1194,31 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             const titleEl = <span className="text-sm font-medium">{title}</span>;
             return meta?.json ? (
               <Tooltip>
+<<<<<<< Updated upstream
                 <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
                 <TooltipContent side="bottom" align="start" className="max-h-80 max-w-sm overflow-auto p-0">
                   <pre className="p-2 text-[10px] leading-relaxed">
                     {JSON.stringify(meta.json, null, 2)}
                   </pre>
+=======
+                <TooltipTrigger asChild>
+                  <Badge
+                    variant="outline"
+                    className="max-w-28 shrink-0 font-normal"
+                    aria-label={
+                      activeResolution.available ? `当前配置：${resolutionLabel(activeResolution)}` : "模型不可用"
+                    }
+                  >
+                    <span className="truncate">
+                      {activeResolution.available ? resolutionLabel(activeResolution) : "模型不可用"}
+                    </span>
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
+                  {activeResolution.available
+                    ? [resolutionLabel(activeResolution), activeResolution.model].filter(Boolean).join(" / ")
+                    : activeResolution.reason || "没有可用的 LLM 配置"}
+>>>>>>> Stashed changes
                 </TooltipContent>
               </Tooltip>
             ) : titleEl;
@@ -1005,8 +1251,33 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             )}
             {isMain && <span>可交互</span>}
           </div>
+<<<<<<< Updated upstream
         </div>
         {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
+=======
+          {(() => {
+            const dm = active.role === "worker" ? sessionMeta.get(active.id) : undefined;
+            if (!dm?.deleted) return null;
+            return (
+              <div className="flex items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2.5 text-xs">
+                <Trash2Icon className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                <div className="min-w-0">
+                  <span className="font-medium text-destructive">此意图已被用户删除</span>
+                  <span className="text-muted-foreground">
+                    （已停止执行，规划者已收到通知；意图与产出保留，可在下方查看历史）
+                  </span>
+                  {dm.deleteReason && (
+                    <p className="mt-1 break-words text-foreground">
+                      <span className="text-muted-foreground">删除原因：</span>
+                      {dm.deleteReason}
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+          {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
+>>>>>>> Stashed changes
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
@@ -1078,6 +1349,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 className="hidden"
                 onChange={(e) => void pickFiles(e.target.files)}
               />
+<<<<<<< Updated upstream
               <Button
                 size="icon"
                 variant="ghost"
@@ -1115,6 +1387,113 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             />
           </div>
         )}
+=======
+              <InputGroup className="min-h-9 has-disabled:opacity-100">
+                <InputGroupTextarea
+                  rows={1}
+                  aria-label="给主 Agent 发消息"
+                  placeholder="给主 Agent 发消息，引导探索方向…"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (!shouldSubmitOnKey(e, sendMode)) return;
+                    e.preventDefault();
+                    if (!mainLive) send();
+                  }}
+                  disabled={mainLive}
+                  className="max-h-36 min-h-9 overflow-y-auto"
+                />
+                <InputGroupAddon align="block-end">
+                  <InputGroupButton
+                    size="icon-xs"
+                    variant="ghost"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={mainLive || uploading}
+                    title="上传文件"
+                    aria-label="上传文件"
+                  >
+                    {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
+                  </InputGroupButton>
+                  {mainLive ? (
+                    <InputGroupButton
+                      className="ml-auto"
+                      size="icon-xs"
+                      variant="destructive"
+                      onClick={stop}
+                      disabled={stopping}
+                      title="停止当前执行"
+                      aria-label="停止当前执行"
+                    >
+                      {stopping ? <Loader2Icon className="animate-spin" /> : <SquareIcon />}
+                    </InputGroupButton>
+                  ) : (
+                    <InputGroupButton
+                      className="ml-auto"
+                      size="icon-xs"
+                      variant="default"
+                      onClick={send}
+                      disabled={(!input.trim() && attachments.length === 0) || sending}
+                      title="发送消息"
+                      aria-label="发送消息"
+                    >
+                      {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
+                    </InputGroupButton>
+                  )}
+                </InputGroupAddon>
+              </InputGroup>
+            </div>
+          ) : (
+            <div className="flex items-center border-t px-4 py-2">
+              <TodoPopover
+                seq={latestTodoSeq}
+                fetchDetail={(seq) => api.activityDetail(seq, taskId).then((r) => r.detail ?? "")}
+              />
+            </div>
+          )}
+        </div>
+        <AlertDialog
+          open={cancelIntent !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setCancelIntent(null);
+              setCancelReason("");
+            }
+          }}
+        >
+          <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
+            <AlertDialogHeader>
+              <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
+              <AlertDialogDescription className="break-words whitespace-normal">
+                删除会<strong>停止该意图</strong>（不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="grid gap-2 py-1">
+              <label htmlFor="cancel-reason" className="text-sm font-medium">
+                删除原因（必填）
+              </label>
+              <Textarea
+                id="cancel-reason"
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
+                rows={3}
+                autoFocus
+              />
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel>返回</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                disabled={!cancelIntent || controllingIntent !== null || !cancelReason.trim()}
+                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)}
+              >
+                {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
+                确认删除
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+>>>>>>> Stashed changes
       </div>
     </div>
     </TooltipProvider>

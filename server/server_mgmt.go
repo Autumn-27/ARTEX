@@ -1754,8 +1754,22 @@ var globalPromptVars = []db.PromptVar{
 
 // withGlobalVars appends the universal runtime vars onto an agent's own catalog,
 // so validation / the UI variable list / preview all recognize {{.Now}} etc.
+// A stored catalog entry that collides with a global name is dropped: the global
+// runtime var is authoritative (it's what the render path actually resolves), and
+// this keeps the returned list name-unique so the UI never sees duplicate keys.
 func withGlobalVars(vars []db.PromptVar) []db.PromptVar {
-	return append(append([]db.PromptVar{}, vars...), globalPromptVars...)
+	globalNames := make(map[string]bool, len(globalPromptVars))
+	for _, g := range globalPromptVars {
+		globalNames[g.Name] = true
+	}
+	out := make([]db.PromptVar, 0, len(vars)+len(globalPromptVars))
+	for _, v := range vars {
+		if globalNames[v.Name] {
+			continue // shadowed by the authoritative global runtime var
+		}
+		out = append(out, v)
+	}
+	return append(out, globalPromptVars...)
 }
 
 // validateTemplate parses the template and rejects any {{.Var}} not in the catalog.

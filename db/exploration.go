@@ -205,7 +205,45 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 	return err
 }
 
+<<<<<<< Updated upstream
 // SetIntentState updates an intent node's state (done/blocked/exhausted/open).
+=======
+// UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
+// scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
+// error if no such goal exists in this exploration.
+func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
+	payload := map[string]any{"text": text}
+	if vulnclass != "" {
+		payload["vulnclass"] = vulnclass
+	}
+	raw, _ := json.Marshal(payload)
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
+// DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
+// an intent/fact by id. The edges (spawns) and anchors reference it with ON DELETE
+// CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
+// error if no such goal exists in this exploration.
+func (s *ExplorationStore) DeleteGoal(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
+// SetIntentState updates an intent node's state.
+>>>>>>> Stashed changes
 // ResetRunningIntents returns any intent left in 'running' back to 'open' so it
 // is re-claimed. Called on startup: a 'running' intent with no live worker (a
 // backend restart or crashed worker goroutine left it stuck) would otherwise spin
@@ -258,7 +296,304 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, termin
 	return err
 }
 
+<<<<<<< Updated upstream
 const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), created_at`
+=======
+// CompareAndSetIntentState transitions one local intent only when its current
+// state still matches expected. It is the state boundary used by pause/resume and
+// worker settlement, so a stale API read cannot overwrite a concurrent finish.
+func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state string) (bool, error) {
+	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state=$1, blocked_reason=NULL, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// IntentCleanup summarizes the blackboard records removed when a user cancels
+// one worker intent. Global assets and traffic are deliberately not part of this
+// operation; exploration anchors disappear only because their owning nodes do.
+type IntentCleanup struct {
+	Intents    int64 `json:"intents"`
+	Facts      int64 `json:"facts"`
+	Findings   int64 `json:"findings"`
+	Activities int64 `json:"activities"`
+}
+
+// StopIntentWithReason marks a running/paused intent as 'stopped' WITHOUT deleting
+// it or any of its yielded facts/findings/activities, and records the user's reason
+// as a fact node hanging off that intent (intent --yields--> fact). Returns the new
+// fact node id. The caller must first stop a running worker to prevent late writes.
+// Used by the "delete work" action, which no longer destroys data — it stops the
+// intent and attaches why, so the planner can account for it.
+func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var state string
+	var rawPayload []byte
+	if err := tx.QueryRow(`SELECT state, payload FROM exploration_nodes
+		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state, &rawPayload); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("intent not found")
+		}
+		return 0, err
+	}
+	if state != "running" && state != "paused" {
+		return 0, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
+	}
+	// Merge the delete marker into the intent's own payload so it travels with the
+	// intent everywhere (session list badge, detail banner) without a schema change.
+	ip := map[string]any{}
+	_ = json.Unmarshal(rawPayload, &ip)
+	ip["cancelled_by_user"] = true
+	ip["cancel_reason"] = reason
+	newPayload, _ := json.Marshal(ip)
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL
+		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
+		return 0, err
+	}
+
+	if origin == "" {
+		origin = "user"
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"summary":     "用户删除了该意图",
+		"detail":      "删除原因：" + reason,
+		"confidence":  "observed",
+		"user_cancel": true,
+	})
+	var factID int64
+	if err := tx.QueryRow(`
+INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
+VALUES ($1, 'fact', $2, 5, 'confirmed', $3) RETURNING id`,
+		s.expID, string(raw), origin).Scan(&factID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`
+INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
+ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
+		return 0, err
+	}
+	return factID, tx.Commit()
+}
+
+// CancelIntent removes one local intent and the fact/finding nodes it directly
+// yielded. The standalone finding row must be deleted before its node (whose FK
+// otherwise uses ON DELETE SET NULL), so the entire cleanup is kept in one DB
+// transaction. The caller must first stop a running worker to prevent late writes.
+func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
+	var out IntentCleanup
+	tx, err := s.db.Begin()
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+
+	var state string
+	if err := tx.QueryRow(`SELECT state FROM exploration_nodes
+		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state); err != nil {
+		if err == sql.ErrNoRows {
+			return out, fmt.Errorf("intent not found")
+		}
+		return out, err
+	}
+	if state != "running" && state != "paused" {
+		return out, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
+	}
+
+	if err := tx.QueryRow(`SELECT
+		COUNT(*) FILTER (WHERE n.kind='fact'),
+		COUNT(*) FILTER (WHERE n.kind='finding')
+	FROM exploration_edges e
+	JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+	WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+	  AND n.kind IN ('fact','finding')
+	  AND NOT EXISTS (
+	      SELECT 1 FROM exploration_edges other
+	      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+	        AND other.src_id<>$2
+	  )`, s.expID, id, RelYields).Scan(&out.Facts, &out.Findings); err != nil {
+		return out, err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM findings f USING exploration_edges e, exploration_nodes n
+		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+		  AND n.id=e.dst_id AND n.exploration_id=e.exploration_id
+		  AND n.kind='finding' AND f.node_id=n.id
+		  AND NOT EXISTS (
+		      SELECT 1 FROM exploration_edges other
+		      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+		        AND other.src_id<>$2
+		  )`, s.expID, id, RelYields); err != nil {
+		return out, err
+	}
+	// Activity rows are part of the blackboard cleanup, but their token usage is
+	// irreversible metering data. Fold completed runs plus the latest unfinished
+	// usage frame into detached daily result rows before deleting the conversation.
+	// The rows are excluded from per-intent sessions while whole-task totals and
+	// the original UTC reporting dates remain accurate.
+	tokenBuckets, err := intentTokenRollup(tx, s.expID, id)
+	if err != nil {
+		return out, err
+	}
+	res, err := tx.Exec(`DELETE FROM activity WHERE exploration_id=$1 AND node_id=$2`, s.expID, id)
+	if err != nil {
+		return out, err
+	}
+	out.Activities, _ = res.RowsAffected()
+	for _, bucket := range tokenBuckets {
+		metadata, _ := json.Marshal(map[string]any{
+			"cancelled_intent_id": id,
+			"token_day":           bucket.Day.Format(time.DateOnly),
+			"token_rollup":        true,
+		})
+		if _, err := tx.Exec(`INSERT INTO activity(
+			exploration_id, worker, kind, summary, metadata,
+			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
+			VALUES ($1,'token-ledger','result',$2,$3,$4,$5,$6,$7,$8)`,
+			s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", id), metadata,
+			bucket.Usage.InputTokens, bucket.Usage.OutputTokens,
+			bucket.Usage.CacheReadTokens, bucket.Usage.CacheWriteTokens, bucket.Day); err != nil {
+			return out, err
+		}
+	}
+
+	res, err = tx.Exec(`DELETE FROM exploration_nodes
+		WHERE exploration_id=$1 AND (
+			id=$2 OR id IN (
+				SELECT e.dst_id FROM exploration_edges e
+				JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+					WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+					  AND n.kind IN ('fact','finding')
+					  AND NOT EXISTS (
+					      SELECT 1 FROM exploration_edges other
+					      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
+					        AND other.src_id<>$2
+					  )
+				)
+		)`, s.expID, id, RelYields)
+	if err != nil {
+		return out, err
+	}
+	if removed, _ := res.RowsAffected(); removed != 1+out.Facts+out.Findings {
+		return out, fmt.Errorf("intent cleanup changed concurrently")
+	}
+	out.Intents = 1
+	return out, tx.Commit()
+}
+
+type tokenUsageBucket struct {
+	Day   time.Time
+	Usage TokenUsage
+}
+
+// intentTokenRollup returns exactly-once usage grouped by its original UTC day.
+// Each result terminates one run. A result carrying usage is authoritative; an
+// older error/cancel result without usage falls back to the latest cumulative
+// usage frame since the previous result. A trailing frame represents a run that
+// was interrupted before its terminal result could be persisted.
+func intentTokenRollup(tx *sql.Tx, explorationID, intentID int64) ([]tokenUsageBucket, error) {
+	rows, err := tx.Query(`SELECT kind, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at
+		FROM activity
+		WHERE exploration_id=$1 AND node_id=$2 AND kind IN ('usage','result')
+		ORDER BY id`, explorationID, intentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byDay := make(map[time.Time]TokenUsage)
+	add := func(at time.Time, usage TokenUsage) {
+		if usage.InputTokens == 0 && usage.OutputTokens == 0 &&
+			usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 {
+			return
+		}
+		utc := at.UTC()
+		day := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+		total := byDay[day]
+		total.add(usage)
+		byDay[day] = total
+	}
+
+	var pending TokenUsage
+	var pendingAt time.Time
+	hasPending := false
+	for rows.Next() {
+		var kind string
+		var input, output, read, write sql.NullInt64
+		var createdAt time.Time
+		if err := rows.Scan(&kind, &input, &output, &read, &write, &createdAt); err != nil {
+			return nil, err
+		}
+		current := TokenUsage{
+			InputTokens:      int(input.Int64),
+			OutputTokens:     int(output.Int64),
+			CacheReadTokens:  int(read.Int64),
+			CacheWriteTokens: int(write.Int64),
+		}
+		hasCurrent := input.Valid || output.Valid || read.Valid || write.Valid
+		if kind == "usage" {
+			if hasCurrent {
+				pending, pendingAt, hasPending = current, createdAt, true
+			}
+			continue
+		}
+
+		if hasCurrent {
+			// Preserve a partially populated legacy terminal row by filling only its
+			// missing dimensions from the latest cumulative usage frame.
+			if hasPending {
+				if !input.Valid {
+					current.InputTokens = pending.InputTokens
+				}
+				if !output.Valid {
+					current.OutputTokens = pending.OutputTokens
+				}
+				if !read.Valid {
+					current.CacheReadTokens = pending.CacheReadTokens
+				}
+				if !write.Valid {
+					current.CacheWriteTokens = pending.CacheWriteTokens
+				}
+			}
+			add(createdAt, current)
+		} else if hasPending {
+			add(createdAt, pending)
+		}
+		pending, pendingAt, hasPending = TokenUsage{}, time.Time{}, false
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if hasPending {
+		add(pendingAt, pending)
+	}
+
+	buckets := make([]tokenUsageBucket, 0, len(byDay))
+	for day, usage := range byDay {
+		buckets = append(buckets, tokenUsageBucket{Day: day, Usage: usage})
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Day.Before(buckets[j].Day) })
+	return buckets, nil
+}
+
+func (u *TokenUsage) add(other TokenUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
+}
+
+const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), created_at`
+>>>>>>> Stashed changes
 
 func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 	var n Node

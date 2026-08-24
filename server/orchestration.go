@@ -445,6 +445,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
+	s.reseedGoalsPrompt()  // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
 	s.seedReporterAgent() // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
@@ -457,7 +458,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v5_spawn_seed_intent"
+	const flag = "tool_schema_refresh_v6_insert_assets_related"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -468,10 +469,14 @@ func (s *Server) refreshBuiltinToolSchemas() {
 			log.Printf("[tools] refresh %s schema failed: %v", t.Name(), err)
 		}
 	}
-	// 同时把 planner 的 goal_met 描述刷成代码默认：旧库 seed 的描述带“结束本轮规划”的
-	// 误导，会让 planner 把 goal_met 当成“结束空轮”的手段、刚开跑就误判整个任务完成。
+	// 同时把部分内置 agent 工具刷成代码默认：
+	//   - goal_met：旧库 seed 的描述带“结束本轮规划”的误导，会让 planner 把它当成
+	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
+	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
+	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
-		if sd.Key != "goal_met" {
+		if !refreshBuiltin[sd.Key] {
 			continue
 		}
 		schema, _ := json.Marshal(sd.Schema)
@@ -498,6 +503,36 @@ func (s *Server) unbindGoalMetDefault() {
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——因为默认正文新增了
+// 「先抽操作约束(set_constraints)再拆目标」这一步,而 SeedPromptIfEmpty 首插入only,旧库
+// 已有的 version 1 收不到这步。这里用版本管理【追加一个新版本】并切过去(ResetPromptToDefault),
+// 旧的版本仍保留在历史里,用户若自定义过可从版本记录找回。settings flag 守卫 → 只做一次;
+// 以后默认再变就 bump 这个 flag。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。
+func (s *Server) reseedGoalsPrompt() {
+	const flag = "goals_prompt_constraint_step_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("goals")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["goals"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] goals 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] goals 提示词已追加新默认版本(加入抽操作约束步,一次性)")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

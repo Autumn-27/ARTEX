@@ -326,7 +326,7 @@ export default function FindingsPage() {
               <SelectItem value="all">全部任务</SelectItem>
               {(stats.tasks ?? []).map((t) => {
                 const id = String(t.id);
-                const label = t.description || `任务 #${id}（已删除）`;
+                const label = t.name || t.description || `任务 #${id}（已删除）`;
                 return (
                   <SelectItem key={id} value={id}>
                     <span className="flex w-full items-center gap-2">
@@ -361,9 +361,98 @@ export default function FindingsPage() {
           </span>
         </div>
 
+<<<<<<< Updated upstream
         <Card className="py-0">
           <CardContent className="px-0">
             {/* table-fixed:列宽由表头锁定,展开行那个 colSpan 单元格再宽也只能在固定宽度内
+=======
+        <div className="flex flex-col gap-3">
+          {groups.map((group) => {
+            const key = findingGroupKey(group);
+            const groupOpen = expandedGroups.has(key);
+            const state = groupFindings[key] ?? {
+              items: [],
+              total: group.count,
+              page: 1,
+              pageSize: 10,
+              loaded: false,
+              loading: false,
+            };
+            const selectableIds = state.items
+              .map((finding) => finding.finding_id)
+              .filter((id): id is string => Boolean(id));
+            const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
+            let groupChecked: boolean | "indeterminate" = false;
+            if (selectableIds.length > 0 && selectedCount === selectableIds.length) {
+              groupChecked = true;
+            } else if (selectedCount > 0) {
+              groupChecked = "indeterminate";
+            }
+            return (
+              <Card key={key} className="gap-0 py-0">
+                <CardHeader className="px-4 py-3">
+                  <div className="flex min-w-0 flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                      aria-expanded={groupOpen}
+                      onClick={() => toggleGroup(key)}
+                    >
+                      <ChevronRightIcon
+                        className={cn(
+                          "size-4 shrink-0 text-muted-foreground transition-transform",
+                          groupOpen && "rotate-90",
+                        )}
+                      />
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <CardTitle className="truncate text-sm">
+                          {group.task_id === null
+                            ? "未关联 / 任务已删除"
+                            : group.task_name
+                              ? `${group.task_name}（任务 #${group.task_id}）`
+                              : `任务 #${group.task_id}`}
+                        </CardTitle>
+                        <CardDescription className="truncate" title={group.task_description}>
+                          {group.task_description || "来源任务不可用"}
+                        </CardDescription>
+                      </div>
+                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {group.task_status && <StatusBadge domain="task" value={group.task_status} dot />}
+                      {SEVERITIES.map((level) => {
+                        const count = group[level];
+                        if (count === 0) return null;
+                        return (
+                          <span key={level} className="inline-flex items-center gap-1">
+                            <StatusBadge domain="severity" value={level} dot />
+                            <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+                          </span>
+                        );
+                      })}
+                      <span className="text-xs tabular-nums text-muted-foreground">{fmtTime(group.last_found_at)}</span>
+                      {group.task_id !== null && (
+                        <Button size="icon-sm" variant="ghost" asChild>
+                          <Link
+                            href={`/function/tasks/detail?id=${group.task_id}`}
+                            aria-label={`查看任务 #${group.task_id}`}
+                          >
+                            <ArrowUpRightIcon />
+                          </Link>
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </CardHeader>
+                {groupOpen && (
+                  <CardContent className="px-0">
+                    {state.loading && !state.loaded ? (
+                      <div className="flex min-h-36 items-center justify-center">
+                        <Spinner />
+                      </div>
+                    ) : (
+                      <>
+                        {/* table-fixed:列宽由表头锁定,展开行那个 colSpan 单元格再宽也只能在固定宽度内
+>>>>>>> Stashed changes
                 换行/内部滚动,不会把整张表撑出横向滚动条。 */}
             <Table className="table-fixed">
               <TableHeader>

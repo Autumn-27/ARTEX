@@ -57,7 +57,18 @@ type Worker struct {
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	extraTools []actool.CoreTool
+	// injectConstraints resolves whether this task's operation constraints get
+	// injected into the worker system prompt. Read per run so the settings toggle
+	// takes effect without rebuilding the agent. nil = inject (default).
+	injectConstraints func() bool
 }
+
+// SetConstraintInject wires a resolver deciding whether this task's operation
+// constraints get injected into the worker system prompt. nil = inject (default).
+func (w *Worker) SetConstraintInject(fn func() bool) { w.injectConstraints = fn }
+
+// wantConstraints reports whether constraint injection is enabled (default yes).
+func (w *Worker) wantConstraints() bool { return w.injectConstraints == nil || w.injectConstraints() }
 
 // SetRunTimeout configures the per-intent wall-clock budget for the main
 // exploration (0 = unlimited). When it fires, the SDK settlement phase still runs
@@ -141,7 +152,7 @@ const workerDefaultTmpl = `你是一个授权渗透测试系统的"执行者"(wo
 - report_finding：确认漏洞 → 记录(含 PoC，传 intent_id=你领到的意图id)。**只有你在本次运行里真实触发过该漏洞、拿到了可复现的证据（请求/响应或命令输出）才用它。** 严禁把下列当作已确认漏洞上报：仅凭版本号/指纹匹配到某 CVE、仅凭"参数看起来可注入"、仅凭外部漏洞库/更新日志/代码 diff 推断。**不要用查 CVE 库或"对比补丁版本"替代实际触发。** 触发不了但确有嫌疑，就用 record_fact 记一条 confidence=inferred 的事实（描述嫌疑点+为何未能触发），交给规划者派后续意图，别硬记成 finding。
 - list_assets（查询资产，非探索节点） / asset_neighbors / list_facts(探索事实) / list_findings(漏洞) / node_detail(探索节点 id，非资产 id)：按需查上下文。
 
-只在授权范围内操作。完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
+只在授权范围内操作；若系统提示顶部附有【操作约束】，那是最高优先级红线——任何命令/探测在执行前先自检是否违反，违反即不做（哪怕它落在你领到的意图里）。完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
 
 // workerTrafficBlock is 段 [B]: the traffic-tool note, code-injected only when
 // traffic capture is on (proxyAddr set). Not stored, not editable.
@@ -149,7 +160,7 @@ func workerTrafficBlock(proxyAddr string) string {
 	if proxyAddr == "" {
 		return ""
 	}
-	return "\n\n**流量工具**：\n- traffic_search / traffic_get：目标流量已被记录代理全量落库（本地文件树 data/traffic/<host>/<访问路径>/）。回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；要看某条原文用 traffic_get(id)。"
+	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；可用 body_contains 在请求/响应正文里做全文搜索(至少 3 字符，支持子串和中文，如找密码/密钥/报错/内网地址)；要看某条原文用 traffic_get(id)，其中超大正文显示为 @blob sha256:<hash>，用 traffic_blob(hash) 分段取全文。"
 }
 
 // artifactSpec is 段 [C]: the code-owned, non-editable tail appended to every
@@ -244,6 +255,8 @@ func renderWorkerGraphOverview(data map[string]any) string {
 func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetTaskID(taskID)
+	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
+	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -256,6 +269,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	base = append(base, actool.DefaultTools()...)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
 
 	// 意图 + 全局态势改放【启动 user 消息】(见下方 input)，system 只留静态角色正文
@@ -264,7 +278,11 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// 压缩。本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	system, boundary := deferredSystem(workerSystem(w.proxyAddr, w.workDir, runDir), def)
+	sysBody := workerSystem(w.proxyAddr, w.workDir, runDir)
+	if w.wantConstraints() {
+		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
+	}
+	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
@@ -340,8 +358,11 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
 				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
 				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
-				for _, a := range assets {
-					_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
+				if coverageEnabled {
+					for _, a := range assets {
+						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+					}
 				}
 			}
 		}

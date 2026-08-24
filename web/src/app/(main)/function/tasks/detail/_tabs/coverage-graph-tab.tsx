@@ -447,7 +447,7 @@ function FoldSheet({
 }
 
 // ---------------------------------------------------------------------------
-function GraphInner({ taskId }: { taskId: string }) {
+function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; coverageEnabled?: boolean }) {
   const [data, setData] = React.useState<{
     nodes: CoverageGraphNode[];
     edges: CoverageGraphEdge[];
@@ -470,12 +470,17 @@ function GraphInner({ taskId }: { taskId: string }) {
     setLoading(true);
     api
       .taskCoverageGraph(taskId)
-      .then((g) => setData({ nodes: g.nodes ?? [], edges: g.edges ?? [] }))
+      .then((g) => {
+        // 资产覆盖度功能关闭(B1)：仍出图(范围内资产/company 关联依旧可见)，但抹平
+        // tested 状态——不显示测试进度、不做已测高亮。
+        const nodes = coverageEnabled ? (g.nodes ?? []) : (g.nodes ?? []).map((n) => ({ ...n, tested: false }));
+        setData({ nodes, edges: g.edges ?? [] });
+      })
       .catch(() => {
         /* 保留上一次数据 */
       })
       .finally(() => setLoading(false));
-  }, [taskId]);
+  }, [taskId, coverageEnabled]);
 
   React.useEffect(() => {
     fetchGraph();
@@ -630,8 +635,14 @@ function GraphInner({ taskId }: { taskId: string }) {
         <div className="flex items-center justify-between gap-3">
           {total > 0 ? (
             <span className="text-muted-foreground">
-              范围内 <span className="text-foreground font-semibold tabular-nums">{inScope}</span> · 已测{" "}
-              <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{tested}</span>
+              范围内 <span className="text-foreground font-semibold tabular-nums">{inScope}</span>
+              {coverageEnabled && (
+                <>
+                  {" "}
+                  · 已测{" "}
+                  <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{tested}</span>
+                </>
+              )}
             </span>
           ) : (
             <span className="text-muted-foreground">{loading ? "加载中…" : "暂无范围内资产（先锚定任务范围）"}</span>
@@ -655,12 +666,16 @@ function GraphInner({ taskId }: { taskId: string }) {
           })}
         </div>
         <div className="border-border/60 text-muted-foreground flex flex-wrap gap-x-3 gap-y-1.5 border-t pt-2">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="size-3 rounded-full bg-emerald-500" /> 已测（高亮）
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="size-3 rounded-full bg-neutral-400" /> 未测
-          </span>
+          {coverageEnabled && (
+            <>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-3 rounded-full bg-emerald-500" /> 已测（高亮）
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-3 rounded-full bg-neutral-400" /> 未测
+              </span>
+            </>
+          )}
           <span className="inline-flex items-center gap-1.5">
             <span className="size-3 rounded-full border border-dashed border-neutral-400 bg-neutral-200" /> 范围外
           </span>
@@ -684,12 +699,12 @@ function GraphInner({ taskId }: { taskId: string }) {
   );
 }
 
-export function CoverageGraphTab({ taskId }: { taskId: string }) {
+export function CoverageGraphTab({ taskId, coverageEnabled = true }: { taskId: string; coverageEnabled?: boolean }) {
   return (
     <Card>
       <CardContent className="p-0">
         <div className="h-[72vh] w-full overflow-hidden rounded-xl">
-          <GraphInner taskId={taskId} />
+          <GraphInner taskId={taskId} coverageEnabled={coverageEnabled} />
         </div>
       </CardContent>
     </Card>

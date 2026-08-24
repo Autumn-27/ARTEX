@@ -16,10 +16,13 @@ type TaskScope struct {
 	TaskID    int64  `json:"task_id"`
 	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr
 	CompanyID *int64 `json:"company_id,omitempty"`
-	Domain    string `json:"domain,omitempty"`
-	Net       string `json:"net,omitempty"`
-	Source    string `json:"source"`
-	Reason    string `json:"reason,omitempty"`
+	// CompanyName is resolved for kind=company so callers can label a scope row
+	// without a second lookup. Empty when the row is not a company reference.
+	CompanyName string `json:"company_name,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	Net         string `json:"net,omitempty"`
+	Source      string `json:"source"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 // stripHostPort drops a trailing :port from a host:port / ip:port / [ipv6]:port
@@ -187,8 +190,11 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason string) (Ta
 // ListTaskScope returns all scope rows for a task.
 func (s *AssetStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
-SELECT id, kind, COALESCE(company_id,0), COALESCE(domain,''), COALESCE(net::text,''), source, COALESCE(reason,'')
-FROM task_scope WHERE task_id=$1 ORDER BY id`, taskID)
+SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
+       COALESCE(ts.net::text,''), ts.source, COALESCE(ts.reason,'')
+FROM task_scope ts
+LEFT JOIN companies c ON c.id=ts.company_id
+WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +203,7 @@ FROM task_scope WHERE task_id=$1 ORDER BY id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.Domain, &t.Net, &t.Source, &t.Reason); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Source, &t.Reason); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID
@@ -227,11 +233,26 @@ type CoverageByType struct {
 // NOT a precise metric. Denominator = assets matching any active task_scope row;
 // Tested = those anchored to at least one fact node in the exploration.
 type Coverage struct {
+	Enabled     bool             `json:"enabled"`     // 资产覆盖度功能是否开启；false 时其余字段为零值
 	ScopeRows   int              `json:"scope_rows"`  // 0 → 范围未锚定
 	Denominator int              `json:"denominator"` // 范围内资产数
 	Tested      int              `json:"tested"`      // 已测(约)
 	Pct         *float64         `json:"pct"`         // 覆盖度；分母 0 时 null
 	ByType      []CoverageByType `json:"by_type"`     // 按资产类型的 总数/已测
+}
+
+// CoverageEnabled reports whether a task has the asset-coverage feature turned on
+// (tasks.coverage_enabled). Missing row / error → true (fail open to the default),
+// so unknown/legacy tasks keep the historical behavior. taskID<=0 → true.
+func (s *AssetStore) CoverageEnabled(taskID int64) bool {
+	if taskID <= 0 {
+		return true
+	}
+	var enabled bool
+	if err := s.db.QueryRow(`SELECT COALESCE(coverage_enabled,true) FROM tasks WHERE id=$1`, taskID).Scan(&enabled); err != nil {
+		return true
+	}
+	return enabled
 }
 
 // task_scope→assets match predicate, reused by the count / by-type / untested queries. $1=taskID.

@@ -2,6 +2,24 @@
 
 import * as React from "react";
 import Link from "next/link";
+<<<<<<< Updated upstream
+=======
+
+import {
+  ChevronRightIcon,
+  EyeIcon,
+  Loader2Icon,
+  PaperclipIcon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+  StarIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
+>>>>>>> Stashed changes
 import { toast } from "sonner";
 import {
   PlusIcon,
@@ -150,6 +168,17 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "timeout", label: "已超时" },
 ];
 
+// 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
+// (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
+// 两边不会出现一个可点、另一个不可点的分歧。
+const PAUSABLE_STATUSES = new Set<TaskStatus>(["created", "queued", "running"]);
+
+function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
+  if (status === "paused") return "resume";
+  if (PAUSABLE_STATUSES.has(status)) return "pause";
+  return null;
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [query, setQuery] = React.useState("");
@@ -164,6 +193,10 @@ export default function TasksPage() {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (!q) return true;
       return (
+<<<<<<< Updated upstream
+=======
+        (t.name ?? "").toLowerCase().includes(q) ||
+>>>>>>> Stashed changes
         t.description.toLowerCase().includes(q) ||
         t.goal.toLowerCase().includes(q) ||
         t.id.toLowerCase().includes(q)
@@ -214,6 +247,7 @@ export default function TasksPage() {
     return () => clearInterval(i);
   }, [hasRunning]);
 
+<<<<<<< Updated upstream
   const deleteTask = React.useCallback(async (id: string) => {
     try {
       await api.deleteTask(id);
@@ -223,6 +257,152 @@ export default function TasksPage() {
       toast.error("删除失败：" + (e as Error).message);
     }
   }, [load]);
+=======
+  const deleteTask = React.useCallback(
+    async (id: string, options: DeleteTaskOptions) => {
+      try {
+        const result = await api.deleteTask(id, options);
+        if (result.cleanup_warning) {
+          toast.warning(`${deleteSummary(result)}；部分外部数据清理未完成：${result.cleanup_warning}`);
+        } else {
+          toast.success(deleteSummary(result));
+        }
+        load();
+      } catch (e) {
+        toast.error("删除失败：" + (e as Error).message);
+        throw e;
+      }
+    },
+    [load],
+  );
+
+  // controlTask 是行内暂停/继续:批量走 controlTasksBatch,单行走单任务接口,省去
+  // 「先勾选再点批量」。清空 lastRef 让下一次轮询即使负载相同也照单接收,否则状态
+  // 回写会被去重挡掉、按钮看起来没反应。
+  const controlTask = React.useCallback(
+    async (id: string, action: "pause" | "resume") => {
+      try {
+        const result = await api.controlTask(id, action);
+        toast.success(
+          action === "pause" ? `任务 #${id} 已暂停` : `任务 #${id} 已继续${result.queued ? "，已进入队列" : ""}`,
+        );
+      } catch (e) {
+        toast.error(`${action === "pause" ? "暂停" : "继续"}失败：${(e as Error).message}`);
+      } finally {
+        // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
+        lastRef.current = "";
+        load();
+      }
+    },
+    [load],
+  );
+
+  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
+  // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
+  const deleteTasks = React.useCallback(
+    async (ids: string[], options: DeleteTaskOptions, onProgress: (done: number) => void) => {
+      const total: DeleteCounts = {
+        assets_deleted: 0,
+        assets_detached: 0,
+        traffic_deleted: 0,
+        files_deleted: false,
+        findings_deleted: 0,
+        llm_records_deleted: 0,
+      };
+      const deleted: string[] = [];
+      const failed: { id: string; message: string }[] = [];
+      const warnings: string[] = [];
+
+      for (const id of ids) {
+        try {
+          const r = await api.deleteTask(id, options);
+          total.assets_deleted += r.assets_deleted;
+          total.assets_detached += r.assets_detached;
+          total.traffic_deleted += r.traffic_deleted;
+          total.files_deleted = total.files_deleted || r.files_deleted;
+          total.findings_deleted += r.findings_deleted;
+          total.llm_records_deleted += r.llm_records_deleted;
+          if (r.cleanup_warning) warnings.push(`#${id}：${r.cleanup_warning}`);
+          deleted.push(id);
+        } catch (e) {
+          failed.push({ id, message: (e as Error).message });
+        }
+        onProgress(deleted.length + failed.length);
+      }
+
+      if (deleted.length > 0) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          for (const id of deleted) next.delete(id);
+          return next;
+        });
+        const details = deleteDetails(total);
+        const summary = `已删除 ${deleted.length} 个任务` + (details.length > 0 ? `（${details.join("，")}）` : "");
+        if (warnings.length > 0) {
+          toast.warning(`${summary}；部分外部数据清理未完成：${warnings.join("；")}`);
+        } else {
+          toast.success(summary);
+        }
+      }
+      if (failed.length > 0) {
+        const head = failed
+          .slice(0, 3)
+          .map((f) => `#${f.id}（${f.message}）`)
+          .join("；");
+        toast.error(`${failed.length} 个任务删除失败：${head}${failed.length > 3 ? " 等" : ""}`);
+      }
+      load();
+    },
+    [load],
+  );
+
+  const selectedTasks = React.useMemo(() => tasks.filter((task) => selectedIds.has(task.id)), [tasks, selectedIds]);
+  const pausableTaskIDs = React.useMemo(
+    () => selectedTasks.filter((task) => taskControlAction(task.status) === "pause").map((task) => task.id),
+    [selectedTasks],
+  );
+  const resumableTaskIDs = React.useMemo(
+    () => selectedTasks.filter((task) => taskControlAction(task.status) === "resume").map((task) => task.id),
+    [selectedTasks],
+  );
+
+  const controlSelectedTasks = React.useCallback(
+    async (action: "pause" | "resume", ids: string[]) => {
+      if (ids.length === 0 || batchControlling) return;
+      if (ids.length > 100) {
+        toast.error("一次最多控制 100 个任务");
+        return;
+      }
+      setBatchControlling(action);
+      try {
+        const result = await api.controlTasksBatch(ids, action);
+        const succeeded = result.items.filter((item) => item.ok);
+        const failed = result.items.filter((item) => !item.ok);
+        if (succeeded.length > 0) {
+          toast.success(
+            action === "pause"
+              ? `已暂停 ${succeeded.length} 个任务`
+              : `已继续 ${succeeded.length} 个任务${succeeded.some((item) => item.queued) ? "，部分任务已进入队列" : ""}`,
+          );
+        }
+        if (failed.length > 0) {
+          const details = failed
+            .slice(0, 3)
+            .map((item) => `#${item.id}（${item.error || "状态已变化"}）`)
+            .join("；");
+          toast.error(`${failed.length} 个任务操作失败：${details}${failed.length > 3 ? " 等" : ""}`);
+        }
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`${action === "pause" ? "批量暂停" : "批量继续"}失败：${(error as Error).message}`);
+      } finally {
+        setBatchControlling(null);
+      }
+    },
+    [batchControlling, load],
+  );
+>>>>>>> Stashed changes
 
   return (
     <Card>
@@ -279,6 +459,7 @@ export default function TasksPage() {
             <TableHeader className="[&_tr]:border-t">
               <TableRow>
                 <TableHead className="font-mono">ID</TableHead>
+                <TableHead>名称</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>目标</TableHead>
                 <TableHead>状态</TableHead>
@@ -298,6 +479,12 @@ export default function TasksPage() {
                   // 带来的整表重渲染,只让在跑的那几行走时长。
                   nowSec={task.status === "running" ? nowSec : 0}
                   onDelete={deleteTask}
+<<<<<<< Updated upstream
+=======
+                  onControl={controlTask}
+                  selected={selectedIds.has(task.id)}
+                  onSelectedChange={toggleSelected}
+>>>>>>> Stashed changes
                 />
               ))}
             </TableBody>
@@ -323,10 +510,23 @@ const TaskRow = React.memo(function TaskRow({
   task,
   nowSec,
   onDelete,
+<<<<<<< Updated upstream
 }: {
   task: Task;
   nowSec: number;
   onDelete: (id: string) => void;
+=======
+  onControl,
+  selected,
+  onSelectedChange,
+}: {
+  task: Task;
+  nowSec: number;
+  onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
+  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+  selected: boolean;
+  onSelectedChange: (id: string, checked: boolean) => void;
+>>>>>>> Stashed changes
 }) {
   return (
     <TableRow className="group border-border/60">
@@ -335,13 +535,33 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
+<<<<<<< Updated upstream
           <span className="truncate" title={task.description}>
             {task.description}
           </span>
           {task.active && (
             <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />
           )}
+=======
+          <Link
+            href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+            className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            title={task.name || task.description}
+          >
+            {task.name || <span className="text-muted-foreground">未命名</span>}
+          </Link>
+          {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
+>>>>>>> Stashed changes
         </div>
+      </TableCell>
+      <TableCell className="text-muted-foreground max-w-xs">
+        <Link
+          href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+          className="block truncate rounded-sm hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          title={task.description}
+        >
+          {task.description}
+        </Link>
       </TableCell>
       <TableCell className="text-muted-foreground max-w-xs truncate">{task.goal}</TableCell>
       <TableCell>
@@ -387,6 +607,7 @@ const TaskRow = React.memo(function TaskRow({
         )}
       </TableCell>
       <TableCell className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))] group-hover:bg-muted/50">
+<<<<<<< Updated upstream
         <div className="flex items-center justify-end gap-2">
           <Button asChild size="sm">
             <Link href={`/function/tasks/detail?id=${task.id}`}>
@@ -417,18 +638,349 @@ const TaskRow = React.memo(function TaskRow({
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+=======
+        <div className="flex items-center justify-end gap-0.5">
+          <Button size="icon" variant="ghost" asChild aria-label="查看任务详情" title="查看任务详情">
+            <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}>
+              <EyeIcon />
+            </Link>
+          </Button>
+          <TaskControlButton task={task} onControl={onControl} />
+          <DeleteTaskDialog task={task} onDelete={onDelete} />
+>>>>>>> Stashed changes
         </div>
       </TableCell>
     </TableRow>
   );
 });
 
+<<<<<<< Updated upstream
+=======
+// 三态图标分开写而非嵌套三元:仓库 Biome 基线禁 noNestedTernary。
+function taskControlIcon(pending: boolean, action: "pause" | "resume" | null) {
+  if (pending) return <Loader2Icon className="animate-spin" />;
+  if (action === "resume") return <PlayIcon />;
+  return <PauseIcon />;
+}
+
+// TaskControlButton 是行内的暂停/继续开关。终态任务渲染为 disabled 而不是隐藏,
+// 这样各行操作列宽度一致,按钮位置不会随状态跳动。
+function TaskControlButton({
+  task,
+  onControl,
+}: {
+  task: Task;
+  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+}) {
+  const [pending, setPending] = React.useState(false);
+  const action = taskControlAction(task.status);
+  const label = action === "resume" ? "继续任务" : "暂停任务";
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      aria-label={label}
+      title={action ? label : "该状态不可暂停或继续"}
+      disabled={!action || pending}
+      onClick={async () => {
+        if (!action) return;
+        setPending(true);
+        try {
+          await onControl(task.id, action);
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      {taskControlIcon(pending, action)}
+    </Button>
+  );
+}
+
+const emptyDeleteOptions = (): DeleteTaskOptions => ({
+  delete_assets: false,
+  delete_traffic: false,
+  delete_files: false,
+  delete_findings: false,
+  delete_llm_records: false,
+});
+
+const deleteOptionKeys: (keyof DeleteTaskOptions)[] = [
+  "delete_assets",
+  "delete_traffic",
+  "delete_files",
+  "delete_findings",
+  "delete_llm_records",
+];
+
+// DeleteOptionFields renders the「同时清理关联数据」checkbox block shared by the
+// single-task and bulk delete dialogs. idPrefix keeps the label/input ids unique when
+// several dialogs live in the same table.
+function DeleteOptionFields({
+  idPrefix,
+  options,
+  onOptionsChange,
+  disabled,
+}: {
+  idPrefix: string;
+  options: DeleteTaskOptions;
+  onOptionsChange: React.Dispatch<React.SetStateAction<DeleteTaskOptions>>;
+  disabled: boolean;
+}) {
+  const selectedCount = deleteOptionKeys.filter((key) => options[key]).length;
+  let allChecked: boolean | "indeterminate" = false;
+  if (selectedCount === deleteOptionKeys.length) {
+    allChecked = true;
+  } else if (selectedCount > 0) {
+    allChecked = "indeterminate";
+  }
+
+  const updateOption = (key: keyof DeleteTaskOptions, checked: boolean) => {
+    onOptionsChange((current) => ({ ...current, [key]: checked }));
+  };
+
+  const updateAllOptions = (checked: boolean) => {
+    onOptionsChange({
+      delete_assets: checked,
+      delete_traffic: checked,
+      delete_files: checked,
+      delete_findings: checked,
+      delete_llm_records: checked,
+    });
+  };
+
+  return (
+    <FieldSet disabled={disabled}>
+      <FieldLegend variant="label">同时清理关联数据</FieldLegend>
+      <FieldGroup className="gap-3">
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-all-${idPrefix}`}
+            checked={allChecked}
+            onCheckedChange={(checked) => updateAllOptions(checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-all-${idPrefix}`}>全部删除</FieldLabel>
+            <FieldDescription>选中下方全部关联数据，包括资产、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-assets-${idPrefix}`}
+            checked={options.delete_assets}
+            onCheckedChange={(checked) => updateOption("delete_assets", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-assets-${idPrefix}`}>关联资产</FieldLabel>
+            <FieldDescription>删除仅属于该任务的资产；共享资产只解除当前任务关联。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-traffic-${idPrefix}`}
+            checked={options.delete_traffic}
+            onCheckedChange={(checked) => updateOption("delete_traffic", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-traffic-${idPrefix}`}>关联流量</FieldLabel>
+            <FieldDescription>按关联资产的精确主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-files-${idPrefix}`}
+            checked={options.delete_files}
+            onCheckedChange={(checked) => updateOption("delete_files", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-files-${idPrefix}`}>任务文件</FieldLabel>
+            <FieldDescription>删除该任务工作目录中的上传文件、命令输出和其他产物。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-findings-${idPrefix}`}
+            checked={options.delete_findings}
+            onCheckedChange={(checked) => updateOption("delete_findings", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-findings-${idPrefix}`}>关联漏洞</FieldLabel>
+            <FieldDescription>永久删除该任务产生的独立漏洞记录与漏洞报告。</FieldDescription>
+          </FieldContent>
+        </Field>
+        <Field orientation="horizontal">
+          <Checkbox
+            id={`delete-llm-records-${idPrefix}`}
+            checked={options.delete_llm_records}
+            onCheckedChange={(checked) => updateOption("delete_llm_records", checked === true)}
+          />
+          <FieldContent>
+            <FieldLabel htmlFor={`delete-llm-records-${idPrefix}`}>LLM 请求/响应记录</FieldLabel>
+            <FieldDescription>永久删除该任务录制的 LLM 请求、响应、Token 与错误详情。</FieldDescription>
+          </FieldContent>
+        </Field>
+      </FieldGroup>
+    </FieldSet>
+  );
+}
+
+function DeleteTaskDialog({
+  task,
+  onDelete,
+}: {
+  task: Task;
+  onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [options, setOptions] = React.useState<DeleteTaskOptions>(emptyDeleteOptions);
+
+  const handleOpenChange = (next: boolean) => {
+    if (deleting) return;
+    setOpen(next);
+    if (next) setOptions(emptyDeleteOptions());
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await onDelete(task.id, options);
+      setOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
+      <AlertDialogTrigger asChild>
+        <Button size="icon" variant="outline" aria-label="删除任务">
+          <Trash2Icon className="text-destructive" />
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认删除任务 #{task.id}？</AlertDialogTitle>
+          <AlertDialogDescription className="break-words">
+            {task.description ? (
+              <>
+                「
+                <span className="break-all">
+                  {task.description.length > 80 ? `${task.description.slice(0, 80)}…` : task.description}
+                </span>
+                」
+              </>
+            ) : (
+              "该任务"
+            )}
+            的执行记录与探索链路将被永久删除。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <DeleteOptionFields idPrefix={task.id} options={options} onOptionsChange={setOptions} disabled={deleting} />
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={deleting}
+            onClick={(event) => {
+              event.preventDefault();
+              void handleDelete();
+            }}
+          >
+            {deleting && <Spinner data-icon="inline-start" />}
+            {deleting ? "删除中" : "删除"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+// BulkDeleteTasksDialog deletes every checked task with one shared set of cleanup options.
+// The backend has no batch endpoint, so deletion runs one task at a time (see deleteTasks)
+// and the button shows live progress.
+function BulkDeleteTasksDialog({
+  ids,
+  onDelete,
+}: {
+  ids: string[];
+  onDelete: (ids: string[], options: DeleteTaskOptions, onProgress: (done: number) => void) => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [done, setDone] = React.useState(0);
+  const [options, setOptions] = React.useState<DeleteTaskOptions>(emptyDeleteOptions);
+
+  const handleOpenChange = (next: boolean) => {
+    if (deleting) return;
+    setOpen(next);
+    if (next) {
+      setOptions(emptyDeleteOptions());
+      setDone(0);
+    }
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    setDone(0);
+    try {
+      await onDelete(ids, options, setDone);
+      setOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <Trash2Icon className="text-destructive" /> 删除所选 {ids.length}
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认删除所选 {ids.length} 个任务？</AlertDialogTitle>
+          <AlertDialogDescription>
+            这些任务的执行记录与探索链路将被永久删除，下方清理选项对所选任务统一生效。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="text-muted-foreground flex flex-wrap gap-1 text-xs">
+          {ids.slice(0, 30).map((id) => (
+            <code key={id} className="bg-muted rounded px-1.5 py-0.5 font-mono">
+              #{id}
+            </code>
+          ))}
+          {ids.length > 30 && <span className="self-center">…等 {ids.length} 个</span>}
+        </div>
+        <DeleteOptionFields idPrefix="bulk" options={options} onOptionsChange={setOptions} disabled={deleting} />
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={deleting}
+            onClick={(event) => {
+              event.preventDefault();
+              void handleDelete();
+            }}
+          >
+            {deleting && <Spinner data-icon="inline-start" />}
+            {deleting ? `删除中 ${done}/${ids.length}` : `删除 ${ids.length} 个任务`}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+>>>>>>> Stashed changes
 // CreateTaskSheet is the 新建任务 drawer. Its form state lives HERE, not in TasksPage: with
 // 描述/目标 held by the page component every keystroke re-rendered the whole task table
 // behind the drawer (plus its sticky column and 20 AlertDialog trees), which showed up as
 // input lag. Now typing only re-renders the drawer.
 function CreateTaskSheet({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = React.useState(false);
+  const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
@@ -436,6 +988,7 @@ function CreateTaskSheet({ onCreated }: { onCreated: () => void }) {
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -479,14 +1032,31 @@ function CreateTaskSheet({ onCreated }: { onCreated: () => void }) {
       const pid = llmProfile === ACTIVE_PROFILE ? undefined : Number(llmProfile);
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
+<<<<<<< Updated upstream
       await api.createTask(description.trim(), goal.trim(), pid, timeoutSec, seedFirstIntent, heartbeatSec);
+=======
+      await api.createTask({
+        name: name.trim(),
+        description: description.trim(),
+        goal: goal.trim(),
+        llmProfileIds: llmProfileIDs.map(Number),
+        sourceTaskIds: sourceTaskIDs,
+        companyIds: companyIDs,
+        timeoutSeconds: timeoutSec,
+        seedFirstIntent,
+        planHeartbeatSeconds: heartbeatSec,
+        coverageEnabled,
+      });
+>>>>>>> Stashed changes
       toast.success("任务已创建");
+      setName("");
       setDescription("");
       setGoal("");
       setLlmProfile(ACTIVE_PROFILE);
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setCoverageEnabled(true);
       setUploadCount(0);
       draftIdRef.current = "";
       setOpen(false);
@@ -497,10 +1067,216 @@ function CreateTaskSheet({ onCreated }: { onCreated: () => void }) {
   }
 
   return (
+<<<<<<< Updated upstream
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger asChild>
           <Button size="sm" className="ml-auto">
             <PlusIcon /> 新建任务
+=======
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button size="sm">
+          <PlusIcon /> 新建任务
+        </Button>
+      </SheetTrigger>
+      {/* 45vw 宽的右侧抽屉:整屏高度可滚动,长表单不再受弹窗高度限制。窄屏退化为全宽。
+            内容为 flex 列:头/脚固定,中间字段区 flex-1 独立滚动。 */}
+      <SheetContent
+        ref={sheetContentRef}
+        side="right"
+        className="w-full! max-w-none! gap-0 p-0 sm:w-[45vw]! sm:max-w-[45vw]!"
+      >
+        <SheetHeader className="border-b p-6">
+          <SheetTitle>新建任务</SheetTitle>
+          <SheetDescription>填写测试对象与目标，高级参数可按需展开。</SheetDescription>
+        </SheetHeader>
+
+        <div className="flex-1 overflow-y-auto p-6">
+          <div className="grid gap-5">
+            <TaskTemplateControls
+              description={description}
+              goal={goal}
+              selectedTemplateID={selectedTemplateID}
+              onSelectedTemplateIDChange={setSelectedTemplateID}
+              onApply={(template) => {
+                setDescription(template.description);
+                setGoal(template.goal);
+                setUploadCount(0);
+              }}
+              portalContainer={sheetContentRef}
+            />
+            <div className="grid gap-2">
+              <Label htmlFor="name">名称（可选）</Label>
+              <Input
+                id="name"
+                placeholder="给任务起个便于识别的名字，例如：Acme 官网渗透"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="description">描述</Label>
+              <Textarea
+                id="description"
+                className="min-h-32"
+                placeholder="测试对象与背景，例如：测试 example.com 这个站点"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+              {/* 上传文件(可多选):暂存到 drafts/,把绝对路径追加进上方描述,worker 据此 Read/Bash 打开。 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => void pickFiles(e.target.files)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                >
+                  {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
+                  上传文件
+                </Button>
+                <span className="text-muted-foreground text-xs">
+                  {uploadCount > 0
+                    ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
+                    : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
+                </span>
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="goal">目标</Label>
+              <Textarea
+                id="goal"
+                className="min-h-32"
+                placeholder="要达成什么，例如：拿下后台管理权限、获取服务器权限"
+                value={goal}
+                onChange={(e) => setGoal(e.target.value)}
+              />
+            </div>
+            <Field>
+              <FieldLabel htmlFor="source-tasks">关联任务</FieldLabel>
+              <SourceTaskPicker
+                tasks={tasks}
+                value={sourceTaskIDs}
+                onValueChange={setSourceTaskIDs}
+                portalContainer={sheetContentRef}
+              />
+              <FieldDescription>
+                最多关联 {MAX_SOURCE_TASKS}{" "}
+                个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
+              <CompanyPicker
+                companies={companies}
+                value={companyIDs}
+                onValueChange={setCompanyIDs}
+                portalContainer={sheetContentRef}
+              />
+              <FieldDescription>
+                将所选企业的域名、IP、CIDR、ICP 和企业关键词作为 Agent
+                可选范围上下文；不会自动生成意图或强制改变执行目标。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="llm-profiles">LLM 配置链</FieldLabel>
+              <TaskLLMProfileChain
+                profiles={profiles}
+                value={llmProfileIDs}
+                onValueChange={setLLMProfileIDs}
+                inputId="llm-profiles"
+                portalContainer={sheetContentRef}
+              />
+              <FieldDescription>按列表顺序故障转移；第一项为当前配置，仅在明确额度不足时切换下一项。</FieldDescription>
+            </Field>
+
+            {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}
+            <Collapsible>
+              <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
+                <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
+                高级设置
+                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · 首个意图</span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="grid gap-5 pt-5">
+                <div className="grid gap-2">
+                  <Label htmlFor="timeout-min">任务超时（分钟，可选）</Label>
+                  <Input
+                    id="timeout-min"
+                    type="number"
+                    min={0}
+                    className="w-40"
+                    placeholder="留空 = 不限时"
+                    value={timeoutMin}
+                    onChange={(e) => setTimeoutMin(e.target.value)}
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    到点后触发优雅收尾（各 agent 写回 + planner 终局判定），任务进入 timeout 终态。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="heartbeat-min">planner 心跳（分钟）</Label>
+                  <Input
+                    id="heartbeat-min"
+                    type="number"
+                    min={10}
+                    className="w-40"
+                    placeholder="默认 10"
+                    value={heartbeatMin}
+                    onChange={(e) => setHeartbeatMin(e.target.value)}
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    距上轮规划结束/任务开始满该时长且期间无触发，自动触发一轮规划（兜底卡死 + 唤醒去监督在跑的
+                    worker）。下限 10 分钟。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <label htmlFor="seed-first-intent" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="seed-first-intent"
+                      checked={seedFirstIntent}
+                      onCheckedChange={(v) => setSeedFirstIntent(!!v)}
+                    />
+                    直接下发首个意图（描述+目标）
+                  </label>
+                  <p className="text-muted-foreground text-xs">
+                    开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
+                    接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="coverage-enabled"
+                      checked={coverageEnabled}
+                      onCheckedChange={(v) => setCoverageEnabled(!!v)}
+                    />
+                    资产覆盖度功能
+                  </label>
+                  <p className="text-muted-foreground text-xs">
+                    默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
+                    态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
+                  </p>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          </div>
+        </div>
+
+        <SheetFooter className="flex-row justify-end gap-2 border-t p-4">
+          <SheetClose asChild>
+            <Button variant="outline">取消</Button>
+          </SheetClose>
+          <Button onClick={createTask} disabled={creating || uploading}>
+            {creating && <Spinner data-icon="inline-start" />}
+            {creating ? "创建中" : "创建"}
+>>>>>>> Stashed changes
           </Button>
         </SheetTrigger>
         {/* 45vw 宽的右侧抽屉:整屏高度可滚动,长表单不再受弹窗高度限制。窄屏退化为全宽。

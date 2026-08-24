@@ -52,6 +52,12 @@ type ToolSet struct {
 	ts     *db.ExplorationStore
 	worker string
 	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
+	// zero value (all existing ToolSet constructions) means ENABLED — matching the
+	// DB default (true). When true: graphOverviewData drops the coverage block, the
+	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
+	// are filtered out of the agent's tool list. The scope field stays regardless.
+	coverageDisabled bool
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
@@ -145,6 +151,90 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
+
+// SetCoverageEnabled records whether this task has the asset-coverage feature on
+// (default enabled). Passing false makes graphOverviewData omit the coverage block,
+// the insertAssets auto-scope hook a no-op, and CoverageTools reports the two
+// coverage-only tools so callers can drop them from the agent's tool list.
+func (t *ToolSet) SetCoverageEnabled(enabled bool) { t.coverageDisabled = !enabled }
+
+// CoverageDisabled reports whether the coverage feature is off for this task.
+func (t *ToolSet) CoverageDisabled() bool { return t.coverageDisabled }
+
+// coverageOnlyTools are the LLM tools that only make sense when asset coverage is
+// on. When the feature is off they are filtered out of the agent's tool list so
+// they neither pollute the prompt nor let the model build a disabled denominator.
+var coverageOnlyTools = map[string]bool{"add_task_scope": true, "list_untested_assets": true}
+
+// DropCoverageTools returns tools with the coverage-only ones removed when this
+// task has the feature disabled; otherwise it returns tools unchanged.
+func (t *ToolSet) DropCoverageTools(tools []actool.CoreTool) []actool.CoreTool {
+	if !t.coverageDisabled {
+		return tools
+	}
+	out := tools[:0:0]
+	for _, tool := range tools {
+		if coverageOnlyTools[tool.Name()] {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
+// StripCoverageParams hides coverage-only parameters (currently insert_assets'
+// per-item `related`, which only decides whether an asset enters the coverage
+// denominator) from the model-facing schema when coverage is disabled — the param
+// has no effect then, so showing it just pollutes the prompt. MUST run on the FINAL
+// tool list (after AugmentTools/ToolResolve): the DB tools table is authoritative on
+// schema, so stripping the code schema earlier would be overwritten. No-op when
+// enabled or when the list has no insert_assets. The schema is deep-copied before
+// editing so the shared/DB schema map is never mutated.
+func (t *ToolSet) StripCoverageParams(tools []actool.CoreTool) []actool.CoreTool {
+	if !t.coverageDisabled {
+		return tools
+	}
+	for i, tool := range tools {
+		if tool.Name() != "insert_assets" {
+			continue
+		}
+		schema := deepCopyJSONMap(tool.InputSchema())
+		if props, ok := nestedMap(schema, "properties", "assets", "items", "properties"); ok {
+			delete(props, "related")
+		}
+		tools[i] = DecorateTool(tool, tool.Description(), schema)
+	}
+	return tools
+}
+
+// deepCopyJSONMap returns a JSON round-trip deep copy of a schema map so callers can
+// edit it without touching the original (which may be shared/cached). Falls back to
+// the input on any marshal error (edits then become best-effort no-ops upstream).
+func deepCopyJSONMap(m map[string]any) map[string]any {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return m
+	}
+	var out map[string]any
+	if json.Unmarshal(b, &out) != nil {
+		return m
+	}
+	return out
+}
+
+// nestedMap walks a chain of string keys through nested map[string]any values,
+// returning the final map and whether the whole path resolved to one.
+func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
+	cur := m
+	for _, k := range keys {
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
 
 // Cross-task reuse: exported accessors returning the per-task tool logic bound to
 // THIS ToolSet's store. Host-side orchestration tools build a ToolSet for an
@@ -285,12 +375,286 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			_ = json.Unmarshal(h.Payload, &p)
 			hsum = append(hsum, map[string]any{"id": h.ID, "state": h.State, "text": p["text"]})
 		}
+<<<<<<< Updated upstream
 		out["hints"] = hsum
 		// lineage from the exploration edges: an intent's parents (what it
 		// derived_from — possibly several facts combined) and its yields (the
 		// facts/findings it produced). factFrom maps a fact → the intent that
 		// produced it. This is the relationship layer the flat lists lacked.
 		edges, _ := t.ts.Edges(5000)
+=======
+	}
+	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
+	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	out["frontier_open"] = len(fr)
+	// findings (confirmed vulns) and facts (worker exploration results) are
+	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
+	// negative results) so the planner sees them in one call; full content
+	// via node_detail(id).
+	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
+	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
+	out["findings"] = len(vulnNodes)                   // 确认漏洞数（目标判定看它）
+	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	recentFacts := make([]map[string]any, 0, 20)
+	for _, n := range factNodes {
+		if len(recentFacts) >= 20 {
+			break
+		}
+		m := compactNode(n)
+		if from := factFrom[n.ID]; from > 0 {
+			m["from_intent"] = from // 本事实由哪个意图产生
+		}
+		// confidence 带进概览：让规划者一眼看出哪条结论只是 inferred（尤其否定结论
+		// 别当铁案）；evidence 较长，留给 node_detail(id)。
+		var fp map[string]any
+		if json.Unmarshal(n.Payload, &fp) == nil {
+			if c, ok := fp["confidence"].(string); ok && c != "" {
+				m["confidence"] = c
+			}
+		}
+		recentFacts = append(recentFacts, m)
+	}
+	out["recent_facts"] = recentFacts // 最近事实的 {id, summary, from_intent, confidence?}，详情/证据用 node_detail(id)
+	// the original task (root) so the planner always has it, not just the
+	// decomposed goals.
+	if description, goal, err := t.ts.Root(); err == nil {
+		out["task"] = map[string]any{"description": description, "goal": goal}
+	}
+	// Direct source tasks are a live, read-only blackboard view. Keep their
+	// summaries in a separate field so their intents never enter this task's
+	// frontier or get mistaken for locally claimable work.
+	out["related_tasks"] = t.relatedTaskOverviews()
+	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
+	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
+	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 scope/hosts(范围边界与目标主机的
+	// 感知信息，company 关联经由 scope 在此浮现)，丢弃 denominator/tested/pct/by_type/note
+	// 等覆盖度度量，避免污染上下文、也不诱导已隐藏的 add_task_scope/list_untested_assets。
+	if t.as != nil && t.ts != nil && t.taskID > 0 {
+		{
+			m := map[string]any{}
+			if !t.coverageDisabled {
+				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
+					m["denominator"] = cov.Denominator
+					m["tested"] = cov.Tested
+					m["by_type"] = cov.ByType
+					m["note"] = "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产【通常不调用list_untested_assets，按照任务推进即可】；"
+					if cov.Denominator == 0 {
+						m["pct"] = nil
+						m["status"] = "范围未锚定"
+					} else {
+						m["pct"] = cov.Pct
+					}
+				}
+			}
+			// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
+			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。覆盖度开关无关，始终提供。
+			if rows, err := t.as.ListTaskScopeWithSources(t.taskID); err == nil && len(rows) > 0 {
+				scope := make([]map[string]any, 0, len(rows))
+				for _, r := range rows {
+					e := map[string]any{"kind": r.Kind, "source": r.Source, "task_id": r.TaskID}
+					if r.TaskID != t.taskID {
+						inheritedMap(e, r.TaskID)
+					}
+					switch {
+					case r.Domain != "":
+						e["value"] = r.Domain
+					case r.Net != "":
+						e["value"] = r.Net
+					case r.CompanyID != nil:
+						e["company_id"] = *r.CompanyID
+						if t.cs != nil {
+							if company, err := t.cs.GetCompany(*r.CompanyID); err == nil && company != nil {
+								e["company_name"] = company.Name
+							}
+							if rules, err := t.cs.GetScope(*r.CompanyID); err == nil {
+								keywords := make([]string, 0)
+								companyScope := make([]map[string]any, 0, len(rules))
+								for _, rule := range rules {
+									value := rule.Raw
+									if value == "" {
+										switch rule.Kind {
+										case "domain":
+											value = rule.Domain
+										case "ip", "cidr":
+											value = rule.Net
+										default:
+											value = rule.Value
+										}
+									}
+									entry := map[string]any{"kind": rule.Kind, "value": value}
+									if rule.Reason != "" {
+										entry["reason"] = rule.Reason
+									}
+									companyScope = append(companyScope, entry)
+									if rule.Kind == "keyword" && rule.Raw != "" {
+										keywords = append(keywords, rule.Raw)
+									}
+								}
+								if len(companyScope) > 0 {
+									e["company_scope"] = companyScope
+								}
+								if len(keywords) > 0 {
+									e["company_keywords"] = keywords
+								}
+							}
+						}
+					}
+					scope = append(scope, e)
+				}
+				m["scope"] = scope
+			}
+			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
+				const hostContextLimit = 500
+				visible := hosts
+				if len(visible) > hostContextLimit {
+					visible = visible[:hostContextLimit]
+				}
+				m["hosts"] = visible
+				m["host_count"] = len(hosts)
+				if len(visible) < len(hosts) {
+					m["hosts_truncated"] = true
+				}
+			}
+			if len(m) > 0 {
+				out["coverage"] = m
+			}
+		}
+	}
+	return out
+}
+
+func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
+	m["source_task_id"] = sourceTaskID
+	m["inherited"] = true
+	return m
+}
+
+const (
+	relatedOverviewTotalTextRunes     = 48_000
+	relatedOverviewMaxTextPerSource   = 8_000
+	relatedOverviewMaxGoalsPerSource  = 8
+	relatedOverviewMaxHintsPerSource  = 6
+	relatedOverviewMaxFactsPerSource  = 12
+	relatedOverviewMaxFindingsPerTask = 6
+	relatedOverviewMaxIntentsPerTask  = 8
+	relatedOverviewMaxScopePerSource  = 12
+)
+
+// overviewTextBudget bounds inherited prompt text while preserving a fair slice
+// for every direct source. Full evidence remains available through the on-demand
+// read tools, so truncation here does not discard persisted blackboard data.
+type overviewTextBudget struct {
+	remaining int
+	truncated bool
+}
+
+func relatedOverviewBudgetForSources(sourceCount int) int {
+	if sourceCount <= 0 {
+		return 0
+	}
+	if sourceCount > db.MaxTaskSourceCount {
+		sourceCount = db.MaxTaskSourceCount
+	}
+	perSource := relatedOverviewTotalTextRunes / sourceCount
+	if perSource > relatedOverviewMaxTextPerSource {
+		perSource = relatedOverviewMaxTextPerSource
+	}
+	return perSource
+}
+
+func (b *overviewTextBudget) take(value any, fieldLimit int) string {
+	var text string
+	switch value := value.(type) {
+	case string:
+		text = strings.TrimSpace(value)
+	case nil:
+		return ""
+	default:
+		text = strings.TrimSpace(fmt.Sprint(value))
+	}
+	if text == "" {
+		return ""
+	}
+	if b.remaining <= 0 || fieldLimit <= 0 {
+		b.truncated = true
+		return ""
+	}
+	runes := []rune(text)
+	limit := fieldLimit
+	if limit > b.remaining {
+		limit = b.remaining
+	}
+	if len(runes) > limit {
+		b.truncated = true
+		if limit == 1 {
+			text = "…"
+		} else {
+			text = string(runes[:limit-1]) + "…"
+		}
+		runes = []rune(text)
+	}
+	b.remaining -= len(runes)
+	return text
+}
+
+func recentTerminalIntents(store *db.ExplorationStore, limit int) []*db.Node {
+	if limit <= 0 {
+		return []*db.Node{}
+	}
+	const batch = 300
+	cursor := int64(0)
+	out := make([]*db.Node, 0, limit)
+	for len(out) < limit {
+		page, more, err := store.ListByKindPage(db.KindIntent, cursor, batch)
+		if err != nil || len(page) == 0 {
+			break
+		}
+		for _, intent := range page {
+			switch intent.State {
+			case "done", "blocked", "exhausted", "stopped":
+				out = append(out, intent)
+			}
+			if len(out) >= limit {
+				break
+			}
+		}
+		if !more {
+			break
+		}
+		cursor = page[len(page)-1].ID
+	}
+	return out
+}
+
+// relatedTaskOverviews distills persistent blackboard state from direct source
+// tasks. It intentionally reads each source's local store methods, never its own
+// related sources, so inheritance is one level only.
+func (t *ToolSet) relatedTaskOverviews() []map[string]any {
+	sources, err := t.ts.DirectSourceStores()
+	if err != nil {
+		return []map[string]any{}
+	}
+	if len(sources) > db.MaxTaskSourceCount {
+		sources = sources[:db.MaxTaskSourceCount]
+	}
+	perSourceTextBudget := relatedOverviewBudgetForSources(len(sources))
+	out := make([]map[string]any, 0, len(sources))
+	for _, source := range sources {
+		ts := source.Store
+		budget := overviewTextBudget{remaining: perSourceTextBudget}
+		item := map[string]any{
+			"source_task_id": source.Task.TaskID,
+			"inherited":      true,
+			"task": map[string]any{
+				"description": budget.take(source.Task.Description, 800),
+				"goal":        budget.take(source.Task.Goal, 800),
+				"status":      source.Task.Status,
+			},
+		}
+		stats, statsErr := ts.Stats()
+
+		edges, _ := ts.Edges(5000)
+>>>>>>> Stashed changes
 		parentsOf := map[int64][]int64{}
 		yieldsOf := map[int64][]int64{}
 		factFrom := map[int64]int64{}
@@ -914,6 +1278,80 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 					return actool.Errorf(e), nil
 				}
 				return actool.Text(fmt.Sprintf("goal added: %d", ids[0])), nil
+			}
+			out := map[string]any{"ids": ids}
+			if len(errs) > 0 {
+				out["errors"] = errs
+			}
+			return jsonResult(out)
+		})
+}
+
+type constraintItem struct {
+	Text string `json:"text"`
+	Type string `json:"type"` // allow | deny
+}
+
+// addOneConstraint 落一条操作约束到 task_constraints。origin 取 t.worker(缺省 system):
+// 拆解器写 "goals"、主 agent 写 "human"。
+func (t *ToolSet) addOneConstraint(it constraintItem) (int64, error) {
+	text := strings.TrimSpace(it.Text)
+	if text == "" {
+		return 0, fmt.Errorf("text 不能为空")
+	}
+	kind := strings.TrimSpace(strings.ToLower(it.Type))
+	if kind == "" {
+		kind = "deny" // 默认按禁止处理:未标注类型时更保守
+	}
+	if kind != "allow" && kind != "deny" {
+		return 0, fmt.Errorf("type 必须是 allow 或 deny")
+	}
+	return t.ts.AddConstraint(kind, text, t.worker)
+}
+
+// setConstraints 给【本任务】新增操作约束(allow=允许做什么 / deny=禁止做什么)。既是目标
+// 拆解器 round-0 抽约束的提交工具,也是主 agent 运行时补约束的工具——同一受管工具,可在 web
+// 端改描述/schema、按 agent 绑定。约束会被注入 planner/worker 的系统提示以约束探索边界。
+func (t *ToolSet) setConstraints() actool.CoreTool {
+	return writeTool("set_constraints",
+		"给【本任务】新增操作约束,用来框定探索边界:type=allow(允许做的操作)或 deny(禁止做的操作)。\n"+
+			"约束=对『可以/不可以做哪些操作』的规定(如『仅测当前端口,不扫其他端口』『禁止对生产库做写操作』『只允许被动侦察』),不是目标、也不是攻击步骤。\n"+
+			"★优先批量:多条放进 constraints 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 constraints 直接给顶层 text/type。\n"+
+			"只登记任务目标/描述里【明确写出】的约束,不要臆造;拿不准类型时用 deny(更保守)。",
+		obj(map[string]any{
+			"constraints": map[string]any{"type": "array", "description": "【优先用这个】要新增的约束数组,按顺序处理。每个元素:text(必填,一条约束)+ type(allow|deny)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"text":        str("[单条] 一条操作约束的内容"),
+			"type":        str("[单条] allow(允许)或 deny(禁止);缺省按 deny 处理"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("set_constraints 未启用: ExplorationStore 未初始化"), nil
+			}
+			var a struct {
+				Constraints    []constraintItem `json:"constraints"`
+				constraintItem                  // 单条模式:顶层 text/type
+			}
+			_ = json.Unmarshal(in, &a)
+			batch := len(a.Constraints) > 0
+			items := a.Constraints
+			if !batch {
+				items = []constraintItem{a.constraintItem}
+			}
+			ids := make([]int64, len(items))
+			errs := map[string]string{}
+			for i, it := range items {
+				id, err := t.addOneConstraint(it)
+				if err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
+				ids[i] = id
+			}
+			if !batch { // 单条:保持简单返回
+				if e, bad := errs["0"]; bad {
+					return actool.Errorf(e), nil
+				}
+				return actool.Text(fmt.Sprintf("constraint added: %d", ids[0])), nil
 			}
 			out := map[string]any{"ids": ids}
 			if len(errs) > 0 {

@@ -6,6 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+<<<<<<< Updated upstream
   Task, Stats, Asset, AssetNode, Edge, Company, TaskNode, Finding, Severity, FindingStatus,
   FindingsPage, FindingStats, FindingQuery, Activity,
   Audit, TrafficResp, TrafficDetail, TrafficHost, Settings, LLMProfile, Agent, AgentDetail, PromptVar,
@@ -15,6 +16,73 @@ import type {
   TaskAssetView, SSProject, SSTask, ConvTokenSummary, CoverageGraphData, CoverageAssetRefs,
   WorkspaceListing, WorkspaceFile,
   CommandRecord, LLMRecordItem, LLMRecordDetail, LLMTask,
+=======
+  Activity,
+  Agent,
+  AgentDetail,
+  AgentTrigger,
+  Asset,
+  Audit,
+  BatchControlItem,
+  ChatAttachment,
+  CommandRecord,
+  Company,
+  CompanyScopeRule,
+  Conversation,
+  ConvTokenSummary,
+  CoverageAssetRefs,
+  CoverageGraphData,
+  DailyTokenBucket,
+  DeleteTaskOptions,
+  DeleteTaskResult,
+  Edge,
+  Finding,
+  FindingDeepenResponse,
+  FindingGroupsPage,
+  FindingQuery,
+  FindingStats,
+  FindingStatus,
+  FindingsPage,
+  InterceptApprovalRow,
+  InterceptPending,
+  InterceptRule,
+  JudgeConfig,
+  LLMPoolStatus,
+  LLMProfile,
+  LLMRecordDetail,
+  LLMRecordItem,
+  LLMTask,
+  MCPServer,
+  MCPTool,
+  MissingSkill,
+  ModelTokenStat,
+  PromptVar,
+  PromptVersion,
+  SessionTokenUsage,
+  Settings,
+  Severity,
+  SkillCall,
+  SkillItem,
+  SSProject,
+  SSTask,
+  Stats,
+  Task,
+  TaskConstraint,
+  TaskGoal,
+  TaskLLMResolutions,
+  TaskNode,
+  TaskScopeRow,
+  TaskTemplate,
+  TokenTotal,
+  TokenUsage,
+  Tool,
+  TrafficDetail,
+  TrafficHost,
+  TrafficResp,
+  UsageStats,
+  WorkspaceFile,
+  WorkspaceListing,
+>>>>>>> Stashed changes
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -112,6 +180,7 @@ export const api = {
     post<{ ok: boolean }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
 
   // ---- tasks ----
+<<<<<<< Updated upstream
   tasks: () => get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   createTask: (description: string, goal: string, llmProfileId?: number, timeoutSeconds?: number, seedFirstIntent?: boolean, planHeartbeatSeconds?: number) =>
     post<Task>("/tasks", {
@@ -124,6 +193,64 @@ export const api = {
     }),
   deleteTask: (id: string) => del<{ deleted: number }>(`/tasks/${id}`),
   controlTask: (id: string, action: "pause" | "resume") => post<{ id: string; paused: boolean }>(`/tasks/${id}/control`, { action }),
+=======
+  tasks: () =>
+    get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
+  createTask: (input: {
+    name?: string;
+    description: string;
+    goal: string;
+    llmProfileIds?: number[];
+    sourceTaskIds?: string[];
+    companyIds?: number[];
+    timeoutSeconds?: number;
+    seedFirstIntent?: boolean;
+    planHeartbeatSeconds?: number;
+    coverageEnabled?: boolean;
+  }) =>
+    post<Task>("/tasks", {
+      name: input.name ?? "",
+      description: input.description,
+      goal: input.goal,
+      llm_profile_ids: input.llmProfileIds ?? [],
+      source_task_ids: input.sourceTaskIds ?? [],
+      company_ids: input.companyIds ?? [],
+      timeout_seconds: input.timeoutSeconds ?? 0,
+      seed_first_intent: input.seedFirstIntent ?? false,
+      plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
+      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+    }),
+  taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
+  createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
+    post<TaskTemplate>("/task-templates", input),
+  updateTaskTemplate: (id: number, input: Partial<Pick<TaskTemplate, "name" | "description" | "goal">>) =>
+    patch<TaskTemplate>(`/task-templates/${id}`, input),
+  deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
+  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
+    put<{
+      id: string;
+      llm_profile_ids: number[];
+      active_llm_profile_id?: number;
+      llm_failover_state: string;
+      reopened_intents: number;
+      switch_event?: Activity;
+    }>(`/tasks/${id}/llm`, {
+      llm_profile_ids: llmProfileIds,
+      active_llm_profile_id: activeLLMProfileId ?? null,
+    }),
+  deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
+  controlTask: (id: string, action: "pause" | "resume") =>
+    post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+  controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
+    post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
+  controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel", reason?: string) =>
+    post<{
+      id: number;
+      state: "paused" | "open" | "stopped";
+      deleted?: { intents: number; facts: number; findings: number; activities: number };
+    }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "" }),
+  taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
+>>>>>>> Stashed changes
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),
   // 批量重跑本任务全部 blocked 意图（一次网络/LLM 断连导致多条 blocked 时一键全部重试）。
@@ -134,6 +261,7 @@ export const api = {
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
+      enabled: boolean; // 资产覆盖度功能是否开启；false 时其余字段为零值
       scope_rows: number;
       denominator: number;
       tested: number;
@@ -141,8 +269,46 @@ export const api = {
       by_type: { type: string; total: number; tested: number }[];
     }>(`/tasks/${id}/coverage`),
   // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
+<<<<<<< Updated upstream
   taskCoverageGraph: (id: string) =>
     get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+=======
+  taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
+  usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
+  // ---- 目标管理（总览）----
+  // 本任务全部目标（text/vulnclass/state）。
+  taskGoals: (id: string) => get<{ goals: TaskGoal[] }>(`/tasks/${id}/goals`),
+  // 人工新增目标：写入图谱并通知 planner、复活任务。
+  addGoal: (id: string, text: string, vulnclass?: string) =>
+    post<TaskGoal>(`/tasks/${id}/goals`, { text, vulnclass: vulnclass ?? "" }),
+  // 人工修改目标文本（及 vulnclass）：通知 planner「由 old 变为 new」、复活任务。
+  updateGoal: (id: string, goalId: string, text: string, vulnclass?: string) =>
+    patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
+  // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
+  deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+
+  // ---- 操作约束管理（总览）----
+  // 本任务全部操作约束（allow/deny）。
+  taskConstraints: (id: string) => get<{ constraints: TaskConstraint[] }>(`/tasks/${id}/constraints`),
+  // 新增约束（不通知 planner，下一轮规划自然读到）。
+  addConstraint: (id: string, text: string, kind: TaskConstraint["kind"]) =>
+    post<TaskConstraint>(`/tasks/${id}/constraints`, { text, kind }),
+  // 修改约束（文本 + allow/deny）。
+  updateConstraint: (id: string, constraintId: string, text: string, kind: TaskConstraint["kind"]) =>
+    patch<TaskConstraint>(`/tasks/${id}/constraints/${constraintId}`, { text, kind }),
+  // 删除约束。
+  deleteConstraint: (id: string, constraintId: string) =>
+    del<{ ok: boolean }>(`/tasks/${id}/constraints/${constraintId}`),
+
+  // 本任务测试范围列表（含继承自来源任务的范围）。
+  taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
+  // 手动新增一条测试范围（kind=company/root_domain/subdomain/ip/cidr）。
+  addTaskScope: (id: string, kind: string, value: string, reason?: string) =>
+    post<TaskScopeRow>(`/tasks/${id}/scope`, { kind, value, reason }),
+  // 删除本任务的一条测试范围。
+  deleteTaskScope: (id: string, scopeId: number) => del<{ ok: boolean }>(`/tasks/${id}/scope/${scopeId}`),
+>>>>>>> Stashed changes
   // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
   taskAssetRefs: (id: string, assetId: number) =>
     get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
@@ -620,6 +786,10 @@ export const api = {
     });
     if (!r.ok) throw new Error(await r.text());
   },
+
+  // ---- intercept LLM judge (模型兜底审批,全局配置) ----
+  interceptGetJudgeConfig: () => get<JudgeConfig>("/intercept/judge"),
+  interceptSetJudgeConfig: (cfg: JudgeConfig) => put<{ ok: boolean }>("/intercept/judge", cfg),
 
   // ---- commands (tool execution history, any tool) ----
   commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
