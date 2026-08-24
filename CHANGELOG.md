@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-24
+
 ### UI
 
 #### 新增的功能
@@ -22,6 +24,10 @@
 - 无法对话时的提示按状态细分：完全没有配置提示「添加配置」，有配置但未激活提示「激活或为本会话指定一个配置」，不再一律显示「未配置」，便于定位。
 
 ### Agent
+
+#### 新增的功能
+
+- 目标已全部达成的任务，主 Agent 经 `add_intent` 下发的意图可被 Worker 直接领取执行、跑完即止：此时 Planner 不再运行（任务无 open 目标即不进规划），避免其重判目标达成而取消刚下发的意图；frontier 抽干后任务回到已完成。主 Agent 下发意图前会依据意图内容反问用户是否将其登记为正式目标，登记则任务恢复常规自主规划。
 
 #### 修改的功能
 
@@ -42,6 +48,10 @@
 #### 修改的功能
 
 - `ip`、`service`、`endpoint` 资产的 `ip` 字段不再接受主机名：`insert_assets` 和资产 API 会逐条返回带 `index` 的错误，并直接给出改正方法（改用 `type=subdomain` 填 `domain`，或先解析 A/AAAA 记录），Agent 可据此自行修正后重插。同批次中的其他资产不受影响，照常入库。
+
+### 贡献者
+
+- [@neouks](https://github.com/neouks)
 
 ## [0.3.3] - 2026-08-23
 
@@ -233,6 +243,7 @@
 - [@Autumn-27](https://github.com/Autumn-27)
 - [@neouks](https://github.com/neouks)
 
-[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Autumn-27/ARTEX/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Autumn-27/ARTEX/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Autumn-27/ARTEX/compare/v0.3.1...v0.3.2
