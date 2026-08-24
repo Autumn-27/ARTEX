@@ -298,6 +298,16 @@ export interface CompanyScopeRule {
   value: string;
 }
 
+// 资产范围写入的结果。errors 是本次提交里不合法的行；warnings 是与本次提交无关、
+// 但会让归属结果不符合预期的既有数据问题（如 ip 字段存了主机名的资产）。
+export interface CompanyScopeMutation {
+  added: number;
+  skipped: number;
+  invalid: number;
+  errors?: string[];
+  warnings?: string[];
+}
+
 // 公司资产范围规则的一条（归属唯一真值来源）。
 export interface ScopeRow {
   id: number;

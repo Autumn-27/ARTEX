@@ -8,6 +8,18 @@ CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;
 $$ LANGUAGE plpgsql;
 
+-- 安全的 text→inet 转换：非法值返回 NULL 而不是抛 22P02。assets.ip 是自由文本
+-- (Agent / 资产 API 可能写进主机名)，裸转 a.ip::inet 会让单独一行脏数据把整条
+-- 企业归属重算语句打挂。调用方用 try_inet(...) IS NULL 找出这些行并告警。
+-- 不用 pg_input_is_valid 是因为那要 PG16+，这里要兼容更老的存量库。
+CREATE OR REPLACE FUNCTION try_inet(value text) RETURNS inet AS $$
+BEGIN
+    RETURN value::inet;
+EXCEPTION WHEN others THEN
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT;
+
 -- =====================================================================
 -- A. 资产层：companies / assets / company_scope
 -- =====================================================================

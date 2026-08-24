@@ -17,6 +17,7 @@ import type {
   ChatAttachment,
   CommandRecord,
   Company,
+  CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
@@ -395,12 +396,12 @@ export const api = {
       },
     ),
   addCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
-    post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
       scope,
       reason,
     }),
   updateCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
-    post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
       scope,
       reason,
       reset: true,
