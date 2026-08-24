@@ -624,6 +624,13 @@ export interface BatchControlItem {
   error?: string;
 }
 
+// 批量改分类的逐任务结果。失败只可能是任务已被删除，分类本身的写入是原子的。
+export interface BatchCategoryItem {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
 // Whole-task (all agents) token aggregate.
 export interface TokenTotal {
   input_tokens: number;

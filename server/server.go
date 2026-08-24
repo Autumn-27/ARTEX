@@ -650,6 +650,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
 	mux.HandleFunc("DELETE /api/task-categories/{id}", s.pgDeleteTaskCategory)
+	mux.HandleFunc("POST /api/tasks/category/batch", s.updateTasksCategoryBatch)
 	mux.HandleFunc("GET /api/task-templates", s.pgListTaskTemplates)
 	mux.HandleFunc("POST /api/task-templates", s.pgCreateTaskTemplate)
 	mux.HandleFunc("PATCH /api/task-templates/{id}", s.pgUpdateTaskTemplate)

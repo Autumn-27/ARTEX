@@ -8,6 +8,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   EyeIcon,
+  FolderInputIcon,
   FolderKanbanIcon,
   Loader2Icon,
   PaperclipIcon,
@@ -203,6 +204,10 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "timeout", label: "已超时" },
 ];
 
+// Select 不接受空字符串 value,所以「无分类」在筛选器、新建表单和批量移动里
+// 统一用这个哨兵值,提交时再翻译成后端的 null。
+const UNCATEGORIZED_VALUE = "uncategorized";
+
 // 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
 // (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
 // 两边不会出现一个可点、另一个不可点的分歧。
@@ -224,13 +229,18 @@ export default function TasksPage() {
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
   const [batchControlling, setBatchControlling] = React.useState<"pause" | "resume" | null>(null);
+  const [movingCategory, setMovingCategory] = React.useState(false);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return tasks.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
-      if (categoryFilter === "uncategorized" && t.category_id != null) return false;
-      if (categoryFilter !== "all" && categoryFilter !== "uncategorized" && String(t.category_id) !== categoryFilter)
+      if (categoryFilter === UNCATEGORIZED_VALUE && t.category_id != null) return false;
+      if (
+        categoryFilter !== "all" &&
+        categoryFilter !== UNCATEGORIZED_VALUE &&
+        String(t.category_id) !== categoryFilter
+      )
         return false;
       if (!q) return true;
       return (
@@ -344,7 +354,7 @@ export default function TasksPage() {
   }, [load, loadCategories]);
 
   React.useEffect(() => {
-    if (categoryFilter === "all" || categoryFilter === "uncategorized") return;
+    if (categoryFilter === "all" || categoryFilter === UNCATEGORIZED_VALUE) return;
     if (!categories.some((category) => String(category.id) === categoryFilter)) setCategoryFilter("all");
   }, [categories, categoryFilter]);
 
@@ -505,6 +515,42 @@ export default function TasksPage() {
     [batchControlling, load],
   );
 
+  // 后端把整批分类写入放在一个事务里，所以失败项只可能是勾选后又被删掉的任务。
+  const moveSelectedTasksCategory = React.useCallback(
+    async (categoryID?: number) => {
+      const ids = [...selectedIds];
+      if (ids.length === 0 || movingCategory) return;
+      if (ids.length > 100) {
+        toast.error("一次最多修改 100 个任务的分类");
+        return;
+      }
+      setMovingCategory(true);
+      try {
+        const result = await api.updateTasksCategory(ids, categoryID);
+        const succeeded = result.items.filter((item) => item.ok);
+        const failed = result.items.filter((item) => !item.ok);
+        const target = result.category?.name ?? "未分类";
+        if (succeeded.length > 0) {
+          toast.success(`已将 ${succeeded.length} 个任务移动到「${target}」`);
+          setSelectedIds(new Set());
+        }
+        if (failed.length > 0) {
+          const details = failed
+            .slice(0, 3)
+            .map((item) => `#${item.id}（${item.error || "任务已不存在"}）`)
+            .join("；");
+          toast.error(`${failed.length} 个任务未能移动：${details}${failed.length > 3 ? " 等" : ""}`);
+        }
+        refreshCategoriesAndTasks();
+      } catch (error) {
+        toast.error(`修改分类失败：${(error as Error).message}`);
+      } finally {
+        setMovingCategory(false);
+      }
+    },
+    [movingCategory, refreshCategoriesAndTasks, selectedIds],
+  );
+
   return (
     <Card>
       <CardContent className="flex flex-col gap-4 px-0 pt-6">
@@ -550,7 +596,7 @@ export default function TasksPage() {
             <SelectContent>
               <SelectGroup>
                 <SelectItem value="all">全部分类</SelectItem>
-                <SelectItem value="uncategorized">未分类</SelectItem>
+                <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
                 {categories.map((category) => (
                   <SelectItem key={category.id} value={String(category.id)}>
                     {category.name}
@@ -598,6 +644,12 @@ export default function TasksPage() {
                   继续 {resumableTaskIDs.length}
                 </Button>
               )}
+              <MoveTasksCategoryDialog
+                categories={categories}
+                count={selectedIds.size}
+                moving={movingCategory}
+                onMove={moveSelectedTasksCategory}
+              />
               <BulkDeleteTasksDialog ids={[...selectedIds]} onDelete={deleteTasks} />
             </>
           )}
@@ -1112,6 +1164,81 @@ function DeleteTaskDialog({
 // BulkDeleteTasksDialog deletes every checked task with one shared set of cleanup options.
 // The backend has no batch endpoint, so deletion runs one task at a time (see deleteTasks)
 // and the button shows live progress.
+// MoveTasksCategoryDialog confirms a target before applying, so a mis-click on a
+// large selection cannot silently re-file every task. UNCATEGORIZED_VALUE stands
+// in for "no category" because Select rejects an empty string value.
+function MoveTasksCategoryDialog({
+  categories,
+  count,
+  moving,
+  onMove,
+}: {
+  categories: TaskCategory[];
+  count: number;
+  moving: boolean;
+  onMove: (categoryID?: number) => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [target, setTarget] = React.useState(UNCATEGORIZED_VALUE);
+
+  const handleOpenChange = (next: boolean) => {
+    if (moving) return;
+    setOpen(next);
+    if (next) setTarget(UNCATEGORIZED_VALUE);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <FolderInputIcon data-icon="inline-start" /> 修改分类
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>修改所选 {count} 个任务的分类</DialogTitle>
+          <DialogDescription>目标分类对所选任务统一生效；选「未分类」会把它们移出当前分类。</DialogDescription>
+        </DialogHeader>
+        <Field>
+          <FieldLabel htmlFor="bulk-category">目标分类</FieldLabel>
+          <Select value={target} onValueChange={setTarget} disabled={moving}>
+            <SelectTrigger id="bulk-category" className="w-full">
+              <SelectValue placeholder="选择分类" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
+                {categories.map((category) => (
+                  <SelectItem key={category.id} value={String(category.id)}>
+                    {category.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          {categories.length === 0 && <FieldDescription>还没有任何分类，先用「分类管理」创建一个。</FieldDescription>}
+        </Field>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" disabled={moving}>
+              取消
+            </Button>
+          </DialogClose>
+          <Button
+            disabled={moving}
+            onClick={() => {
+              void onMove(target === UNCATEGORIZED_VALUE ? undefined : Number(target)).then(() => setOpen(false));
+            }}
+          >
+            {moving && <Spinner data-icon="inline-start" />}
+            移动
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function BulkDeleteTasksDialog({
   ids,
   onDelete,
@@ -1527,7 +1654,7 @@ function CreateTaskSheet({
 }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
-  const [categoryID, setCategoryID] = React.useState("uncategorized");
+  const [categoryID, setCategoryID] = React.useState(UNCATEGORIZED_VALUE);
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
@@ -1597,7 +1724,7 @@ function CreateTaskSheet({
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
         name: name.trim(),
-        categoryId: categoryID === "uncategorized" ? undefined : Number(categoryID),
+        categoryId: categoryID === UNCATEGORIZED_VALUE ? undefined : Number(categoryID),
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -1610,7 +1737,7 @@ function CreateTaskSheet({
       });
       toast.success("任务已创建");
       setName("");
-      setCategoryID("uncategorized");
+      setCategoryID(UNCATEGORIZED_VALUE);
       setDescription("");
       setGoal("");
       setSelectedTemplateID(null);
@@ -1682,7 +1809,7 @@ function CreateTaskSheet({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectItem value="uncategorized">未分类</SelectItem>
+                    <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
                     {categories.map((category) => (
                       <SelectItem key={category.id} value={String(category.id)}>
                         {category.name}

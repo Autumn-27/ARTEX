@@ -812,6 +812,49 @@ func (m *Manager) SetTaskCategory(taskID string, categoryID *int64) (*pgdb.TaskC
 	return category, nil
 }
 
+// SetTasksCategory applies one category change to several tasks at once. The
+// database write and the in-memory refresh share taskStateMu, so a concurrent
+// single-task update cannot interleave and leave a live DTO stale. The returned
+// set holds the ids that were actually moved; callers report the rest as gone.
+func (m *Manager) SetTasksCategory(taskIDs []string, categoryID *int64) (map[string]bool, *pgdb.TaskCategory, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	numeric := make([]int64, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		id, err := strconv.ParseInt(taskID, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, nil, pgdb.ErrTaskCategoryTaskNotFound
+		}
+		numeric = append(numeric, id)
+	}
+	updatedIDs, category, err := m.pg.SetTasksCategory(numeric, categoryID)
+	if err != nil {
+		return nil, nil, err
+	}
+	categoryName := ""
+	if category != nil {
+		categoryName = category.Name
+	}
+	updated := make(map[string]bool, len(updatedIDs))
+	m.mu.RLock()
+	tasks := make([]*Task, 0, len(updatedIDs))
+	for _, id := range updatedIDs {
+		taskID := strconv.FormatInt(id, 10)
+		updated[taskID] = true
+		if task := m.tasks[taskID]; task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	m.mu.RUnlock()
+	for _, task := range tasks {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			state.CategoryID = cloneInt64Ptr(categoryID)
+			state.CategoryName = categoryName
+		})
+	}
+	return updated, category, nil
+}
+
 // DeleteCompanyWithAssets keeps the database cascade and live task handles in
 // one manager-level critical section. This closes the gap where a task could
 // commit its company scope immediately before registration and miss the
