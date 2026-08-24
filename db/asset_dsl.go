@@ -457,6 +457,18 @@ func isIdentChar(c byte) bool {
 
 // ── QueryDSL ─────────────────────────────────────────────────────────────────
 
+// ValidateDSL parses and compiles a DSL expression without touching the
+// database. HTTP callers use it to distinguish client syntax errors from query
+// failures, which must remain server errors.
+func ValidateDSL(dsl string) error {
+	node, err := ParseDSL(dsl)
+	if err != nil {
+		return err
+	}
+	_, _, err = buildDSLWhere(node)
+	return err
+}
+
 // CountDSL returns the total number of assets matching a DSL expression (and optional
 // type), for server-side pagination — same WHERE as QueryDSL, without LIMIT/OFFSET.
 func (s *AssetStore) CountDSL(dsl, typ string) (int, error) {
@@ -483,6 +495,9 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 	if limit <= 0 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	node, err := ParseDSL(dsl)
 	if err != nil {
 		return nil, err
@@ -497,7 +512,7 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 	}
 	args = append(args, limit, offset)
 	q := assetSelectCols + " WHERE " + where +
-		fmt.Sprintf(" ORDER BY last_seen DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err

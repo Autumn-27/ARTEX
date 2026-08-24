@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // TestParseScopeLine covers classification + guardrails without a DB.
@@ -15,9 +16,9 @@ func TestParseScopeLine(t *testing.T) {
 		{"example.com", "domain", false},
 		{"https://sub.example.com/path", "domain", false},
 		{"1.2.3.4", "ip", false},
-		{"10.0.0.0/8", "", true},       // over-broad IPv4 (< /16)
+		{"10.0.0.0/8", "", true}, // over-broad IPv4 (< /16)
 		{"198.51.100.0/24", "cidr", false},
-		{"co.uk", "", true},            // bare public suffix
+		{"co.uk", "", true}, // bare public suffix
 		{"not a host", "", true},
 		{"1.2.3.1-1.2.3.9", "", true}, // ranges must be CIDR
 	}
@@ -39,8 +40,6 @@ func TestParseScopeLine(t *testing.T) {
 	}
 }
 
-<<<<<<< Updated upstream
-=======
 func TestParseAutoScopeLine(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -297,7 +296,6 @@ func TestCompanyICPAttribution(t *testing.T) {
 	assertCompany(icpAppID, &companyID)
 }
 
->>>>>>> Stashed changes
 // TestCompanyScopeAttribution exercises the full loop against dev PG: create
 // company (unique name), add scope, and verify auto-attribution at insert time,
 // backfill of a pre-existing asset, CIDR + domain-suffix matching, and that
@@ -343,13 +341,6 @@ func TestCompanyScopeAttribution(t *testing.T) {
 		t.Fatalf("pre-scope asset should be unattributed, got %v", *preCompanyID)
 	}
 
-	rules, invalid := ParseScopeLines(root + "\n198.51.100.0/24\nco.uk")
-	if len(rules) != 2 {
-		t.Fatalf("want 2 valid rules, got %d (%+v)", len(rules), rules)
-	}
-	if len(invalid) != 1 {
-		t.Fatalf("want 1 invalid line, got %v", invalid)
-	}
 	cs.AddScope(cid, []string{root, "198.51.100.0/24"}, "unit test")
 
 	mustCid := func(id int64, want int64, label string) {

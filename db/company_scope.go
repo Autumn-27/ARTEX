@@ -3,22 +3,24 @@ package db
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
+	"unicode"
 
+	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 )
 
-// ParsedScope is one parsed asset-scope entry. Exactly one of Domain / Net is set.
-// Used internally by ParseScopeLine / ParseScopeLines (passed to CompanyStore).
+// ParsedScope is one parsed asset-scope entry. Its kind selects Domain, Net, or Value.
+// Used internally by the company scope parsers and CompanyStore.
 type ParsedScope struct {
-	Kind   string // "domain" | "ip" | "cidr"
+	Kind   string // "domain" | "ip" | "cidr" | "icp" | "keyword"
 	Domain string // normalized registrable/root domain (kind=domain)
 	Net    string // normalized CIDR, single IP as /32 or /128 (kind=ip|cidr)
+	Value  string // normalized text (kind=icp|keyword)
 	Raw    string // original input line
 }
 
-<<<<<<< Updated upstream
-=======
 // ScopeInput is the structured API form for a company scope rule. Empty Kind
 // uses the same automatic classification as the single-textarea UI.
 type ScopeInput struct {
@@ -210,7 +212,6 @@ func scopeHostname(raw string) (string, error) {
 	return host, nil
 }
 
->>>>>>> Stashed changes
 // ParseScopeLine classifies and validates one scope line (root domain / IP /
 // CIDR). Guardrails reject bare TLDs and over-broad networks so a rule can never
 // swallow the internet. IP ranges must be expressed as CIDR.
@@ -220,12 +221,8 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 	if raw == "" {
 		return r, fmt.Errorf("空行")
 	}
-	s := raw
-	if i := strings.Index(s, "://"); i >= 0 { // strip scheme if a URL was pasted
-		s = s[i+3:]
-	}
-	// CIDR first — it contains '/', which the path-strip below would remove.
-	if _, ipnet, err := net.ParseCIDR(s); err == nil {
+	// CIDR first because URL parsing treats its slash as a path separator.
+	if _, ipnet, err := net.ParseCIDR(raw); err == nil {
 		ones, bits := ipnet.Mask.Size()
 		if bits == 32 && ones < 16 {
 			return r, fmt.Errorf("网段过宽(IPv4 需 >= /16): %s", raw)
@@ -236,12 +233,8 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 		r.Kind, r.Net = "cidr", ipnet.String()
 		return r, nil
 	}
-	// Strip any path and :port remnants for host-like inputs.
-	if i := strings.IndexByte(s, '/'); i >= 0 {
-		s = s[:i]
-	}
 	// Single IP.
-	if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+	if ip := net.ParseIP(raw); ip != nil {
 		r.Kind = "ip"
 		if ip.To4() != nil {
 			r.Net = ip.String() + "/32"
@@ -250,37 +243,30 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 		}
 		return r, nil
 	}
-	if host, _, ok := strings.Cut(s, ":"); ok { // host:port → host
-		s = host
+	host, err := scopeHostname(raw)
+	if err != nil {
+		return r, fmt.Errorf("无法识别为有效域名/IP/CIDR: %s", raw)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		r.Kind = "ip"
+		if ip.To4() != nil {
+			r.Net = ip.String() + "/32"
+		} else {
+			r.Net = ip.String() + "/128"
+		}
+		return r, nil
+	}
+	if looksLikeIPAddress(host) {
+		return r, fmt.Errorf("无效 IP: %s", raw)
 	}
 	if strings.Contains(raw, "-") && strings.Count(raw, ".") >= 6 {
 		return r, fmt.Errorf("IP 段请用 CIDR 表示(如 1.2.3.0/24): %s", raw)
 	}
 	// Domain (registrable). Reject bare TLDs / public suffixes.
-	d := DomainKey(s)
-	if d == "" || !strings.Contains(d, ".") {
-		return r, fmt.Errorf("无法识别为根域名/IP/CIDR: %s", raw)
-	}
+	d := DomainKey(host)
 	if suf, icann := publicsuffix.PublicSuffix(d); icann && suf == d {
 		return r, fmt.Errorf("不能用裸 TLD 作为范围: %s", raw)
 	}
 	r.Kind, r.Domain = "domain", d
 	return r, nil
-}
-
-// ParseScopeLines parses a whole text block (one entry per line), returning the
-// valid rules and the invalid lines (with reasons) so the caller can report both.
-func ParseScopeLines(text string) (rules []ParsedScope, invalid []string) {
-	for _, ln := range strings.Split(text, "\n") {
-		if strings.TrimSpace(ln) == "" {
-			continue
-		}
-		r, err := ParseScopeLine(ln)
-		if err != nil {
-			invalid = append(invalid, err.Error())
-			continue
-		}
-		rules = append(rules, r)
-	}
-	return rules, invalid
 }

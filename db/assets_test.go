@@ -1,7 +1,10 @@
 package db
 
 import (
+	"fmt"
+	"slices"
 	"testing"
+	"time"
 )
 
 // testSetup opens a DB and returns both stores. Skips if no PG.
@@ -288,12 +291,12 @@ func TestUpsertHTTPService(t *testing.T) {
 	sc := 200
 	cl := int64(1024)
 	id1, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
-		URL:          "https://www.httptest.example.com/",
-		Technologies: []string{"nginx", "vue"},
-		StatusCode:   &sc,
+		URL:           "https://www.httptest.example.com/",
+		Technologies:  []string{"nginx", "vue"},
+		StatusCode:    &sc,
 		ContentLength: &cl,
-		PageTitle:    "Test Site",
-		TaskID:       1,
+		PageTitle:     "Test Site",
+		TaskID:        1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -534,6 +537,59 @@ func TestQueryByType(t *testing.T) {
 	}
 }
 
+// TestDeleteByTaskID: 独有资产被删,与其他任务共享的资产仅解除关联(保留),host 反查正确。
+func TestDeleteByTaskID(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	const taskA = int64(90001)
+	const taskB = int64(90002)
+	// solo:仅属 taskA
+	solo, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "solo-del.test", TaskID: taskA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, solo)
+	// shared:先 taskA 再 taskB → task_ids={A,B}
+	shared, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "shared-del.test", TaskID: taskA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, shared)
+	if _, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "shared-del.test", TaskID: taskB}); err != nil {
+		t.Fatal(err)
+	}
+
+	// host 反查(删资产前):应含两个域名
+	hosts, err := av2.HostsByTask(taskA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(hosts, "solo-del.test") || !slices.Contains(hosts, "shared-del.test") {
+		t.Fatalf("HostsByTask 缺 host: %v", hosts)
+	}
+
+	n, err := av2.DeleteByTaskID(taskA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("DeleteByTaskID: 应删 1 个独有资产,实删 %d", n)
+	}
+	// solo 已删
+	if a, _ := av2.GetByIDs([]int64{solo}); len(a) != 0 {
+		t.Fatalf("solo 资产应被删除")
+	}
+	// shared 保留,且 task_ids 只剩 taskB
+	sa, _ := av2.GetByIDs([]int64{shared})
+	if len(sa) != 1 {
+		t.Fatalf("shared 资产应保留")
+	}
+	if slices.Contains(sa[0].TaskIDs, taskA) || !slices.Contains(sa[0].TaskIDs, taskB) {
+		t.Fatalf("shared task_ids 应解除 A 保留 B,得 %v", sa[0].TaskIDs)
+	}
+}
+
 func TestQueryByTask(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
@@ -545,7 +601,7 @@ func TestQueryByTask(t *testing.T) {
 	}
 	defer deleteAsset(d, id)
 
-	assets, err := av2.QueryByTask(taskID, "", 10)
+	assets, err := av2.QueryByTask(taskID, "", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,6 +613,73 @@ func TestQueryByTask(t *testing.T) {
 	}
 	if !found {
 		t.Error("QueryByTask: inserted asset not found")
+	}
+
+	n, err := av2.CountByTask(taskID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Errorf("CountByTask: got %d, want >= 1", n)
+	}
+	if counts, err := av2.CountsByTypeForTask(taskID); err != nil {
+		t.Fatal(err)
+	} else if counts["root_domain"] < 1 {
+		t.Errorf("CountsByTypeForTask: root_domain = %d, want >= 1", counts["root_domain"])
+	}
+
+	// offset past the end must return nothing, not fall back to page 1
+	rest, err := av2.QueryByTask(taskID, "", 10, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("QueryByTask offset=%d: got %d rows, want 0", n, len(rest))
+	}
+}
+
+// 任务资产列表按页取,不再被固定条数截断:60 条资产用 25/页要能完整翻出来。
+func TestQueryByTaskPaging(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	const taskID = int64(99998)
+	const n = 60
+	for i := 0; i < n; i++ {
+		id, err := av2.UpsertRootDomain(UpsertRootDomainReq{
+			Domain: fmt.Sprintf("paging-%02d.querybytask.test", i),
+			TaskID: taskID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer deleteAsset(d, id)
+	}
+
+	total, err := av2.CountByTask(taskID, "root_domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != n {
+		t.Fatalf("CountByTask: got %d, want %d", total, n)
+	}
+
+	const size = 25
+	seen := map[int64]bool{}
+	for offset := 0; offset < total; offset += size {
+		page, err := av2.QueryByTask(taskID, "root_domain", size, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range page {
+			if seen[a.ID] {
+				t.Errorf("offset=%d: asset %d returned twice", offset, a.ID)
+			}
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("paged through %d assets, want %d", len(seen), n)
 	}
 }
 
@@ -582,7 +705,7 @@ func TestQueryByCompany(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assets, err := av2.QueryByCompany(companyID, "root_domain", 10)
+	assets, err := av2.QueryByCompany(companyID, "root_domain", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,6 +717,77 @@ func TestQueryByCompany(t *testing.T) {
 	}
 	if !found {
 		t.Error("QueryByCompany: attributed asset not found")
+	}
+
+	n, err := av2.CountByCompany(companyID, "root_domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Errorf("CountByCompany: got %d, want >= 1", n)
+	}
+
+	// offset past the end must return nothing, not fall back to page 1
+	rest, err := av2.QueryByCompany(companyID, "root_domain", 10, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("QueryByCompany offset=%d: got %d rows, want 0", n, len(rest))
+	}
+}
+
+// 企业资产列表同样按页取,不被固定条数截断。
+func TestQueryByCompanyPaging(t *testing.T) {
+	d, av2, cs := testSetup(t)
+	defer d.Close()
+
+	companyID, _, err := cs.UpsertCompany("QueryByCompanyPagingCorp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupCompany(d, companyID)
+
+	if added, _, _, errs := cs.AddScope(companyID, []string{"qbc-paging.io"}, "test"); added != 1 {
+		t.Fatalf("AddScope: added=%d, errors=%v", added, errs)
+	}
+
+	// UpsertSubdomain 会顺带建根域名资产,一并清掉
+	defer d.Exec(`DELETE FROM assets WHERE root_domain = 'qbc-paging.io'`)
+
+	const n = 60
+	for i := 0; i < n; i++ {
+		if _, err := av2.UpsertSubdomain(UpsertSubdomainReq{
+			Domain: fmt.Sprintf("paging-%02d.qbc-paging.io", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	total, err := av2.CountByCompany(companyID, "subdomain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != n {
+		t.Fatalf("CountByCompany: got %d, want %d", total, n)
+	}
+
+	const size = 25
+	seen := map[int64]bool{}
+	for offset := 0; offset < total; offset += size {
+		page, err := av2.QueryByCompany(companyID, "subdomain", size, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range page {
+			if seen[a.ID] {
+				t.Errorf("offset=%d: asset %d returned twice", offset, a.ID)
+			}
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("paged through %d assets, want %d", len(seen), n)
 	}
 }
 
@@ -701,5 +895,54 @@ func TestNormalizeURL(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizeURL(%q): want %q, got %q", tc.raw, tc.want, got)
 		}
+	}
+}
+
+func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	taskID := stamp
+	marker := fmt.Sprintf("stable-page-%d", stamp)
+	sharedSeen := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
+	ids := make([]int64, 0, 5)
+	for i := 0; i < 5; i++ {
+		var id int64
+		domain := fmt.Sprintf("%s-%d.invalid", marker, i)
+		if err := d.QueryRow(`INSERT INTO assets(type,domain,root_domain,task_ids,last_seen)
+			VALUES ('root_domain',$1,$1,ARRAY[$2]::bigint[],$3) RETURNING id`,
+			domain, taskID, sharedSeen).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	defer func() { _, _ = d.Exec(`DELETE FROM assets WHERE id=ANY($1::bigint[])`, ids) }()
+
+	want := slices.Clone(ids)
+	slices.Reverse(want)
+	collect := func(query func(limit, offset int) ([]*Asset, error)) []int64 {
+		t.Helper()
+		var got []int64
+		for offset := 0; offset < len(ids); offset += 2 {
+			page, err := query(2, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, asset := range page {
+				got = append(got, asset.ID)
+			}
+		}
+		return got
+	}
+	if got := collect(func(limit, offset int) ([]*Asset, error) {
+		return assets.QueryByTask(taskID, "root_domain", limit, offset)
+	}); !slices.Equal(got, want) {
+		t.Fatalf("task pagination order=%v want=%v", got, want)
+	}
+	if got := collect(func(limit, offset int) ([]*Asset, error) {
+		return assets.QueryDSL(marker, "root_domain", limit, offset)
+	}); !slices.Equal(got, want) {
+		t.Fatalf("DSL pagination order=%v want=%v", got, want)
 	}
 }

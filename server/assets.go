@@ -2,11 +2,57 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 )
+
+// companyScopeInputs accepts both the new [{kind,value}] contract and the
+// historical ["example.com","203.0.113.10"] contract.
+type companyScopeInputs []db.ScopeInput
+
+const maxCompanyMutationBodyBytes = 2 << 20
+
+func decodeCompanyMutationRequest(w http.ResponseWriter, r *http.Request, value any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCompanyMutationBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(value); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "请求正文过大")
+		} else {
+			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		}
+		return false
+	}
+	return true
+}
+
+func (items *companyScopeInputs) UnmarshalJSON(data []byte) error {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(data, &rawItems); err != nil {
+		return err
+	}
+	out := make([]db.ScopeInput, 0, len(rawItems))
+	for i, raw := range rawItems {
+		var legacy string
+		if err := json.Unmarshal(raw, &legacy); err == nil {
+			out = append(out, db.ScopeInput{Value: legacy})
+			continue
+		}
+		var structured db.ScopeInput
+		if err := json.Unmarshal(raw, &structured); err != nil {
+			return fmt.Errorf("scope[%d] must be a string or {kind,value}", i)
+		}
+		out = append(out, structured)
+	}
+	*items = out
+	return nil
+}
 
 // assetStore returns the asset store.
 func (s *Server) assetStore() *db.AssetStore {
@@ -53,32 +99,45 @@ func (s *Server) createCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name  string   `json:"name"`
-		Logo  string   `json:"logo"`
-		Scope []string `json:"scope"`
+		Name  string             `json:"name"`
+		Logo  string             `json:"logo"`
+		Scope companyScopeInputs `json:"scope"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid JSON: "+err.Error())
+	if !decodeCompanyMutationRequest(w, r, &req) {
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		writeErr(w, 400, "name required")
 		return
 	}
-	id, created, err := cs.UpsertCompany(req.Name, req.Logo)
-	if err != nil {
-		writeErr(w, 500, err.Error())
+	if err := db.ValidateCompanyScopeInputBounds(req.Scope); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	out := map[string]any{"id": id, "created": created}
-	if len(req.Scope) > 0 {
-		added, skipped, invalid, errs := cs.AddScope(id, req.Scope, "api")
-		out["scope_added"] = added
-		out["scope_skipped"] = skipped
-		out["scope_invalid"] = invalid
-		if len(errs) > 0 {
-			out["scope_errors"] = errs
+	id, added, skipped, invalid, scopeErrs, err := cs.CreateCompanyWithScope(req.Name, req.Logo, req.Scope, "api")
+	if err != nil {
+		if errors.Is(err, db.ErrCompanyNameConflict) {
+			writeErr(w, http.StatusConflict, "企业名称已存在")
+			return
 		}
+		var validationErr *db.CompanyScopeValidationError
+		if errors.As(err, &validationErr) {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := map[string]any{
+		"id":            id,
+		"created":       true,
+		"scope_added":   added,
+		"scope_skipped": skipped,
+		"scope_invalid": invalid,
+	}
+	if len(scopeErrs) > 0 {
+		out["scope_errors"] = scopeErrs
 	}
 	writeJSON(w, 201, out)
 }
@@ -131,20 +190,37 @@ func (s *Server) addCompanyScope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Scope  []string `json:"scope"`
-		Reason string   `json:"reason"`
-		Reset  bool     `json:"reset"` // if true, replace existing scope
+		Scope  companyScopeInputs `json:"scope"`
+		Reason string             `json:"reason"`
+		Reset  bool               `json:"reset"` // if true, replace existing scope
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid JSON: "+err.Error())
+	if !decodeCompanyMutationRequest(w, r, &req) {
+		return
+	}
+	if err := db.ValidateCompanyScopeInputBounds(req.Scope); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	var added, skipped, invalid int
 	var errs []string
+	var mutationErr error
 	if req.Reset {
-		added, invalid, errs = cs.UpdateScope(id, req.Scope, req.Reason)
+		added, invalid, errs, mutationErr = cs.UpdateScopeInputsChecked(id, req.Scope, req.Reason)
 	} else {
-		added, skipped, invalid, errs = cs.AddScope(id, req.Scope, req.Reason)
+		added, skipped, invalid, errs, mutationErr = cs.AddScopeInputsChecked(id, req.Scope, req.Reason)
+	}
+	if mutationErr != nil {
+		if errors.Is(mutationErr, db.ErrCompanyNotFound) {
+			writeErr(w, http.StatusNotFound, "company not found")
+			return
+		}
+		var validationErr *db.CompanyScopeValidationError
+		if errors.As(mutationErr, &validationErr) {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, mutationErr.Error())
+		return
 	}
 	out := map[string]any{
 		"added":   added,
@@ -175,21 +251,32 @@ func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DeleteAssets bool `json:"delete_assets"`
 	}
-	// Body is optional; ignore decode errors (e.g. empty body).
-	_ = json.NewDecoder(r.Body).Decode(&req)
-
-	assetsDeleted := int64(0)
-	if req.DeleteAssets {
-		as := s.assetStore()
-		if as != nil {
-			assetsDeleted, err = as.DeleteByCompanyID(id)
-			if err != nil {
-				writeErr(w, 500, err.Error())
-				return
+	// The body is optional. Only an actual empty body is ignored; malformed or
+	// trailing JSON is a client error.
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+	} else {
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			if err == nil {
+				writeErr(w, http.StatusBadRequest, "invalid JSON: multiple values")
+			} else {
+				writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			}
+			return
 		}
 	}
-	if err := cs.DeleteCompany(id); err != nil {
+
+	assetsDeleted, err := s.m.DeleteCompanyWithAssets(id, req.DeleteAssets)
+	if err != nil {
+		if errors.Is(err, db.ErrCompanyNotFound) {
+			writeErr(w, http.StatusNotFound, "company not found")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -217,6 +304,11 @@ func (s *Server) reattribute(w http.ResponseWriter, r *http.Request) {
 // GET /api/assets
 // =====================================================================
 
+const (
+	defaultAssetPageSize = 50
+	maxAssetPageSize     = 200
+)
+
 func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	as := s.assetStore()
 	if as == nil {
@@ -228,43 +320,56 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	if limit <= 0 {
-		limit = 50
+		limit = defaultAssetPageSize
+	} else if limit > maxAssetPageSize {
+		limit = maxAssetPageSize
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
-	var assets []*db.Asset
+	assets := []*db.Asset{}
 	var err error
-	// total is the full match count ignoring limit/offset — lets the UI paginate on
-	// the server. For company/task scopes it falls back to the returned length.
+	// total is the full match count ignoring limit/offset. Count first so an offset
+	// beyond the last row can return an empty page without an expensive scan.
 	total := 0
 
 	if dsl := q.Get("dsl"); dsl != "" {
-		assets, err = as.QueryDSL(dsl, typ, limit, offset)
-		if err == nil {
-			total, _ = as.CountDSL(dsl, typ)
+		if err := db.ValidateDSL(dsl); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		total, err = as.CountDSL(dsl, typ)
+		if err == nil && offset < total {
+			assets, err = as.QueryDSL(dsl, typ, limit, offset)
 		}
 	} else {
 		companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64)
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 		switch {
 		case companyID > 0:
-			assets, err = as.QueryByCompany(companyID, typ, limit)
-			total = len(assets)
+			total, err = as.CountByCompany(companyID, typ)
+			if err == nil && offset < total {
+				assets, err = as.QueryByCompany(companyID, typ, limit, offset)
+			}
 		case taskID > 0:
-			assets, err = as.QueryByTask(taskID, typ, limit)
-			total = len(assets)
+			total, err = as.CountByTask(taskID, typ)
+			if err == nil && offset < total {
+				assets, err = as.QueryByTask(taskID, typ, limit, offset)
+			}
 		default:
 			if typ == "" {
 				typ = "root_domain"
 			}
-			assets, err = as.QueryByType(typ, limit, offset)
-			if err == nil {
-				total, _ = as.CountByType(typ)
+			total, err = as.CountByType(typ)
+			if err == nil && offset < total {
+				assets, err = as.QueryByType(typ, limit, offset)
 			}
 		}
 	}
 
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{
@@ -284,7 +389,13 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
-	counts, err := as.CountsByType()
+	var counts map[string]int
+	var err error
+	if taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64); taskID > 0 {
+		counts, err = as.CountsByTypeForTask(taskID)
+	} else {
+		counts, err = as.CountsByType()
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -336,8 +447,8 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 		Assets []struct {
 			Type string `json:"type"`
 			// root_domain / subdomain
-			Domain      string `json:"domain"`
-			ICP         string `json:"icp"`
+			Domain      string   `json:"domain"`
+			ICP         string   `json:"icp"`
 			RecordType  string   `json:"record_type"`
 			RecordValue []string `json:"record_value"`
 			// ip
@@ -419,6 +530,9 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			errs = append(errs, errEntry{Index: i, Error: err.Error()})
 			continue
+		}
+		if req.TaskID > 0 {
+			_ = as.SetTaskAssetSource(req.TaskID, id, "api", "通过资产 API 登记", nil)
 		}
 		results = append(results, result{Index: i, ID: id, Type: a.Type})
 	}
