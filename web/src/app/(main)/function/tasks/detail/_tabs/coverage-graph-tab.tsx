@@ -14,9 +14,9 @@ import {
   Waypoints,
 } from "lucide-react";
 
-import { cn } from "@/lib/utils";
-import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Sheet,
@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
 import type { CoverageAssetRef, CoverageAssetRefs, CoverageGraphEdge, CoverageGraphNode } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 // 每个父节点下、同一类型的子节点默认展示的数量；超出折叠，"展示更多"每次再拉这么多。
 const FOLD_LIMIT = 20;
@@ -274,10 +275,18 @@ function RefList({ title, items }: { title: string; items: CoverageAssetRef[] })
       </h4>
       <div className="flex flex-col gap-1">
         {items.map((r) => (
-          <div key={`${r.kind}-${r.id}`} className="bg-muted/50 flex items-start gap-2 rounded-md px-2 py-1.5 text-xs">
-            <span className="text-muted-foreground shrink-0 font-mono">#{r.id}</span>
-            {r.state && <span className="text-muted-foreground shrink-0">{r.state}</span>}
-            <span className="text-foreground min-w-0 flex-1 break-words">{r.summary || "—"}</span>
+          <div
+            key={`${r.kind}-${r.id}`}
+            className="flex flex-wrap items-start gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs"
+          >
+            <span className="shrink-0 font-mono text-muted-foreground">#{r.id}</span>
+            {r.state && <span className="shrink-0 text-muted-foreground">{r.state}</span>}
+            <span className="min-w-32 flex-1 break-words text-foreground">{r.summary || "—"}</span>
+            {r.inherited && r.source_task_id && (
+              <Badge variant="outline" className="shrink-0">
+                来源 #{r.source_task_id} · 只读
+              </Badge>
+            )}
           </div>
         ))}
       </div>
