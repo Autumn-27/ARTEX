@@ -558,6 +558,17 @@ export const assets: Asset[] = [
     status_code: 200,
     last_seen: T("2026-07-25T21:35:00Z"),
   },
+  {
+    id: 27,
+    type: "subdomain",
+    company_id: 1,
+    task_ids: [1],
+    domain: "very-long-admin-console.internal.acme.example.com",
+    root_domain: "acme.example.com",
+    record_type: "A",
+    record_value: ["203.0.113.210"],
+    last_seen: T("2026-07-26T03:59:00Z"),
+  },
 ];
 
 export const assetCounts: Record<string, number> = assets.reduce<Record<string, number>>((m, a) => {
