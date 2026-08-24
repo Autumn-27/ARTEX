@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -10,10 +11,32 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 )
+
+const (
+	maxConversationRequestBytes  = 64 << 10
+	maxConversationAgentKeyRunes = 120
+	maxConversationTitleRunes    = 200
+)
+
+func decodeConversationRequest(w http.ResponseWriter, r *http.Request, value any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxConversationRequestBytes)
+	if err := decode(r, value); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "请求正文过大")
+		} else {
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return false
+	}
+	return true
+}
 
 // ---------- conversations (chat page) ----------
 //
@@ -45,13 +68,16 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 		Title        string `json:"title"`
 		LLMProfileID *int64 `json:"llm_profile_id"`
 	}
-	if err := decode(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !decodeConversationRequest(w, r, &req) {
 		return
 	}
 	req.AgentKey = strings.TrimSpace(req.AgentKey)
 	if req.AgentKey == "" {
 		writeErr(w, 400, "agent_key 不能为空")
+		return
+	}
+	if utf8.RuneCountInString(req.AgentKey) > maxConversationAgentKeyRunes {
+		writeErr(w, 400, fmt.Sprintf("agent_key 最多 %d 个字符", maxConversationAgentKeyRunes))
 		return
 	}
 	a, err := pg.GetAgentByKey(req.AgentKey)
@@ -73,6 +99,10 @@ func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = "新对话"
 	}
+	if utf8.RuneCountInString(title) > maxConversationTitleRunes {
+		writeErr(w, 400, fmt.Sprintf("标题最多 %d 个字符", maxConversationTitleRunes))
+		return
+	}
 	c, err := pg.CreateConversation(req.AgentKey, title, req.LLMProfileID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -89,8 +119,7 @@ func (s *Server) pgUpdateConversation(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		LLMProfileID *int64 `json:"llm_profile_id"` // null clears the override
 	}
-	if err := decode(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !decodeConversationRequest(w, r, &req) {
 		return
 	}
 	if req.LLMProfileID != nil {
@@ -134,21 +163,39 @@ func (s *Server) pgRenameConversation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req struct{ Title string }
-	if err := decode(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	var req struct {
+		Title  *string `json:"title"`
+		Pinned *bool   `json:"pinned"`
+	}
+	if !decodeConversationRequest(w, r, &req) {
 		return
 	}
-	title := strings.TrimSpace(req.Title)
-	if title == "" {
-		writeErr(w, 400, "标题不能为空")
+	if req.Title == nil && req.Pinned == nil {
+		writeErr(w, 400, "至少需要提供 title 或 pinned")
 		return
 	}
-	if err := pg.RenameConversation(c.ID, title); err != nil {
+	if req.Title != nil {
+		title := strings.TrimSpace(*req.Title)
+		if title == "" {
+			writeErr(w, 400, "标题不能为空")
+			return
+		}
+		if utf8.RuneCountInString(title) > maxConversationTitleRunes {
+			writeErr(w, 400, fmt.Sprintf("标题最多 %d 个字符", maxConversationTitleRunes))
+			return
+		}
+		req.Title = &title
+	}
+	updated, err := pg.UpdateConversation(c.ID, db.ConversationPatch{Title: req.Title, Pinned: req.Pinned})
+	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	if updated == nil {
+		writeErr(w, 404, "conversation not found")
+		return
+	}
+	writeJSON(w, 200, updated)
 }
 
 func (s *Server) pgDeleteConversation(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +290,7 @@ func (s *Server) pgStopConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "idle"}) // nothing running
 		return
 	}
-	cancel()
+	cancel(agent.AbortChatStoppedByUser)
 	writeJSON(w, 200, map[string]any{"status": "stopping"})
 }
 
@@ -331,12 +378,12 @@ func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
 func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancel(intercept.WithConvID(s.ctx, c.ID))
+	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, c.ID))
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
 	s.chatMu.Unlock()
 	defer func() {
-		cancel()
+		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
