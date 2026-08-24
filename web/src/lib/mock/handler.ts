@@ -792,8 +792,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     let mappings: Array<{ intentID: string; assetID: number; summary: string }> = [];
     if (seg[1] === "t-acme-web") {
       mappings = [
-        { intentID: "i3", assetID: 27, summary: "后台功能枚举意图从前序子域发现中选定" },
-        { intentID: "i5", assetID: 7, summary: "订单接口测试意图从 API 任务目标中选定" },
+        { intentID: "i3", assetID: 6, summary: "后台功能枚举意图从前序子域发现中选定" },
+        { intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" },
       ];
     } else if (seg[1] === "t-acme-api") {
       mappings = [{ intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" }];
