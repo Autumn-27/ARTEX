@@ -15,9 +15,14 @@ import type {
   Company,
   CompanyScopeRule,
   Conversation,
+  IntentAsset,
   ScopeRow,
   Task,
+  TaskAssetMutation,
+  TaskAssetScopeMutation,
+  TaskCategory,
   TaskLLMResolution,
+  TaskScopeRow,
   TaskTemplate,
 } from "../types";
 import * as D from "./data";
@@ -30,17 +35,48 @@ const mockTasks = structuredClone(D.tasks);
 const mockFindings = structuredClone(D.findings);
 const mockLLMRecords = structuredClone(D.llmRecords);
 const mockTaskTemplates = structuredClone(D.taskTemplates);
+const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
+const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
+const mockTaskScopes = new Map<string, TaskScopeRow[]>();
+let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
 
-function mockAssetCounts(): Record<string, number> {
+function mockTaskAssetID(taskID: string): number | undefined {
+  const numeric = Number(taskID);
+  if (Number.isInteger(numeric) && numeric > 0) return numeric;
+  return mockTaskAssetIDs.get(taskID);
+}
+
+function mockAssetCounts(taskID?: string | null): Record<string, number> {
+  const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
   return mockAssets.reduce<Record<string, number>>((counts, asset) => {
+    if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return counts;
     counts[asset.type] = (counts[asset.type] ?? 0) + 1;
     return counts;
   }, {});
+}
+
+function mockAssetMatchesDSL(asset: Asset, dsl: string): boolean {
+  const query = dsl
+    .replaceAll(/[()"]/g, " ")
+    .replaceAll(/\b(?:AND|OR)\b/gi, " ")
+    .replaceAll(/\b[a-z_][a-z0-9_]*(?:==|!=|>=|<=|=|>|<)/gi, " ")
+    .trim()
+    .toLowerCase();
+  if (!query) return true;
+  const haystack = JSON.stringify(asset).toLowerCase();
+  return query.split(/\s+/).every((term) => haystack.includes(term));
+}
+
+function mockTaskCategorySnapshot(): TaskCategory[] {
+  return mockTaskCategories.map((category) => ({
+    ...category,
+    task_count: mockTasks.filter((task) => task.category_id === category.id).length,
+  }));
 }
 
 function mockScopeRows(
@@ -241,9 +277,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const profileIDs = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
     const sourceTaskIDs = [...((b.source_task_ids as string[] | undefined) ?? [])];
     const companyIDs = [...((b.company_ids as number[] | undefined) ?? [])];
+    const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
+    const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
+    if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
     const created: Task = {
       id,
       name: String(b.name ?? ""),
+      category_id: category?.id,
+      category_name: category?.name,
       description: String(b.description ?? "新任务"),
       goal: String(b.goal ?? ""),
       status: "created",
@@ -264,10 +305,66 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       source_task_ids: sourceTaskIDs,
       company_ids: companyIDs,
     };
+    mockTaskAssetIDs.set(id, nextMockTaskAssetID++);
     for (const item of mockTasks) item.active = false;
     mockTasks.unshift(created);
     mockActiveTask = id;
     return created;
+  }
+  if (path === "/task-categories" && m === "GET") return { categories: mockTaskCategorySnapshot() };
+  if (path === "/task-categories" && m === "POST") {
+    const name = normalizedTemplateName(b.name);
+    if (!name) throw new Error("分类名称不能为空");
+    if (mockTaskCategories.some((category) => category.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("分类名称已存在");
+    }
+    const now = new Date().toISOString();
+    const category: TaskCategory = {
+      id: mockTaskCategories.reduce((maximum, item) => Math.max(maximum, item.id), 0) + 1,
+      name,
+      task_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+    mockTaskCategories.push(category);
+    return category;
+  }
+  if (seg[0] === "task-categories" && seg.length === 2 && m === "PATCH") {
+    const category = mockTaskCategories.find((item) => item.id === Number(seg[1]));
+    if (!category) throw new Error("任务分类不存在");
+    const name = normalizedTemplateName(b.name);
+    if (!name) throw new Error("分类名称不能为空");
+    if (mockTaskCategories.some((item) => item.id !== category.id && item.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("分类名称已存在");
+    }
+    category.name = name;
+    category.updated_at = new Date().toISOString();
+    for (const task of mockTasks) {
+      if (task.category_id === category.id) task.category_name = name;
+    }
+    return { ...category, task_count: mockTasks.filter((task) => task.category_id === category.id).length };
+  }
+  if (seg[0] === "task-categories" && seg.length === 2 && m === "DELETE") {
+    const categoryID = Number(seg[1]);
+    const index = mockTaskCategories.findIndex((item) => item.id === categoryID);
+    if (index < 0) throw new Error("任务分类不存在");
+    mockTaskCategories.splice(index, 1);
+    for (const task of mockTasks) {
+      if (task.category_id !== categoryID) continue;
+      task.category_id = undefined;
+      task.category_name = undefined;
+    }
+    return { deleted: categoryID };
+  }
+  if (seg[0] === "tasks" && seg[2] === "category" && seg.length === 3 && m === "PATCH") {
+    const task = mockTasks.find((item) => item.id === seg[1]);
+    if (!task) throw new Error("任务不存在");
+    const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
+    const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
+    if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
+    task.category_id = category?.id;
+    task.category_name = category?.name;
+    return task;
   }
   if (path === "/task-templates" && m === "GET") return { templates: mockTaskTemplates };
   if (path === "/task-templates" && m === "POST") {
@@ -324,6 +421,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const id = seg[1];
     const index = mockTasks.findIndex((item) => item.id === id);
     if (index >= 0) mockTasks.splice(index, 1);
+    mockTaskAssetIDs.delete(id);
 
     let findingsDeleted = 0;
     if (b.delete_findings) {
@@ -447,10 +545,33 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "tasks" && seg[2] === "asset-refs") return D.assetRefsFor(Number(q.get("asset_id") ?? 0));
 
   // ── 任务测试范围（增删查）──
-  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") return { scope: [] };
-  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "POST")
-    return { id: Date.now(), task_id: Number(seg[1]), kind: b.kind, domain: b.value, source: "manual" };
-  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 4 && m === "DELETE") return { ok: true };
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") {
+    return { scope: mockTaskScopes.get(seg[1]) ?? [] };
+  }
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "POST") {
+    const current = mockTaskScopes.get(seg[1]) ?? [];
+    const kind = String(b.kind ?? "") as TaskScopeRow["kind"];
+    const value = String(b.value ?? "").trim();
+    const row: TaskScopeRow = {
+      id: Date.now(),
+      task_id: mockTaskAssetID(seg[1]) ?? Number(seg[1]),
+      kind,
+      source: "manual",
+    };
+    if (kind === "root_domain" || kind === "subdomain") row.domain = value;
+    else if (kind === "ip" || kind === "cidr") row.net = value;
+    else row.value = value;
+    mockTaskScopes.set(seg[1], [...current, row]);
+    return row;
+  }
+  if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 4 && m === "DELETE") {
+    const id = Number(seg[3]);
+    mockTaskScopes.set(
+      seg[1],
+      (mockTaskScopes.get(seg[1]) ?? []).filter((row) => row.id !== id),
+    );
+    return { ok: true };
+  }
 
   // ── 全局 llm_usage 聚合（仪表盘新版视图，demo）──
   if (path === "/tokens/usage")
@@ -524,13 +645,21 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
 
   // ── assets ──
-  if (path === "/assets/counts") return mockAssetCounts();
+  if (path === "/assets/counts") return mockAssetCounts(q.get("task_id"));
   if (path === "/assets" && m === "GET") {
     const type = q.get("type") ?? "";
-    const list = type ? mockAssets.filter((a) => a.type === type) : mockAssets;
+    const taskID = q.get("task_id");
+    const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
+    const dsl = q.get("dsl") ?? "";
+    const list = mockAssets.filter((asset) => {
+      if (type && asset.type !== type) return false;
+      if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return false;
+      return !dsl || mockAssetMatchesDSL(asset, dsl);
+    });
     const limit = Number(q.get("limit") ?? 50);
     const offset = Number(q.get("offset") ?? 0);
-    return { count: list.length, total: list.length, assets: list.slice(offset, offset + limit) };
+    const page = list.slice(offset, offset + limit);
+    return { count: page.length, total: list.length, assets: page };
   }
   if (path === "/assets" && m === "DELETE") {
     const ids = new Set(Array.isArray(b.ids) ? b.ids.map(Number) : []);
@@ -541,6 +670,153 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       deleted++;
     }
     return { deleted };
+  }
+  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 3 && m === "POST") {
+    const task = mockTasks.find((item) => item.id === seg[1]);
+    const numericTaskID = mockTaskAssetID(seg[1]);
+    if (!task || numericTaskID === undefined) throw new Error("任务不存在");
+    if (Array.isArray(b.scope)) {
+      if (b.scope.length === 0 || b.scope.length > MAX_COMPANY_SCOPE_RULES) throw new Error("请填写有效测试范围");
+      const rules: CompanyScopeRule[] = b.scope.map((candidate, index) => {
+        if (typeof candidate === "string") {
+          const issue = classifyCompanyScopeLine(candidate, index + 1);
+          if (!issue.rule || issue.error) throw new Error(`第 ${index + 1} 条范围无效：${issue.error ?? "无法识别"}`);
+          return issue.rule;
+        }
+        const item = candidate as { kind?: unknown; value?: unknown };
+        const value = String(item?.value ?? "").trim();
+        const rule =
+          item?.kind && isCompanyScopeKind(item.kind)
+            ? { kind: item.kind, value }
+            : classifyCompanyScopeLine(value, index + 1).rule;
+        const error = rule ? companyScopeRuleError(rule) : "无法识别";
+        if (!rule || error) throw new Error(`第 ${index + 1} 条范围无效：${error}`);
+        return rule;
+      });
+      const mutation: TaskAssetScopeMutation = {
+        requested: rules.length,
+        assets_linked: 0,
+        assets_existing: 0,
+        scopes_added: 0,
+        scopes_existing: 0,
+      };
+      const currentScopes = mockTaskScopes.get(seg[1]) ?? [];
+      const scopeKeys = new Set(
+        currentScopes.map((row) => `${row.kind}|${row.domain ?? row.net ?? row.value ?? row.company_id ?? ""}`),
+      );
+      for (const rule of rules) {
+        const normalized = normalizeCompanyScopeValue(rule);
+        const scope: TaskScopeRow = {
+          id: Date.now() + currentScopes.length,
+          task_id: numericTaskID,
+          kind: rule.kind === "domain" ? "root_domain" : rule.kind,
+          source: "manual",
+          reason: "用户在测试资产页手工新增",
+        };
+        if (rule.kind === "domain") scope.domain = normalized;
+        else if (rule.kind === "ip") scope.net = `${normalized}/${normalized.includes(":") ? 128 : 32}`;
+        else if (rule.kind === "cidr") scope.net = normalized;
+        else scope.value = normalized;
+        const scopeKey = `${scope.kind}|${scope.domain ?? scope.net ?? scope.value ?? ""}`;
+        if (scopeKeys.has(scopeKey)) mutation.scopes_existing++;
+        else {
+          scopeKeys.add(scopeKey);
+          currentScopes.push(scope);
+          mutation.scopes_added++;
+        }
+
+        if (rule.kind !== "domain" && rule.kind !== "ip") continue;
+        const type = rule.kind === "domain" ? "root_domain" : "ip";
+        let asset = mockAssets.find((item) =>
+          type === "root_domain"
+            ? item.type === type && item.domain === normalized
+            : item.type === type && item.ip === normalized,
+        );
+        const alreadyLinked = asset?.task_ids.includes(numericTaskID) ?? false;
+        if (!asset) {
+          const nextID = mockAssets.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+          asset = {
+            id: nextID,
+            type,
+            task_ids: [],
+            ...(type === "root_domain" ? { domain: normalized, root_domain: normalized } : { ip: normalized }),
+            last_seen: new Date().toISOString(),
+          };
+          mockAssets.push(asset);
+        }
+        if (alreadyLinked) mutation.assets_existing++;
+        else {
+          asset.task_ids.push(numericTaskID);
+          mutation.assets_linked++;
+        }
+        asset.task_source = "manual";
+        asset.task_source_summary = "用户在测试资产页手工新增";
+        asset.task_source_node_id = undefined;
+      }
+      mockTaskScopes.set(seg[1], currentScopes);
+      return mutation;
+    }
+    const ids = [...new Set(Array.isArray(b.asset_ids) ? b.asset_ids.map(Number) : [])];
+    const sourceSummary = String(b.source_summary ?? "").trim();
+    if (ids.length === 0 || ids.length > 100 || !sourceSummary) throw new Error("请选择资产并填写来源说明");
+    const requestedAssets = ids.map((id) => mockAssets.find((asset) => asset.id === id));
+    if (requestedAssets.some((asset) => !asset)) throw new Error("资产不存在");
+    const mutation: TaskAssetMutation = { requested: ids.length, attached: 0, existing: 0 };
+    for (const asset of requestedAssets) {
+      if (!asset) continue;
+      if (asset.task_ids.includes(numericTaskID)) mutation.existing++;
+      else {
+        asset.task_ids.push(numericTaskID);
+        mutation.attached++;
+      }
+      asset.task_source = "manual";
+      asset.task_source_summary = sourceSummary;
+      asset.task_source_node_id = undefined;
+    }
+    return mutation;
+  }
+  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 4 && m === "DELETE") {
+    const numericTaskID = mockTaskAssetID(seg[1]);
+    const asset = mockAssets.find((item) => item.id === Number(seg[3]));
+    if (numericTaskID === undefined || !asset) throw new Error("任务或资产不存在");
+    if (!asset.task_ids.includes(numericTaskID)) throw new Error("资产未关联当前任务");
+    asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
+    if (asset.task_ids.length === 0) {
+      asset.task_source = undefined;
+      asset.task_source_summary = undefined;
+      asset.task_source_node_id = undefined;
+    }
+    return { detached: asset.id };
+  }
+  if (seg[0] === "tasks" && seg[2] === "intent-assets" && seg.length === 3 && m === "GET") {
+    let mappings: Array<{ intentID: string; assetID: number; summary: string }> = [];
+    if (seg[1] === "t-acme-web") {
+      mappings = [
+        { intentID: "i3", assetID: 6, summary: "后台功能枚举意图从前序子域发现中选定" },
+        { intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" },
+      ];
+    } else if (seg[1] === "t-acme-api") {
+      mappings = [{ intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" }];
+    }
+    const sourceTaskID = mockTaskAssetID(seg[1]) ?? 0;
+    const assets: IntentAsset[] = mappings.flatMap((mapping) => {
+      const asset = mockAssets.find((item) => item.id === mapping.assetID);
+      if (!asset) return [];
+      return [
+        {
+          intent_id: mapping.intentID,
+          asset_id: asset.id,
+          type: asset.type,
+          label: asset.domain ?? asset.ip ?? asset.app_name ?? asset.url ?? asset.service_name ?? `#${asset.id}`,
+          source: asset.task_source ?? "agent",
+          source_summary: asset.task_source_summary ?? mapping.summary,
+          source_node_id: asset.task_source_node_id,
+          source_task_id: sourceTaskID,
+          inherited: false,
+        },
+      ];
+    });
+    return { assets };
   }
 
   // ── companies ──
@@ -600,7 +876,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     for (const f of mockFindings) {
       if (!f.task_id) continue;
       const owner = mockTasks.find((candidate) => candidate.id === f.task_id);
-      const cur = taskMap.get(f.task_id) ?? { name: owner?.name ?? "", description: f.task_description ?? "", count: 0 };
+      const cur = taskMap.get(f.task_id) ?? {
+        name: owner?.name ?? "",
+        description: f.task_description ?? "",
+        count: 0,
+      };
       cur.count++;
       taskMap.set(f.task_id, cur);
     }

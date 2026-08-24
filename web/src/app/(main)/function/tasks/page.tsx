@@ -5,8 +5,10 @@ import * as React from "react";
 import Link from "next/link";
 
 import {
+  CheckIcon,
   ChevronRightIcon,
   EyeIcon,
+  FolderKanbanIcon,
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
@@ -15,6 +17,7 @@ import {
   SearchIcon,
   SlidersHorizontalIcon,
   StarIcon,
+  TagsIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -94,6 +97,7 @@ import type {
   DeleteTaskResult,
   LLMProfile,
   Task,
+  TaskCategory,
   TaskStatus,
 } from "@/lib/types";
 
@@ -212,8 +216,10 @@ function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
 
 export default function TasksPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
+  const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
+  const [categoryFilter, setCategoryFilter] = React.useState("all");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
@@ -223,21 +229,25 @@ export default function TasksPage() {
     const q = query.trim().toLowerCase();
     return tasks.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
+      if (categoryFilter === "uncategorized" && t.category_id != null) return false;
+      if (categoryFilter !== "all" && categoryFilter !== "uncategorized" && String(t.category_id) !== categoryFilter)
+        return false;
       if (!q) return true;
       return (
         (t.name ?? "").toLowerCase().includes(q) ||
+        (t.category_name ?? "").toLowerCase().includes(q) ||
         t.description.toLowerCase().includes(q) ||
         t.goal.toLowerCase().includes(q) ||
         t.id.toLowerCase().includes(q)
       );
     });
-  }, [tasks, query, statusFilter]);
+  }, [tasks, query, statusFilter, categoryFilter]);
 
   // reset to page 1 whenever filters change
   // biome-ignore lint/correctness/useExhaustiveDependencies: both filters intentionally reset pagination.
   React.useEffect(() => {
     setPage(1);
-  }, [query, statusFilter]);
+  }, [query, statusFilter, categoryFilter]);
 
   const paginated = React.useMemo(
     () => filtered.slice((page - 1) * pageSize, page * pageSize),
@@ -311,11 +321,32 @@ export default function TasksPage() {
       });
   }, []);
 
+  const loadCategories = React.useCallback(() => {
+    api
+      .taskCategories()
+      .then(setCategories)
+      .catch(() => {
+        // Category management remains retryable without blocking the task list.
+      });
+  }, []);
+
   React.useEffect(() => {
     load();
+    loadCategories();
     const i = setInterval(load, POLL_MS);
     return () => clearInterval(i);
-  }, [load]);
+  }, [load, loadCategories]);
+
+  const refreshCategoriesAndTasks = React.useCallback(() => {
+    lastRef.current = "";
+    loadCategories();
+    load();
+  }, [load, loadCategories]);
+
+  React.useEffect(() => {
+    if (categoryFilter === "all" || categoryFilter === "uncategorized") return;
+    if (!categories.some((category) => String(category.id) === categoryFilter)) setCategoryFilter("all");
+  }, [categories, categoryFilter]);
 
   // 只在确有 running 任务时才每秒 tick——其余情况「运行时长」是静态值,空转的 tick 会白白
   // 重渲染整张表。
@@ -512,6 +543,22 @@ export default function TasksPage() {
               </SelectGroup>
             </SelectContent>
           </Select>
+          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <SelectTrigger className="w-40">
+              <SelectValue placeholder="任务分类" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部分类</SelectItem>
+                <SelectItem value="uncategorized">未分类</SelectItem>
+                {categories.map((category) => (
+                  <SelectItem key={category.id} value={String(category.id)}>
+                    {category.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           <span className="text-muted-foreground text-xs tabular-nums">
             {filtered.length}/{tasks.length} 条
           </span>
@@ -555,7 +602,8 @@ export default function TasksPage() {
             </>
           )}
           <ConcurrencySettingsDialog />
-          <CreateTaskSheet tasks={tasks} onCreated={load} />
+          <CategoryManagementSheet categories={categories} onChanged={refreshCategoriesAndTasks} />
+          <CreateTaskSheet tasks={tasks} categories={categories} onCreated={refreshCategoriesAndTasks} />
         </div>
 
         {tasks.length === 0 ? (
@@ -745,9 +793,9 @@ const TaskRow = React.memo(function TaskRow({
           <Link
             href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
             className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={task.name || task.description}
+            title={task.name?.trim() ? task.name : task.description}
           >
-            {task.name || <span className="text-muted-foreground">未命名</span>}
+            {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
           </Link>
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
         </div>
@@ -1293,9 +1341,193 @@ function CompanyPicker({
   );
 }
 
-function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () => void }) {
+function CategoryManagementSheet({ categories, onChanged }: { categories: TaskCategory[]; onChanged: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [newName, setNewName] = React.useState("");
+  const [editingID, setEditingID] = React.useState<number | null>(null);
+  const [editingName, setEditingName] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [deleting, setDeleting] = React.useState<TaskCategory | null>(null);
+
+  async function createCategory() {
+    const name = newName.trim();
+    if (!name || saving) return;
+    setSaving(true);
+    try {
+      await api.createTaskCategory(name);
+      setNewName("");
+      toast.success("分类已创建");
+      onChanged();
+    } catch (error) {
+      toast.error(`创建分类失败：${(error as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function renameCategory() {
+    const name = editingName.trim();
+    if (!editingID || !name || saving) return;
+    setSaving(true);
+    try {
+      await api.renameTaskCategory(editingID, name);
+      setEditingID(null);
+      setEditingName("");
+      toast.success("分类已更新");
+      onChanged();
+    } catch (error) {
+      toast.error(`更新分类失败：${(error as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteCategory() {
+    if (!deleting || saving) return;
+    setSaving(true);
+    try {
+      await api.deleteTaskCategory(deleting.id);
+      toast.success("分类已删除，关联任务已移入未分类");
+      setDeleting(null);
+      onChanged();
+    } catch (error) {
+      toast.error(`删除分类失败：${(error as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetTrigger asChild>
+          <Button size="sm" variant="outline">
+            <TagsIcon data-icon="inline-start" />
+            分类管理
+          </Button>
+        </SheetTrigger>
+        <SheetContent side="right" className="w-full sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle>任务分类</SheetTitle>
+            <SheetDescription>创建、重命名或删除全局分类。删除分类不会删除任务。</SheetDescription>
+          </SheetHeader>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4">
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="new-task-category">新分类</FieldLabel>
+                <div className="flex gap-2">
+                  <Input
+                    id="new-task-category"
+                    value={newName}
+                    onChange={(event) => setNewName(event.target.value)}
+                    placeholder="例如：外网评估"
+                    maxLength={80}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void createCategory();
+                    }}
+                  />
+                  <Button
+                    size="icon"
+                    onClick={() => void createCategory()}
+                    disabled={!newName.trim() || saving}
+                    aria-label="创建分类"
+                  >
+                    {saving && editingID == null && deleting == null ? <Spinner /> : <PlusIcon />}
+                  </Button>
+                </div>
+              </Field>
+            </FieldGroup>
+            <div className="flex flex-col gap-2">
+              {categories.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">暂无分类</p>}
+              {categories.map((category) => (
+                <div key={category.id} className="flex min-w-0 items-center gap-2 rounded-md border p-2">
+                  <FolderKanbanIcon className="size-4 shrink-0 text-muted-foreground" />
+                  {editingID === category.id ? (
+                    <Input
+                      className="min-w-0 flex-1"
+                      value={editingName}
+                      maxLength={80}
+                      onChange={(event) => setEditingName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void renameCategory();
+                        if (event.key === "Escape") setEditingID(null);
+                      }}
+                      aria-label={`重命名分类 ${category.name}`}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 truncate text-left text-sm font-medium"
+                      onClick={() => {
+                        setEditingID(category.id);
+                        setEditingName(category.name);
+                      }}
+                      title="点击重命名"
+                    >
+                      {category.name}
+                    </button>
+                  )}
+                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                    {category.task_count} 个任务
+                  </span>
+                  {editingID === category.id && (
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      onClick={() => void renameCategory()}
+                      disabled={!editingName.trim() || saving}
+                      aria-label="保存分类名称"
+                    >
+                      {saving ? <Spinner /> : <CheckIcon />}
+                    </Button>
+                  )}
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    onClick={() => setDeleting(category)}
+                    disabled={saving}
+                    aria-label={`删除分类 ${category.name}`}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
+      <AlertDialog open={deleting != null} onOpenChange={(next) => !next && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除分类“{deleting?.name}”？</AlertDialogTitle>
+            <AlertDialogDescription>
+              分类删除后，其中 {deleting?.task_count ?? 0} 个任务会自动移入“未分类”，任务数据不会被删除。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void deleteCategory()} disabled={saving}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+function CreateTaskSheet({
+  tasks,
+  categories,
+  onCreated,
+}: {
+  tasks: Task[];
+  categories: TaskCategory[];
+  onCreated: () => void;
+}) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
+  const [categoryID, setCategoryID] = React.useState("uncategorized");
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
@@ -1365,6 +1597,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
         name: name.trim(),
+        categoryId: categoryID === "uncategorized" ? undefined : Number(categoryID),
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -1377,6 +1610,7 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
       });
       toast.success("任务已创建");
       setName("");
+      setCategoryID("uncategorized");
       setDescription("");
       setGoal("");
       setSelectedTemplateID(null);
@@ -1440,6 +1674,25 @@ function CreateTaskSheet({ tasks, onCreated }: { tasks: Task[]; onCreated: () =>
                 onChange={(e) => setName(e.target.value)}
               />
             </div>
+            <Field>
+              <FieldLabel htmlFor="task-category">任务分类</FieldLabel>
+              <Select value={categoryID} onValueChange={setCategoryID}>
+                <SelectTrigger id="task-category">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="uncategorized">未分类</SelectItem>
+                    {categories.map((category) => (
+                      <SelectItem key={category.id} value={String(category.id)}>
+                        {category.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>用于任务列表筛选和归档，不影响 Agent 执行。</FieldDescription>
+            </Field>
             <div className="grid gap-2">
               <Label htmlFor="description">描述</Label>
               <Textarea

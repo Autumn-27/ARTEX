@@ -337,9 +337,24 @@ CREATE TABLE IF NOT EXISTS llm_profile_health (
 -- =====================================================================
 -- D. 任务层
 -- =====================================================================
+-- Global task categories are intentionally independent from task templates.
+-- Deleting a category only moves its tasks back to the uncategorized bucket.
+CREATE TABLE IF NOT EXISTS task_categories (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    nkey       TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_categories_name ON task_categories(name, id);
+DROP TRIGGER IF EXISTS trg_task_categories_upd ON task_categories;
+CREATE TRIGGER trg_task_categories_upd BEFORE UPDATE ON task_categories
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
     name           TEXT NOT NULL DEFAULT '',
+    category_id    BIGINT REFERENCES task_categories(id) ON DELETE SET NULL,
     description    TEXT NOT NULL,
     goal           TEXT NOT NULL,
     exploration_id BIGINT NOT NULL UNIQUE
@@ -385,8 +400,11 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queue_mode TEXT NOT NULL DEFAULT '';
 -- 可选的任务名称;补旧库。空串=未命名,前端展示时回退到描述。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES task_categories(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
+    WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 
 -- Reusable task description/goal presets. nkey is the normalized, case-insensitive
 -- identity used to reject visually equivalent duplicate names.
@@ -414,6 +432,55 @@ CREATE TABLE IF NOT EXISTS task_relations (
     CONSTRAINT ck_task_relation_not_self CHECK (task_id <> source_task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_task_relations_source ON task_relations(source_task_id);
+
+-- Task/asset provenance supplements the legacy assets.task_ids association. The
+-- array remains the compatibility source for existing query and cleanup paths;
+-- this relation records how each association was obtained for operator review.
+CREATE TABLE IF NOT EXISTS task_asset_links (
+    task_id        BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    asset_id       BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    source         TEXT NOT NULL DEFAULT 'system',
+    source_summary TEXT NOT NULL DEFAULT '',
+    source_node_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_asset ON task_asset_links(asset_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_node ON task_asset_links(source_node_id)
+    WHERE source_node_id IS NOT NULL;
+DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_asset_links;
+CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Keep provenance rows synchronized when existing asset upsert paths append or
+-- remove task ids. Detailed callers overwrite the generic source after upsert.
+CREATE OR REPLACE FUNCTION sync_task_asset_links() RETURNS trigger AS $$
+BEGIN
+    INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+    SELECT task.id, NEW.id, 'system', '任务执行期间自动关联'
+    FROM unnest(NEW.task_ids) AS requested(task_id)
+    JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
+    ON CONFLICT (task_id, asset_id) DO NOTHING;
+
+    DELETE FROM task_asset_links link
+    WHERE link.asset_id=NEW.id
+      AND NOT (link.task_id=ANY(NEW.task_ids));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_assets_task_links ON assets;
+CREATE TRIGGER trg_assets_task_links AFTER INSERT OR UPDATE OF task_ids ON assets
+    FOR EACH ROW EXECUTE FUNCTION sync_task_asset_links();
+
+-- Existing installations receive an auditable legacy source without rewriting
+-- task_ids. Ignore stale array ids that no longer resolve to a live task.
+INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+SELECT task.id, asset.id, 'legacy', '由历史任务资产关联迁移'
+FROM assets asset
+CROSS JOIN LATERAL unnest(asset.task_ids) AS requested(task_id)
+JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
+ON CONFLICT (task_id, asset_id) DO NOTHING;
 
 -- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
 -- until the user saves/resets the chain, which clears all failure state.
@@ -462,17 +529,24 @@ WHERE t.active_llm_profile_id IS NULL
 CREATE TABLE IF NOT EXISTS task_scope (
     id          BIGSERIAL PRIMARY KEY,
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr')),
+    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword')),
     company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
     domain      TEXT,          -- root_domain / subdomain
     net         CIDR,          -- ip / cidr
+    value       TEXT,          -- icp / keyword
     source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','agent','manual')),
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 旧库升级：扩展任务范围，使其与企业范围的单文本框识别能力一致。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE task_scope DROP CONSTRAINT IF EXISTS task_scope_kind_check;
+ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
+    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword'));
 -- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0));
+DROP INDEX IF EXISTS uq_task_scope;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';

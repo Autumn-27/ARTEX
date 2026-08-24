@@ -486,6 +486,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 						e["value"] = r.Domain
 					case r.Net != "":
 						e["value"] = r.Net
+					case r.Value != "":
+						e["value"] = r.Value
 					case r.CompanyID != nil:
 						e["company_id"] = *r.CompanyID
 						if t.cs != nil {
@@ -804,6 +806,8 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 						entry["value"] = budget.take(row.Domain, 400)
 					case row.Net != "":
 						entry["value"] = budget.take(row.Net, 400)
+					case row.Value != "":
+						entry["value"] = budget.take(row.Value, 400)
 					case row.CompanyID != nil:
 						entry["company_id"] = *row.CompanyID
 					}

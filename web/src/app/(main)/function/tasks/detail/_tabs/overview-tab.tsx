@@ -53,6 +53,7 @@ function cacheHitRate(cacheRead: number, input: number): string {
 
 // 测试范围一条的显示值：域名 / 网段 / 公司。
 function scopeValue(row: TaskScopeRow): string {
+  if (row.value) return row.value;
   if (row.domain) return row.domain;
   if (row.net) return row.net;
   if (row.company_id) return row.company_name || `企业 #${row.company_id}`;
@@ -65,6 +66,8 @@ const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
   subdomain: "子域名",
   ip: "IP",
   cidr: "网段",
+  icp: "ICP",
+  keyword: "关键词",
 };
 
 const SCOPE_SOURCE_LABELS: Record<TaskScopeRow["source"], string> = {
@@ -364,7 +367,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           .then((c) => {
             if (!cancelled) setCoverage(c);
           })
-          .catch(() => {});
+          .catch(() => {
+            // A transient coverage failure is retried by the next poll.
+          });
       } catch {
         // transient errors are ignored; the next poll will retry
       }
@@ -580,7 +585,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               }}
               disabled={conBusy}
             />
-            <Button size="sm" variant="outline" disabled={conBusy || !conText.trim()} onClick={() => void addConstraint()}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={conBusy || !conText.trim()}
+              onClick={() => void addConstraint()}
+            >
               <PlusIcon className="size-3.5" /> 添加
             </Button>
             {conErr && <span className="text-xs text-red-500">{conErr}</span>}
@@ -796,6 +806,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <NativeSelectOption value="subdomain">子域名</NativeSelectOption>
               <NativeSelectOption value="ip">IP</NativeSelectOption>
               <NativeSelectOption value="cidr">网段</NativeSelectOption>
+              <NativeSelectOption value="icp">ICP</NativeSelectOption>
+              <NativeSelectOption value="keyword">关键词</NativeSelectOption>
               <NativeSelectOption value="company">公司</NativeSelectOption>
             </NativeSelect>
             <Input
@@ -805,7 +817,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   ? "公司名或 id"
                   : scopeKind === "ip" || scopeKind === "cidr"
                     ? "如 10.0.0.1 或 10.0.0.0/24"
-                    : "如 example.com"
+                    : scopeKind === "icp"
+                      ? "如 京ICP备12345678号-1"
+                      : scopeKind === "keyword"
+                        ? "如 企业名称关键词"
+                        : "如 example.com"
               }
               value={scopeValueInput}
               onChange={(e) => setScopeValueInput(e.target.value)}

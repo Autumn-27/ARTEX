@@ -7,6 +7,8 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
+  category_id?: number;
+  category_name?: string;
   description: string;
   goal: string;
   status: TaskStatus;
@@ -33,6 +35,14 @@ export interface Task {
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   company_ids?: number[]; // associated company asset scopes available as task context
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+}
+
+export interface TaskCategory {
+  id: number;
+  name: string;
+  task_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface TaskTemplate {
@@ -168,6 +178,35 @@ export interface Asset {
   params?: Record<string, unknown>[];
   extra?: Record<string, unknown>;
   last_seen: string;
+  task_source?: string;
+  task_source_summary?: string;
+  task_source_node_id?: number;
+}
+
+export interface IntentAsset {
+  intent_id: number | string;
+  asset_id: number;
+  type: NewAssetType;
+  label: string;
+  source: string;
+  source_summary: string;
+  source_node_id?: number;
+  source_task_id: number;
+  inherited: boolean;
+}
+
+export interface TaskAssetMutation {
+  requested: number;
+  attached: number;
+  existing: number;
+}
+
+export interface TaskAssetScopeMutation {
+  requested: number;
+  assets_linked: number;
+  assets_existing: number;
+  scopes_added: number;
+  scopes_existing: number;
 }
 
 // ---- Asset coverage graph (per task) ----
@@ -241,11 +280,12 @@ export interface WorkspaceFile {
 export interface TaskScopeRow {
   id: number;
   task_id: number;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr";
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword";
   company_id?: number;
   company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
   domain?: string;
   net?: string;
+  value?: string;
   source: "auto" | "agent" | "manual";
   reason?: string;
 }

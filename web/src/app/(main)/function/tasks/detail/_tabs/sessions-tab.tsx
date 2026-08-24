@@ -41,15 +41,17 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
-import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
+import { taskAssetSourceLabel, taskAssetTypeLabel } from "@/lib/task-assets";
 import type {
   Activity,
   ChatAttachment,
+  IntentAsset,
   InterceptApprovalRow,
   Session,
   SessionStatus,
@@ -360,7 +362,9 @@ function SessionItem({
             来源 #{s.source_task_id}
           </Badge>
         )}
-        <span className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}>
+        <span
+          className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}
+        >
           {displayTitle}
         </span>
         {deleted && (
@@ -426,12 +430,44 @@ function SessionItem({
   );
 }
 
+function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
+  const first = assets[0];
+  const firstLabel = first.label.trim() ? first.label : `#${first.asset_id}`;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="outline" className="max-w-28 shrink-0 font-normal">
+          <span className="truncate">当前资产：{firstLabel}</span>
+          {assets.length > 1 && <span className="shrink-0 tabular-nums">+{assets.length - 1}</span>}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="right" align="start" className="max-w-sm">
+        <div className="flex flex-col gap-2">
+          {assets.map((asset) => (
+            <div key={`${asset.intent_id}-${asset.asset_id}`} className="min-w-0">
+              <div className="break-all font-mono text-xs">
+                {asset.label.trim() ? asset.label : `#${asset.asset_id}`}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {taskAssetTypeLabel(asset.type)} · {taskAssetSourceLabel(asset.source)}
+                {asset.inherited ? ` · 来源任务 #${asset.source_task_id}` : ""}
+              </div>
+              <div className="mt-0.5 [overflow-wrap:anywhere] text-xs">{asset.source_summary}</div>
+            </div>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function SessionsTab({ taskId }: { taskId: string }) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
   // Per-session lazily-loaded caches, keyed by session_key (main | plan | intent:<id>).
   const [store, setStore] = React.useState<SessionStore>({});
   // Worker sessions derived from exploration intents (paged past the old 300 cap).
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
+  const [intentAssets, setIntentAssets] = React.useState<IntentAsset[]>([]);
   const [olderIntents, setOlderIntents] = React.useState<TaskNode[]>([]);
   const [firstIntentsHasMore, setFirstIntentsHasMore] = React.useState(false);
   const [olderIntentsHasMore, setOlderIntentsHasMore] = React.useState(false);
@@ -750,6 +786,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   React.useEffect(() => {
     setStore({});
     setIntents([]);
+    setIntentAssets([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
@@ -900,6 +937,25 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     };
   }, [taskId, patchStore]);
 
+  React.useEffect(() => {
+    let active = true;
+    const load = () =>
+      api
+        .taskIntentAssets(taskId)
+        .then((assets) => {
+          if (active) setIntentAssets(assets);
+        })
+        .catch(() => {
+          // The next poll retries; Worker controls and transcripts remain available.
+        });
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [taskId]);
+
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
     let active = true;
@@ -969,6 +1025,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     for (const n of intents) byId.set(n.id, n); // fresh poll wins over older snapshot
     return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
   }, [intents, olderIntents]);
+  const intentAssetsByID = React.useMemo(() => {
+    const grouped = new Map<string, IntentAsset[]>();
+    for (const asset of intentAssets) {
+      const key = String(asset.intent_id);
+      const current = grouped.get(key);
+      if (current) current.push(asset);
+      else grouped.set(key, [asset]);
+    }
+    return grouped;
+  }, [intentAssets]);
 
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;
@@ -1269,6 +1335,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     return llmResolutions.worker;
   };
   const activeResolution = resolutionForSession(active);
+  const activeAssets =
+    active.role === "worker" && active.intent_id ? intentAssetsByID.get(active.intent_id) : undefined;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -1422,6 +1490,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 </TooltipContent>
               </Tooltip>
             )}
+            {activeAssets && activeAssets.length > 0 && <WorkerAssetBadge assets={activeAssets} />}
             {active.inherited && active.source_task_id && (
               <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
             )}
@@ -1622,7 +1691,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <AlertDialogHeader>
               <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                删除会<strong>停止该意图</strong>（不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                删除会<strong>停止该意图</strong>
+                （不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞
+                <strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="grid gap-2 py-1">

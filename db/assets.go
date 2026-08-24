@@ -52,8 +52,11 @@ type Asset struct {
 	Method string           `json:"method,omitempty"`
 	Params []map[string]any `json:"params,omitempty"`
 	// meta
-	Extra    map[string]any `json:"extra,omitempty"`
-	LastSeen string         `json:"last_seen"`
+	Extra             map[string]any `json:"extra,omitempty"`
+	LastSeen          string         `json:"last_seen"`
+	TaskSource        string         `json:"task_source,omitempty"`
+	TaskSourceSummary string         `json:"task_source_summary,omitempty"`
+	TaskSourceNodeID  *int64         `json:"task_source_node_id,omitempty"`
 }
 
 // AuthItem is one entry in the auth array.
@@ -1140,7 +1143,14 @@ FROM assets WHERE $1 = ANY(task_ids)`
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAssets(rows)
+	assets, err := scanAssets(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+		return nil, err
+	}
+	return assets, nil
 }
 
 func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {

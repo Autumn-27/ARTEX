@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"net"
 	"strconv"
@@ -10,17 +11,18 @@ import (
 // TaskScope is one row of a task's test scope — the coverage denominator and the
 // per-task authorization edge. Rows come either from insertAssets (source='auto',
 // conservative, one per explicitly-inserted asset) or from the add_task_scope tool
-// (source='agent', for company / whole-root-domain / subdomain / ip).
+// (source='agent', for company / domain / network / ICP / keyword scope).
 type TaskScope struct {
 	ID        int64  `json:"id"`
 	TaskID    int64  `json:"task_id"`
-	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr
+	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr|icp|keyword
 	CompanyID *int64 `json:"company_id,omitempty"`
 	// CompanyName is resolved for kind=company so callers can label a scope row
 	// without a second lookup. Empty when the row is not a company reference.
 	CompanyName string `json:"company_name,omitempty"`
 	Domain      string `json:"domain,omitempty"`
 	Net         string `json:"net,omitempty"`
+	Value       string `json:"value,omitempty"`
 	Source      string `json:"source"`
 	Reason      string `json:"reason,omitempty"`
 }
@@ -53,11 +55,11 @@ func ipToHostCIDR(ip string) string {
 
 // upsertTaskScope inserts one scope row idempotently (uq_task_scope). A duplicate is
 // silently ignored. taskID<=0 or empty kind → no-op.
-func (s *AssetStore) upsertTaskScope(ts TaskScope) error {
+func (s *AssetStore) upsertTaskScopeResult(ts TaskScope) (bool, error) {
 	if ts.TaskID <= 0 || ts.Kind == "" {
-		return nil
+		return false, nil
 	}
-	var domainVal, netVal, companyVal any
+	var domainVal, netVal, companyVal, valueVal any
 	if ts.Domain != "" {
 		domainVal = ts.Domain
 	}
@@ -67,14 +69,35 @@ func (s *AssetStore) upsertTaskScope(ts TaskScope) error {
 	if ts.CompanyID != nil && *ts.CompanyID > 0 {
 		companyVal = *ts.CompanyID
 	}
+	if ts.Value != "" {
+		valueVal = ts.Value
+	}
 	src := ts.Source
 	if src == "" {
 		src = "auto"
 	}
-	_, err := s.db.Exec(`
-INSERT INTO task_scope(task_id, kind, company_id, domain, net, source, reason)
-VALUES ($1,$2,$3,$4,$5::cidr,$6,NULLIF($7,''))
-ON CONFLICT DO NOTHING`, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, src, ts.Reason)
+	query := `
+INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, source, reason)
+VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,NULLIF($8,''))
+ON CONFLICT DO NOTHING`
+	var (
+		result sql.Result
+		err    error
+	)
+	if s.tx != nil {
+		result, err = s.tx.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, src, ts.Reason)
+	} else {
+		result, err = s.db.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, src, ts.Reason)
+	}
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
+}
+
+func (s *AssetStore) upsertTaskScope(ts TaskScope) error {
+	_, err := s.upsertTaskScopeResult(ts)
 	return err
 }
 
@@ -182,8 +205,14 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 			return ts, fmt.Errorf("无效 ip/cidr: %s", value)
 		}
 		ts.Net = v
+	case "icp", "keyword":
+		parsed, err := ParseScopeInput(ScopeInput{Kind: kind, Value: value})
+		if err != nil {
+			return ts, err
+		}
+		ts.Value = parsed.Value
 	default:
-		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr）", kind)
+		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
 	}
 	if err := s.upsertTaskScope(ts); err != nil {
 		return ts, err
@@ -206,7 +235,7 @@ func (s *AssetStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
 func (s *AssetStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
 SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
-       COALESCE(ts.net::text,''), ts.source, COALESCE(ts.reason,'')
+       COALESCE(ts.net::text,''), COALESCE(ts.value,''), ts.source, COALESCE(ts.reason,'')
 FROM task_scope ts
 LEFT JOIN companies c ON c.id=ts.company_id
 WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
@@ -218,7 +247,7 @@ WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Source, &t.Reason); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Source, &t.Reason); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID
@@ -279,9 +308,13 @@ target AS (
   JOIN task_scope ts ON ts.task_id = $1 AND (
        (ts.kind='company'     AND a.company_id = ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
-    OR (ts.kind='subdomain'   AND a.domain = ts.domain)
-    OR (ts.kind IN ('ip','cidr') AND a.ip IS NOT NULL AND a.ip !~ '[^0-9a-fA-F:.]' AND ts.net >>= a.ip::inet)
-  )
+	    OR (ts.kind='subdomain'   AND a.domain = ts.domain)
+	    OR (ts.kind IN ('ip','cidr') AND a.ip IS NOT NULL AND a.ip !~ '[^0-9a-fA-F:.]' AND ts.net >>= a.ip::inet)
+	    OR (ts.kind='icp' AND (
+	         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
+	         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
+	       ))
+	  )
 ),
 tested AS (
   SELECT DISTINCT ea.asset_id

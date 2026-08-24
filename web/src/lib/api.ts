@@ -32,6 +32,7 @@ import type {
   FindingStats,
   FindingStatus,
   FindingsPage,
+  IntentAsset,
   InterceptApprovalRow,
   InterceptPending,
   InterceptRule,
@@ -56,6 +57,9 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskAssetMutation,
+  TaskAssetScopeMutation,
+  TaskCategory,
   TaskConstraint,
   TaskGoal,
   TaskLLMResolutions,
@@ -184,6 +188,7 @@ export const api = {
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   createTask: (input: {
     name?: string;
+    categoryId?: number;
     description: string;
     goal: string;
     llmProfileIds?: number[];
@@ -196,6 +201,7 @@ export const api = {
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
+      category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],
@@ -206,6 +212,12 @@ export const api = {
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
     }),
+  taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
+  createTaskCategory: (name: string) => post<TaskCategory>("/task-categories", { name }),
+  renameTaskCategory: (id: number, name: string) => patch<TaskCategory>(`/task-categories/${id}`, { name }),
+  deleteTaskCategory: (id: number) => del<{ deleted: number }>(`/task-categories/${id}`),
+  updateTaskCategory: (taskId: string, categoryId?: number) =>
+    patch<Task>(`/tasks/${taskId}/category`, { category_id: categoryId ?? null }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
     post<TaskTemplate>("/task-templates", input),
@@ -354,6 +366,16 @@ export const api = {
     get<{ count: number; total: number; assets: Asset[] }>(
       `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
     ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
+    post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
+      asset_ids: assetIds,
+      source_summary: sourceSummary,
+    }),
+  registerTaskAssetScopes: (taskId: string, scope: CompanyScopeRule[]) =>
+    post<TaskAssetScopeMutation>(`/tasks/${taskId}/assets`, { scope }),
+  detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
+  taskIntentAssets: (taskId: string) =>
+    get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),

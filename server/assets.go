@@ -531,6 +531,9 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 			errs = append(errs, errEntry{Index: i, Error: err.Error()})
 			continue
 		}
+		if req.TaskID > 0 {
+			_ = as.SetTaskAssetSource(req.TaskID, id, "api", "通过资产 API 登记", nil)
+		}
 		results = append(results, result{Index: i, ID: id, Type: a.Type})
 	}
 	writeJSON(w, 200, map[string]any{"results": results, "errors": errs})

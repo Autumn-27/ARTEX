@@ -27,15 +27,17 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ID          string `json:"id"`
-	ExpID       int64  `json:"exploration_id"`
-	Name        string `json:"name"` // 可选任务名称;空=未命名
-	Description string `json:"description"`
-	Goal        string `json:"goal"`
-	CreatedAt   int64  `json:"created_at"`
-	CompletedAt int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused      bool   `json:"paused"`
-	Queued      bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	ID           string `json:"id"`
+	ExpID        int64  `json:"exploration_id"`
+	Name         string `json:"name"` // 可选任务名称;空=未命名
+	CategoryID   *int64 `json:"category_id,omitempty"`
+	CategoryName string `json:"category_name,omitempty"`
+	Description  string `json:"description"`
+	Goal         string `json:"goal"`
+	CreatedAt    int64  `json:"created_at"`
+	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused       bool   `json:"paused"`
+	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
@@ -85,6 +87,8 @@ type taskLifecycleState struct {
 	DeadlineAt    int64
 	SourceTaskIDs []int64
 	CompanyIDs    []int64
+	CategoryID    *int64
+	CategoryName  string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -108,6 +112,8 @@ func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 		DeadlineAt:    t.DeadlineAt,
 		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
 		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
+		CategoryID:    cloneInt64Ptr(t.CategoryID),
+		CategoryName:  t.CategoryName,
 	}
 }
 
@@ -128,6 +134,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.DeadlineAt = state.DeadlineAt
 	t.SourceTaskIDs = append(t.SourceTaskIDs[:0], state.SourceTaskIDs...)
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
+	t.CategoryID = cloneInt64Ptr(state.CategoryID)
+	t.CategoryName = state.CategoryName
 	t.lifecycleMu.Unlock()
 }
 
@@ -688,7 +696,8 @@ func unixNanoOrZero(t *time.Time) int64 {
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
-		Name:        pt.Name,
+		Name:       pt.Name,
+		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
@@ -732,6 +741,75 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 	m.active = t.ID
 	m.mu.Unlock()
 	return t, nil
+}
+
+// RenameTaskCategory persists a category name and refreshes every live task DTO
+// that references it. taskStateMu keeps this ordered with task reassignment.
+func (m *Manager) RenameTaskCategory(id int64, name string) (*pgdb.TaskCategory, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	category, err := m.pg.RenameTaskCategory(id, name)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, task := range m.tasks {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			if state.CategoryID != nil && *state.CategoryID == id {
+				state.CategoryName = category.Name
+			}
+		})
+	}
+	return category, nil
+}
+
+// DeleteTaskCategory moves all affected live tasks to the uncategorized bucket.
+func (m *Manager) DeleteTaskCategory(id int64) (bool, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	deleted, err := m.pg.DeleteTaskCategory(id)
+	if err != nil || !deleted {
+		return deleted, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, task := range m.tasks {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			if state.CategoryID != nil && *state.CategoryID == id {
+				state.CategoryID = nil
+				state.CategoryName = ""
+			}
+		})
+	}
+	return true, nil
+}
+
+// SetTaskCategory updates one live task without interrupting its runtime.
+func (m *Manager) SetTaskCategory(taskID string, categoryID *int64) (*pgdb.TaskCategory, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, pgdb.ErrTaskCategoryTaskNotFound
+	}
+	category, err := m.pg.SetTaskCategory(id, categoryID)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	task := m.tasks[taskID]
+	m.mu.RUnlock()
+	if task != nil {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			state.CategoryID = cloneInt64Ptr(categoryID)
+			state.CategoryName = ""
+			if category != nil {
+				state.CategoryName = category.Name
+			}
+		})
+	}
+	return category, nil
 }
 
 // DeleteCompanyWithAssets keeps the database cascade and live task handles in
