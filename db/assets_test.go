@@ -1,8 +1,10 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -945,4 +947,55 @@ func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 	}); !slices.Equal(got, want) {
 		t.Fatalf("DSL pagination order=%v want=%v", got, want)
 	}
+}
+
+// TestAssetIPRejectsHostname pins the write-side guard added after a hostname in
+// assets.ip broke company attribution: every asset type that persists an ip must
+// refuse a non-address, and the message must tell the caller how to fix it.
+func TestAssetIPRejectsHostname(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	hostname := "d63cd476.cdn.ucloud.com.cn"
+	cases := []struct {
+		name string
+		call func() (int64, error)
+	}{
+		{"ip", func() (int64, error) {
+			return av2.UpsertIP(UpsertIPReq{IP: hostname})
+		}},
+		{"http service", func() (int64, error) {
+			return av2.UpsertHTTPService(UpsertHTTPServiceReq{URL: "https://example.com/", IP: hostname})
+		}},
+		{"other service", func() (int64, error) {
+			return av2.UpsertOtherService(UpsertOtherServiceReq{IP: hostname, Port: 22, ServiceName: "ssh"})
+		}},
+		{"endpoint", func() (int64, error) {
+			return av2.UpsertEndpoint(UpsertEndpointReq{URL: "https://example.com/a", Method: "GET", IP: hostname})
+		}},
+	}
+	for _, tc := range cases {
+		id, err := tc.call()
+		if !errors.Is(err, ErrAssetIPInvalid) {
+			deleteAsset(d, id)
+			t.Fatalf("%s: err=%v, want %v", tc.name, err, ErrAssetIPInvalid)
+		}
+		// The caller has to learn the remedy, not just that something was wrong.
+		if !strings.Contains(err.Error(), hostname) || !strings.Contains(err.Error(), "type=subdomain") {
+			t.Fatalf("%s: message is not actionable: %v", tc.name, err)
+		}
+	}
+
+	// An empty ip stays legal for the types where it is optional, and a real
+	// address is still accepted.
+	id, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{URL: "https://ip-guard.example.com/"})
+	if err != nil {
+		t.Fatalf("empty ip rejected: %v", err)
+	}
+	deleteAsset(d, id)
+	id, err = av2.UpsertIP(UpsertIPReq{IP: "203.0.113.7"})
+	if err != nil {
+		t.Fatalf("valid ip rejected: %v", err)
+	}
+	deleteAsset(d, id)
 }

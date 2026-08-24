@@ -79,7 +79,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 		"发现新资产时立即批量插入资产到资产库。支持一次提交多种资产类型：root_domain/ip/subdomain/app/service/endpoint。\n"+
 			"每条资产的字段说明：\n"+
 			"• root_domain：domain(根域名, 必填)、icp(备案, 可选)\n"+
-			"• ip：ip(IP地址, 必填)、bound_domains([域名])、open_ports([{port,service}])\n"+
+			"• ip：ip(IP地址, 必填, 必须是 IPv4/IPv6 地址而非主机名)、bound_domains([域名])、open_ports([{port,service}])\n"+
 			"• subdomain：domain(子域名, 必填)、record_type(A/AAAA/CNAME等)、record_value(记录值)、icp(可选)\n"+
 			"• app：app_name(应用名, 必填)、bundle_id(bundle id, 可选)、category、description、app_icp、company_id(归属企业 id, 可选)\n"+
 			"• service(http)：url(必填)、technologies([指纹])、status_code、content_length、page_title、favicon_mmh3、auth([{type,username,password,...}])、service_ip\n"+
@@ -108,7 +108,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						"description": "DNS 解析值列表（subdomain 可选，如 [\"1.2.3.4\",\"2.3.4.5\"]）",
 					},
 					// ip
-					"ip": str("IP 地址（ip 类型必填；service/endpoint 类型可填，用于关联 IP）"),
+					"ip": str("IP 地址，必须是 IPv4/IPv6 地址，不能填主机名（主机名请用 type=subdomain 的 domain 字段）；ip 类型必填；service/endpoint 类型可填，用于关联 IP"),
 					"bound_domains": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
