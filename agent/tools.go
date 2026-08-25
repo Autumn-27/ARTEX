@@ -1016,6 +1016,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			createdAny := false
 			for i, it := range items {
 				id, err := t.addOneIntent(it)
 				if err != nil {
@@ -1023,6 +1024,15 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
+				createdAny = true
+			}
+
+			// 人经主 agent 直投意图 → 若任务已 done（无 open 目标的 goalless 分支），把它
+			// 拉回 running，worker 才能领这条意图执行。resumeTask 仅由主 agent 的 Chat 接入
+			// (SetResumeTask)；planner 的 ToolSet 为 nil，故 planner 自己调 add_intent 时此段
+			// no-op，不影响其正常产意图。意图节点已在上面建好(open)，复活时不会被误判抽干。
+			if createdAny && t.resumeTask != nil {
+				t.resumeTask()
 			}
 
 			if !batch { // 单条：保持原返回
@@ -1676,12 +1686,12 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 		"查看某条意图(work)的【执行过程】（区别于 get_worker_output 只给最终结论）。三种用法：\n"+
 			"① 只传 intent_id → 返回该 work 每一步的摘要流（summary≤100字，含 step_id；只是动作轮廓，不含完整输出）；\n"+
 			"② intent_id + q → 只返回命中关键字的步骤摘要（在摘要和完整输出里都搜；仍只给 summary，要看内容用③）；\n"+
-			"③ intent_id + step_ids（最多5个）→ 返回这些步骤的完整内容(detail)。\n"+
+			"③ intent_id + step_ids → 返回这些步骤的完整内容(detail)；一次最多取 5 个，超出只返回前 5 个并在 notice/omitted_step_ids 里告知未取的。\n"+
 			"典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。不含思考(thinking)步骤。支持直接关联任务的历史 trace；其结果带 source_task_id/inherited=true 且只读。",
 		obj(map[string]any{
 			"intent_id": idp("意图 id（= work 句柄）"),
 			"q":         str("关键字：只返回摘要/完整输出命中它的步骤（可选；与 step_ids 互斥）"),
-			"step_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "要取完整内容的 step_id（来自①/②返回，一次最多 5 个）"},
+			"step_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "要取完整内容的 step_id（来自①/②返回；一次最多取 5 个，多传只返回前 5 个，其余在 omitted_step_ids 里列出）"},
 			"limit":     intp("摘要流/检索的返回上限（可选）"),
 		}, "intent_id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -1703,16 +1713,26 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
 			}
-			// ③ detail drill-down by step ids (max 5), thinking excluded by the store.
+			// ③ detail drill-down by step ids, thinking excluded by the store.
 			if len(a.StepIDs) > 0 {
+				// Dedup + drop invalid ids first so garbage/duplicates don't eat into
+				// the per-call cap. detail is returned in full (untruncated), so the
+				// cap bounds one tool result; over the cap we serve the first N and
+				// tell the model exactly which ids were deferred, instead of erroring
+				// and forcing it to re-plan the call.
+				const maxStepIDs = 5
 				var ids []int64
+				seen := make(map[int64]bool)
 				for _, raw := range a.StepIDs {
-					if v := pid(raw); v > 0 {
+					if v := pid(raw); v > 0 && !seen[v] {
+						seen[v] = true
 						ids = append(ids, v)
 					}
 				}
-				if len(ids) > 5 {
-					return actool.Errorf("step_ids 一次最多 5 个（先用不带 step_ids 的调用定位，再分批取）"), nil
+				var omitted []int64
+				if len(ids) > maxStepIDs {
+					omitted = append(omitted, ids[maxStepIDs:]...)
+					ids = ids[:maxStepIDs]
 				}
 				acts, err := t.ts.ActivityByIDsWithSources(ids)
 				if err != nil {
@@ -1733,7 +1753,16 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 					}
 					steps = append(steps, step)
 				}
-				result := map[string]any{"intent_id": id, "steps": steps}
+				result := map[string]any{"intent_id": id, "steps": steps, "returned_step_ids": ids}
+				if len(omitted) > 0 {
+					// returned_step_ids/omitted_step_ids let the model decide programmatically
+					// whether another call is worth it; the notice states the same in prose.
+					result["omitted_step_ids"] = omitted
+					result["notice"] = fmt.Sprintf(
+						"每次最多取 %d 个步骤的完整内容，本次已返回前 %d 个（%v），未取的 %d 个为 %v。"+
+							"若这些内容已足够定位，则无需再取剩余步骤；确需继续时，用这些 step_id 再调一次。",
+						maxStepIDs, len(ids), ids, len(omitted), omitted)
+				}
 				if intentNode.Inherited {
 					inheritedMap(result, intentNode.SourceTaskID)
 				}

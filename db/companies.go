@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"unicode/utf8"
@@ -161,9 +162,11 @@ RETURNING id`, name, nkey, logoVal).Scan(&id); err != nil {
 		return 0, 0, 0, invalid, validationErrors, err
 	}
 	if needsAttribution {
-		if err := recomputeAttributionTx(tx); err != nil {
+		warning, err := recomputeAttributionTx(tx)
+		if err != nil {
 			return 0, 0, 0, invalid, validationErrors, err
 		}
+		logAttributionWarning(warning)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, 0, invalid, validationErrors, err
@@ -244,9 +247,13 @@ func (s *CompanyStore) DeleteCompanyWithAssets(id int64, deleteAssets bool) (ass
 	if deleted == 0 {
 		return 0, ErrCompanyNotFound
 	}
-	if err := recomputeAttributionTx(tx); err != nil {
+	// This path has no per-request warning channel, so the log is the only place
+	// the operator can learn about unparseable ip rows here.
+	warning, err := recomputeAttributionTx(tx)
+	if err != nil {
 		return 0, err
 	}
+	logAttributionWarning(warning)
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -370,9 +377,11 @@ func (s *CompanyStore) AddScopeInputsChecked(companyID int64, inputs []ScopeInpu
 		return 0, 0, invalid, errors, err
 	}
 	if needsAttribution {
-		if err := recomputeAttributionTx(tx); err != nil {
+		warning, err := recomputeAttributionTx(tx)
+		if err != nil {
 			return 0, 0, invalid, errors, fmt.Errorf("重新计算企业归属失败: %w", err)
 		}
+		logAttributionWarning(warning)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, invalid, errors, err
@@ -502,20 +511,26 @@ func (s *CompanyStore) RecomputeAttribution() error {
 	if err := lockCompanyScopeMutation(tx); err != nil {
 		return err
 	}
-	if err := recomputeAttributionTx(tx); err != nil {
+	warning, err := recomputeAttributionTx(tx)
+	if err != nil {
 		return err
 	}
+	logAttributionWarning(warning)
 	return tx.Commit()
 }
 
-func recomputeAttributionTx(tx *sql.Tx) error {
+// recomputeAttributionTx rebuilds scope-derived ownership. It returns a warning
+// for assets whose ip column cannot be parsed: try_inet skips them instead of
+// aborting the statement, so without this they would silently never receive a
+// network-based company. Callers surface the warning and it is always logged.
+func recomputeAttributionTx(tx *sql.Tx) (string, error) {
 	// Only derived rows are cleared. Historical rows migrated without provenance
 	// are marked explicit by schema.sql, which is the non-destructive default.
 	if _, err := tx.Exec(`
 UPDATE assets
 SET company_id = NULL, company_source = 'scope'
 WHERE company_source = 'scope'`); err != nil {
-		return err
+		return "", err
 	}
 
 	// Domain-based attribution (root_domain exact match).
@@ -533,7 +548,7 @@ UPDATE assets a
 SET company_id = matched.company_id, company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
-		return err
+		return "", err
 	}
 
 	// IP/CIDR attribution for still-unowned assets.
@@ -541,7 +556,7 @@ WHERE a.id = matched.asset_id`); err != nil {
 WITH matched AS (
     SELECT DISTINCT ON (a.id) a.id AS asset_id, cs.company_id
     FROM assets a
-    JOIN company_scope cs ON cs.kind IN ('ip','cidr') AND cs.net >>= a.ip::inet
+    JOIN company_scope cs ON cs.kind IN ('ip','cidr') AND cs.net >>= try_inet(a.ip)
     WHERE a.company_id IS NULL
       AND a.type IN ('ip','subdomain','service','endpoint')
       AND a.ip IS NOT NULL
@@ -551,7 +566,7 @@ UPDATE assets a
 SET company_id = matched.company_id, company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
-		return err
+		return "", err
 	}
 
 	// Exact normalized ICP attribution after domain/network precedence.
@@ -572,9 +587,78 @@ UPDATE assets a
 SET company_id = matched.company_id, company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return malformedIPAssetWarning(tx)
+}
+
+// malformedIPAssetsSampled bounds how many offending ids one warning names, so a
+// large batch of bad rows stays readable in a toast and in the log.
+const malformedIPAssetsSampled = 5
+
+// logAttributionWarning records a recompute warning in the server log. Every
+// recompute path calls it, so the warning is reported even for triggers with no
+// per-request response (company deletion, scopesentry sync, agent asset writes).
+func logAttributionWarning(warning string) {
+	if warning != "" {
+		log.Printf("[assets] %s", warning)
+	}
+}
+
+// malformedIPAssetQueryer is satisfied by both *sql.Tx and *DB so the warning
+// can be produced inside a recompute transaction or read standalone by the API.
+type malformedIPAssetQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// MalformedIPAssetWarning reports assets with an unparseable ip outside of any
+// mutation, letting the API attach the warning to a scope response without
+// widening the mutation signatures — an unrelated data problem is not one of
+// this request's validation errors.
+func (s *CompanyStore) MalformedIPAssetWarning() (string, error) {
+	return malformedIPAssetWarning(s.db)
+}
+
+// malformedIPAssetWarning describes assets whose ip column is not a valid
+// address. They are invisible to network attribution, so the operator has to be
+// told which rows to fix — silently skipping them would look like scope rules
+// that simply do not work.
+func malformedIPAssetWarning(q malformedIPAssetQueryer) (string, error) {
+	rows, err := q.Query(`
+SELECT id, ip, count(*) OVER () AS total
+FROM assets
+WHERE ip IS NOT NULL AND ip <> '' AND try_inet(ip) IS NULL
+  AND type IN ('ip','subdomain','service','endpoint')
+ORDER BY id
+LIMIT $1`, malformedIPAssetsSampled)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var total int
+	samples := make([]string, 0, malformedIPAssetsSampled)
+	for rows.Next() {
+		var id int64
+		var ip string
+		if err := rows.Scan(&id, &ip, &total); err != nil {
+			return "", err
+		}
+		samples = append(samples, fmt.Sprintf("#%d %s", id, ip))
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if total == 0 {
+		return "", nil
+	}
+	warning := fmt.Sprintf(
+		"%d 条资产的 ip 字段不是合法 IP，已跳过 IP/CIDR 范围匹配（这些资产不会被网段规则归属到企业）：%s",
+		total, strings.Join(samples, "、"),
+	)
+	if total > len(samples) {
+		warning += fmt.Sprintf(" 等 %d 条", total)
+	}
+	return warning, nil
 }
 
 // UpdateScope replaces all scope rules for a company and reattributes.
@@ -635,9 +719,11 @@ func (s *CompanyStore) UpdateScopeInputsChecked(companyID int64, inputs []ScopeI
 	}
 	// Rebuild even for an empty replacement because removing the old rules may
 	// detach scope-derived assets or expose a lower-precedence company match.
-	if err := recomputeAttributionTx(tx); err != nil {
+	warning, err := recomputeAttributionTx(tx)
+	if err != nil {
 		return 0, invalid, errs, fmt.Errorf("重新计算企业归属失败: %w", err)
 	}
+	logAttributionWarning(warning)
 	if err := tx.Commit(); err != nil {
 		return 0, invalid, errs, err
 	}

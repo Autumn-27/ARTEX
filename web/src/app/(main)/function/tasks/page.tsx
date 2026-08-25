@@ -19,6 +19,7 @@ import {
 import {
   ChevronRightIcon,
   EyeIcon,
+  FolderInputIcon,
   GripVerticalIcon,
   Loader2Icon,
   PaperclipIcon,
@@ -219,6 +220,10 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "timeout", label: "已超时" },
 ];
 
+// Select 不接受空字符串 value,所以「无分类」在筛选器、新建表单和批量移动里
+// 统一用这个哨兵值,提交时再翻译成后端的 null。
+const UNCATEGORIZED_VALUE = "uncategorized";
+
 // 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
 // (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
 // 两边不会出现一个可点、另一个不可点的分歧。
@@ -240,13 +245,18 @@ export default function TasksPage() {
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
   const [batchControlling, setBatchControlling] = React.useState<"pause" | "resume" | null>(null);
+  const [movingCategory, setMovingCategory] = React.useState(false);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return tasks.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
-      if (categoryFilter === "uncategorized" && t.category_id != null) return false;
-      if (categoryFilter !== "all" && categoryFilter !== "uncategorized" && String(t.category_id) !== categoryFilter)
+      if (categoryFilter === UNCATEGORIZED_VALUE && t.category_id != null) return false;
+      if (
+        categoryFilter !== "all" &&
+        categoryFilter !== UNCATEGORIZED_VALUE &&
+        String(t.category_id) !== categoryFilter
+      )
         return false;
       if (!q) return true;
       return (
@@ -374,7 +384,7 @@ export default function TasksPage() {
   );
 
   React.useEffect(() => {
-    if (categoryFilter === "all" || categoryFilter === "uncategorized") return;
+    if (categoryFilter === "all" || categoryFilter === UNCATEGORIZED_VALUE) return;
     if (!categories.some((category) => String(category.id) === categoryFilter)) setCategoryFilter("all");
   }, [categories, categoryFilter]);
 
@@ -535,6 +545,42 @@ export default function TasksPage() {
     [batchControlling, load],
   );
 
+  // 后端把整批分类写入放在一个事务里，所以失败项只可能是勾选后又被删掉的任务。
+  const moveSelectedTasksCategory = React.useCallback(
+    async (categoryID?: number) => {
+      const ids = [...selectedIds];
+      if (ids.length === 0 || movingCategory) return;
+      if (ids.length > 100) {
+        toast.error("一次最多修改 100 个任务的分类");
+        return;
+      }
+      setMovingCategory(true);
+      try {
+        const result = await api.updateTasksCategory(ids, categoryID);
+        const succeeded = result.items.filter((item) => item.ok);
+        const failed = result.items.filter((item) => !item.ok);
+        const target = result.category?.name ?? "未分类";
+        if (succeeded.length > 0) {
+          toast.success(`已将 ${succeeded.length} 个任务移动到「${target}」`);
+          setSelectedIds(new Set());
+        }
+        if (failed.length > 0) {
+          const details = failed
+            .slice(0, 3)
+            .map((item) => `#${item.id}（${item.error || "任务已不存在"}）`)
+            .join("；");
+          toast.error(`${failed.length} 个任务未能移动：${details}${failed.length > 3 ? " 等" : ""}`);
+        }
+        refreshCategoriesAndTasks();
+      } catch (error) {
+        toast.error(`修改分类失败：${(error as Error).message}`);
+      } finally {
+        setMovingCategory(false);
+      }
+    },
+    [movingCategory, refreshCategoriesAndTasks, selectedIds],
+  );
+
   return (
     <Card>
       <CardContent className="flex flex-col gap-4 px-0 pt-6">
@@ -580,7 +626,7 @@ export default function TasksPage() {
             <SelectContent>
               <SelectGroup>
                 <SelectItem value="all">全部分类</SelectItem>
-                <SelectItem value="uncategorized">未分类</SelectItem>
+                <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
                 {categories.map((category) => (
                   <SelectItem key={category.id} value={String(category.id)}>
                     {category.name}
@@ -628,6 +674,12 @@ export default function TasksPage() {
                   继续 {resumableTaskIDs.length}
                 </Button>
               )}
+              <MoveTasksCategoryDialog
+                categories={categories}
+                count={selectedIds.size}
+                moving={movingCategory}
+                onMove={moveSelectedTasksCategory}
+              />
               <BulkDeleteTasksDialog ids={[...selectedIds]} onDelete={deleteTasks} />
             </>
           )}
@@ -638,7 +690,12 @@ export default function TasksPage() {
             onChanged={refreshCategoriesAndTasks}
             onTaskMoved={applyTaskCategoryMove}
           />
-          <CreateTaskSheet tasks={tasks} categories={categories} onCreated={refreshCategoriesAndTasks} />
+          <CreateTaskSheet
+            tasks={tasks}
+            categories={categories}
+            onCreated={refreshCategoriesAndTasks}
+            onCategoriesChanged={refreshCategoriesAndTasks}
+          />
         </div>
 
         {tasks.length === 0 ? (
@@ -1147,6 +1204,81 @@ function DeleteTaskDialog({
 // BulkDeleteTasksDialog deletes every checked task with one shared set of cleanup options.
 // The backend has no batch endpoint, so deletion runs one task at a time (see deleteTasks)
 // and the button shows live progress.
+// MoveTasksCategoryDialog confirms a target before applying, so a mis-click on a
+// large selection cannot silently re-file every task. UNCATEGORIZED_VALUE stands
+// in for "no category" because Select rejects an empty string value.
+function MoveTasksCategoryDialog({
+  categories,
+  count,
+  moving,
+  onMove,
+}: {
+  categories: TaskCategory[];
+  count: number;
+  moving: boolean;
+  onMove: (categoryID?: number) => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [target, setTarget] = React.useState(UNCATEGORIZED_VALUE);
+
+  const handleOpenChange = (next: boolean) => {
+    if (moving) return;
+    setOpen(next);
+    if (next) setTarget(UNCATEGORIZED_VALUE);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <FolderInputIcon data-icon="inline-start" /> 修改分类
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>修改所选 {count} 个任务的分类</DialogTitle>
+          <DialogDescription>目标分类对所选任务统一生效；选「未分类」会把它们移出当前分类。</DialogDescription>
+        </DialogHeader>
+        <Field>
+          <FieldLabel htmlFor="bulk-category">目标分类</FieldLabel>
+          <Select value={target} onValueChange={setTarget} disabled={moving}>
+            <SelectTrigger id="bulk-category" className="w-full">
+              <SelectValue placeholder="选择分类" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
+                {categories.map((category) => (
+                  <SelectItem key={category.id} value={String(category.id)}>
+                    {category.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          {categories.length === 0 && <FieldDescription>还没有任何分类，先用「分类管理」创建一个。</FieldDescription>}
+        </Field>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" disabled={moving}>
+              取消
+            </Button>
+          </DialogClose>
+          <Button
+            disabled={moving}
+            onClick={() => {
+              void onMove(target === UNCATEGORIZED_VALUE ? undefined : Number(target)).then(() => setOpen(false));
+            }}
+          >
+            {moving && <Spinner data-icon="inline-start" />}
+            移动
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function BulkDeleteTasksDialog({
   ids,
   onDelete,
@@ -1287,6 +1419,130 @@ function SourceTaskPicker({
             );
           }}
         </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
+  );
+}
+
+// CategoryPicker 是新建任务里的单选分类选择器：可搜索已有分类；输入库里没有的名称后
+// 回车（或点下拉里的「创建」）即时新建分类并选中，选中项以可移除的 tag 展示。分类是
+// 全局资源，这里即时创建与「分类管理」里手动新建等价。只允许一个分类。
+function CategoryPicker({
+  categories,
+  value,
+  onValueChange,
+  onCategoryCreated,
+  portalContainer,
+}: {
+  categories: TaskCategory[];
+  value?: number;
+  onValueChange: (categoryID?: number) => void;
+  onCategoryCreated: () => void;
+  portalContainer?: React.RefObject<HTMLElement | null>;
+}) {
+  const [inputValue, setInputValue] = React.useState("");
+  const [creating, setCreating] = React.useState(false);
+  // 新建的分类要等父层重新拉取才回流到 categories，先本地留一份，避免选中的 chip 和
+  // 下拉在这段窗口里显示成「未知分类」。
+  const [localExtra, setLocalExtra] = React.useState<TaskCategory[]>([]);
+
+  const allCategories = React.useMemo(() => {
+    const byID = new Map<number, TaskCategory>();
+    for (const category of categories) byID.set(category.id, category);
+    for (const category of localExtra) if (!byID.has(category.id)) byID.set(category.id, category);
+    return [...byID.values()];
+  }, [categories, localExtra]);
+
+  const byID = React.useMemo(() => new Map(allCategories.map((c) => [String(c.id), c])), [allCategories]);
+  const categoryIDs = React.useMemo(() => allCategories.map((c) => String(c.id)), [allCategories]);
+  const selectedIDs = value != null ? [String(value)] : [];
+
+  const trimmed = inputValue.trim();
+  const lower = trimmed.toLowerCase();
+  // 与 base-ui 默认子串过滤保持一致，用来判断「有没有相关分类」。
+  const matchCount = trimmed
+    ? allCategories.filter((c) => c.name.toLowerCase().includes(lower)).length
+    : allCategories.length;
+
+  const createAndSelect = async () => {
+    if (!trimmed || creating) return;
+    // 精确同名已存在则直接选中，不重复创建。
+    const existing = allCategories.find((c) => c.name.toLowerCase() === lower);
+    if (existing) {
+      onValueChange(existing.id);
+      setInputValue("");
+      return;
+    }
+    setCreating(true);
+    try {
+      const created = await api.createTaskCategory(trimmed);
+      setLocalExtra((prev) => [...prev, created]);
+      onValueChange(created.id);
+      setInputValue("");
+      onCategoryCreated();
+      toast.success(`已创建分类「${created.name}」`);
+    } catch (e) {
+      toast.error(`创建分类失败：${(e as Error).message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <Combobox
+      items={categoryIDs}
+      itemToStringValue={(id) => byID.get(id)?.name ?? id}
+      multiple
+      value={selectedIDs}
+      onValueChange={(next: string[]) => {
+        // 单选：取最新选中的一个；移除 chip（清空）则回到未分类。
+        const last = next[next.length - 1];
+        onValueChange(last ? Number(last) : undefined);
+        setInputValue("");
+      }}
+      inputValue={inputValue}
+      onInputValueChange={setInputValue}
+    >
+      <ComboboxChips>
+        <ComboboxValue>
+          {selectedIDs.map((id) => (
+            <ComboboxChip key={id}>{byID.get(id)?.name ?? "未知分类"}</ComboboxChip>
+          ))}
+        </ComboboxValue>
+        <ComboboxChipsInput
+          id="task-category"
+          placeholder={selectedIDs.length ? "" : "搜索分类，或输入新名称后回车创建"}
+          onKeyDown={(e) => {
+            // 完全无匹配时回车 = 创建；有匹配项时保留 base-ui 的「回车选中高亮项」。
+            if (e.key === "Enter" && matchCount === 0 && trimmed) {
+              e.preventDefault();
+              void createAndSelect();
+            }
+          }}
+        />
+      </ComboboxChips>
+      <ComboboxContent portalContainer={portalContainer}>
+        <ComboboxList>
+          {(id: string) => (
+            <ComboboxItem key={id} value={id}>
+              {byID.get(id)?.name ?? id}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+        {matchCount === 0 &&
+          (trimmed ? (
+            <button
+              type="button"
+              disabled={creating}
+              onClick={() => void createAndSelect()}
+              className="flex w-full items-center gap-2 px-2 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+            >
+              {creating ? <Spinner className="size-4" /> : <PlusIcon className="size-4" />}
+              创建分类「{trimmed}」
+            </button>
+          ) : (
+            <div className="px-2 py-2 text-sm text-muted-foreground">输入名称以搜索或创建分类</div>
+          ))}
       </ComboboxContent>
     </Combobox>
   );
@@ -1799,14 +2055,16 @@ function CreateTaskSheet({
   tasks,
   categories,
   onCreated,
+  onCategoriesChanged,
 }: {
   tasks: Task[];
   categories: TaskCategory[];
   onCreated: () => void;
+  onCategoriesChanged: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
-  const [categoryID, setCategoryID] = React.useState("uncategorized");
+  const [categoryID, setCategoryID] = React.useState<number | undefined>(undefined);
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
@@ -1876,7 +2134,7 @@ function CreateTaskSheet({
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
         name: name.trim(),
-        categoryId: categoryID === "uncategorized" ? undefined : Number(categoryID),
+        categoryId: categoryID,
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -1889,7 +2147,7 @@ function CreateTaskSheet({
       });
       toast.success("任务已创建");
       setName("");
-      setCategoryID("uncategorized");
+      setCategoryID(undefined);
       setDescription("");
       setGoal("");
       setSelectedTemplateID(null);
@@ -1955,22 +2213,14 @@ function CreateTaskSheet({
             </div>
             <Field>
               <FieldLabel htmlFor="task-category">任务分类</FieldLabel>
-              <Select value={categoryID} onValueChange={setCategoryID}>
-                <SelectTrigger id="task-category">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="uncategorized">未分类</SelectItem>
-                    {categories.map((category) => (
-                      <SelectItem key={category.id} value={String(category.id)}>
-                        {category.name}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FieldDescription>用于任务列表筛选和归档，不影响 Agent 执行。</FieldDescription>
+              <CategoryPicker
+                categories={categories}
+                value={categoryID}
+                onValueChange={setCategoryID}
+                onCategoryCreated={onCategoriesChanged}
+                portalContainer={sheetContentRef}
+              />
+              <FieldDescription>可选，单个分类；用于任务列表筛选和归档，不影响 Agent 执行。</FieldDescription>
             </Field>
             <div className="grid gap-2">
               <Label htmlFor="description">描述</Label>

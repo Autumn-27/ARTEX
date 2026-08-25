@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -119,6 +120,26 @@ func (s *Server) pgDeleteTaskCategory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
+// parseCategoryIDField reads the category_id field shared by the single-task and
+// batch endpoints. The field is required but may be null — that clears the
+// category — so it arrives as RawMessage instead of *int64, which cannot tell
+// an explicit null from an omitted key.
+func parseCategoryIDField(w http.ResponseWriter, raw json.RawMessage) (*int64, bool) {
+	if len(raw) == 0 {
+		writeErr(w, http.StatusBadRequest, "category_id is required")
+		return nil, false
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, true
+	}
+	var id int64
+	if err := json.Unmarshal(raw, &id); err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "任务分类 id 无效")
+		return nil, false
+	}
+	return &id, true
+}
+
 func (s *Server) updateTaskCategory(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if _, ok := s.m.Task(taskID); !ok {
@@ -133,21 +154,8 @@ func (s *Server) updateTaskCategory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(request.CategoryID) == 0 {
-		writeErr(w, http.StatusBadRequest, "category_id is required")
-		return
-	}
-	var categoryID *int64
-	if !bytes.Equal(bytes.TrimSpace(request.CategoryID), []byte("null")) {
-		var id int64
-		if err := json.Unmarshal(request.CategoryID, &id); err != nil {
-			writeErr(w, http.StatusBadRequest, "任务分类 id 无效")
-			return
-		}
-		categoryID = &id
-	}
-	if categoryID != nil && *categoryID <= 0 {
-		writeErr(w, http.StatusBadRequest, "任务分类 id 无效")
+	categoryID, ok := parseCategoryIDField(w, request.CategoryID)
+	if !ok {
 		return
 	}
 	if _, err := s.m.SetTaskCategory(taskID, categoryID); err != nil {
@@ -156,4 +164,78 @@ func (s *Server) updateTaskCategory(w http.ResponseWriter, r *http.Request) {
 	}
 	task, _ := s.m.Task(taskID)
 	writeJSON(w, http.StatusOK, taskDTO(task, s.resolvedTaskStatus(task)))
+}
+
+// batchCategoryItem reports one requested task. Unlike batch pause/resume there
+// is no per-task runtime outcome, so only the failure reason is carried.
+type batchCategoryItem struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// updateTasksCategoryBatch moves every selected task into one category, or
+// clears it when category_id is null. The database write is atomic; per-task
+// entries only distinguish ids that never resolved to a live task, so a partial
+// success here means those tasks were deleted, not that the move half-applied.
+func (s *Server) updateTasksCategoryBatch(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxTaskCategoryRequestBytes)
+	var request struct {
+		TaskIDs    []string        `json:"task_ids"`
+		CategoryID json.RawMessage `json:"category_id"`
+	}
+	if err := decode(r, &request); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "请求正文过大")
+		} else {
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	categoryID, ok := parseCategoryIDField(w, request.CategoryID)
+	if !ok {
+		return
+	}
+	taskIDs := normalizeBatchTaskIDs(request.TaskIDs)
+	if len(taskIDs) == 0 || len(taskIDs) > db.MaxTaskCategoryBatchSize {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("task_ids 数量必须为 1-%d", db.MaxTaskCategoryBatchSize))
+		return
+	}
+	items := make([]batchCategoryItem, 0, len(taskIDs))
+	pending := make([]string, 0, len(taskIDs))
+	for _, parsed := range taskIDs {
+		item := batchCategoryItem{ID: parsed.id}
+		switch {
+		case !parsed.valid:
+			item.Error = "bad task id"
+		default:
+			if _, live := s.m.Task(parsed.id); live {
+				pending = append(pending, parsed.id)
+			} else {
+				item.Error = "task not found"
+			}
+		}
+		items = append(items, item)
+	}
+	var category *db.TaskCategory
+	if len(pending) > 0 {
+		updated, moved, err := s.m.SetTasksCategory(pending, categoryID)
+		if err != nil {
+			writeTaskCategoryError(w, err)
+			return
+		}
+		category = moved
+		for i := range items {
+			if items[i].Error != "" {
+				continue
+			}
+			if updated[items[i].ID] {
+				items[i].OK = true
+			} else {
+				items[i].Error = "task not found"
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "category": category})
 }

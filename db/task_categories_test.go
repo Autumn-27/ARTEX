@@ -89,3 +89,95 @@ func TestCreateTaskRejectsMissingCategoryAtomically(t *testing.T) {
 		t.Fatalf("failed create leaked %d exploration rows", count)
 	}
 }
+
+func TestSetTasksCategoryBatch(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	category, err := d.CreateTaskCategory(fmt.Sprintf("Batch %d", stamp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.DeleteTaskCategory(category.ID) })
+
+	ids := make([]int64, 0, 3)
+	for i := range 3 {
+		task, err := d.CreateTaskWithOptions(fmt.Sprintf("batch-move-%d-%d", stamp, i), "goal", TaskCreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+		ids = append(ids, task.ID)
+	}
+
+	// A deleted id must not abort the move for the surviving tasks; it is simply
+	// absent from the returned slice so the caller can report it.
+	missing := int64(1 << 62)
+	updated, moved, err := d.SetTasksCategory(append(append([]int64{}, ids...), missing), &category.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != len(ids) {
+		t.Fatalf("updated=%v, want the %d live ids only", updated, len(ids))
+	}
+	if moved == nil || moved.TaskCount != len(ids) {
+		t.Fatalf("category=%+v, want task_count=%d", moved, len(ids))
+	}
+	for _, id := range ids {
+		loaded, err := d.GetTask(id)
+		if err != nil || loaded.CategoryID == nil || *loaded.CategoryID != category.ID {
+			t.Fatalf("task %d not moved: %+v err=%v", id, loaded, err)
+		}
+	}
+
+	// A nil category clears the assignment for the whole batch.
+	updated, moved, err = d.SetTasksCategory(ids, nil)
+	if err != nil || len(updated) != len(ids) || moved != nil {
+		t.Fatalf("clear updated=%v category=%+v err=%v", updated, moved, err)
+	}
+	for _, id := range ids {
+		loaded, _ := d.GetTask(id)
+		if loaded.CategoryID != nil || loaded.CategoryName != "" {
+			t.Fatalf("task %d still categorized: %+v", id, loaded)
+		}
+	}
+}
+
+func TestSetTasksCategoryRejectsBadInputAtomically(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	task, err := d.CreateTaskWithOptions(fmt.Sprintf("batch-reject-%d", stamp), "goal", TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	missingCategory := int64(1 << 62)
+	if _, _, err := d.SetTasksCategory([]int64{task.ID}, &missingCategory); !errors.Is(err, ErrTaskCategoryNotFound) {
+		t.Fatalf("missing category error=%v, want %v", err, ErrTaskCategoryNotFound)
+	}
+	if _, _, err := d.SetTasksCategory(nil, nil); !errors.Is(err, ErrTaskCategoryInvalid) {
+		t.Fatalf("empty ids error=%v, want %v", err, ErrTaskCategoryInvalid)
+	}
+	oversized := make([]int64, MaxTaskCategoryBatchSize+1)
+	for i := range oversized {
+		oversized[i] = task.ID
+	}
+	if _, _, err := d.SetTasksCategory(oversized, nil); !errors.Is(err, ErrTaskCategoryInvalid) {
+		t.Fatalf("oversized error=%v, want %v", err, ErrTaskCategoryInvalid)
+	}
+	// The rejected calls must leave the task untouched.
+	loaded, _ := d.GetTask(task.ID)
+	if loaded.CategoryID != nil {
+		t.Fatalf("rejected batch mutated task: %+v", loaded)
+	}
+}

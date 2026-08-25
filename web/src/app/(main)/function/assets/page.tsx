@@ -1321,6 +1321,14 @@ function CompanyAvatar({ name, logo }: { name: string; logo?: string }) {
   );
 }
 
+// 后端返回的 warnings 说的是既有数据问题（不是本次提交的行有错），保存本身已经
+// 成功。给更长的停留时间，因为它需要用户去处理具体的资产，扫一眼标题不够。
+function showScopeWarnings(warnings?: string[]) {
+  for (const warning of warnings ?? []) {
+    toast.warning(warning, { duration: 15000 });
+  }
+}
+
 function savedScopeRules(company: Company): CompanyScopeRule[] {
   return (company.scope ?? [])
     .map((scope) => ({ kind: scope.kind, value: scope.raw.trim() }))
@@ -1442,6 +1450,7 @@ function EditScopeDialog({ company, onSaved }: { company: Company; onSaved: () =
       const errCount = res.invalid ?? 0;
       if (errCount > 0) toast.warning(`已保存；${errCount} 行无效`);
       else toast.success(`范围已更新，共 ${res.added} 条`);
+      showScopeWarnings(res.warnings);
       setOpen(false);
       onSaved();
     } catch (e) {
@@ -1528,6 +1537,7 @@ function AppendScopeDialog({ company, onSaved }: { company: Company; onSaved: ()
       const errCount = res.invalid ?? 0;
       if (errCount > 0) toast.warning(`已保存；${errCount} 行无效`);
       else toast.success(`已追加 ${res.added} 条范围`);
+      showScopeWarnings(res.warnings);
       setOpen(false);
       onSaved();
     } catch (e) {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -392,5 +393,58 @@ func TestInsertAssetsDedup(t *testing.T) {
 	id1, id2 := getID(out1), getID(out2)
 	if id1 == 0 || id1 != id2 {
 		t.Errorf("dedup: want same ID on double insert, got %v vs %v", id1, id2)
+	}
+}
+
+// =====================================================================
+// TestInsertAssetsRejectsHostnameIPPerItem
+// 一批里混入 ip 填了主机名的一条 → 只有那条失败，其余照常入库，
+// 且错误里带得上 index 和改正方法，Agent 下一轮能自己修好。
+// =====================================================================
+func TestInsertAssetsRejectsHostnameIPPerItem(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+
+	ts := NewToolSet(nil, "")
+	ts.SetAssetStore(d.Assets(), d.Companies())
+	defer d.Exec(`DELETE FROM assets WHERE ip IN ('198.51.100.23','cdn.badip-test.com') OR domain='badip-test.com'`)
+
+	out := callInsertAssets(t, ts, map[string]any{
+		"assets": []any{
+			map[string]any{"type": "root_domain", "domain": "badip-test.com"},
+			map[string]any{"type": "ip", "ip": "cdn.badip-test.com"},
+			map[string]any{"type": "ip", "ip": "198.51.100.23"},
+		},
+	})
+
+	// The two valid entries must survive the bad one — a whole-batch failure
+	// would make the agent re-send assets that were already fine.
+	results, _ := out["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("results=%v, want the 2 valid assets", out["results"])
+	}
+
+	errsRaw, _ := out["errors"].([]any)
+	if len(errsRaw) != 1 {
+		t.Fatalf("errors=%v, want exactly the invalid entry", out["errors"])
+	}
+	entry, _ := errsRaw[0].(map[string]any)
+	if index, _ := entry["index"].(float64); int(index) != 1 {
+		t.Fatalf("error index=%v, want 1", entry["index"])
+	}
+	message, _ := entry["error"].(string)
+	for _, want := range []string{"cdn.badip-test.com", "type=subdomain", "A/AAAA"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error message %q lacks %q — agent cannot act on it", message, want)
+		}
+	}
+
+	// The rejected value must not have reached the table.
+	var stored int
+	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE ip='cdn.badip-test.com'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Fatalf("rejected hostname still stored in assets.ip (%d rows)", stored)
 	}
 }

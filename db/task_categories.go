@@ -13,6 +13,10 @@ import (
 
 const MaxTaskCategoryNameRunes = 80
 
+// MaxTaskCategoryBatchSize bounds one batch move so a single request cannot lock
+// an unbounded number of task rows.
+const MaxTaskCategoryBatchSize = 100
+
 var (
 	ErrTaskCategoryInvalid      = errors.New("invalid task category")
 	ErrTaskCategoryNameConflict = errors.New("task category name already exists")
@@ -198,4 +202,81 @@ FROM selected, updated`, taskID, *categoryID))
 		return nil, err
 	}
 	return &category, nil
+}
+
+// SetTasksCategory moves several tasks into one category (nil = uncategorized)
+// inside a single transaction, so a half-applied batch is never observable.
+// It returns the ids that were actually updated — ids missing from that slice
+// were deleted between selection and submit — plus the refreshed category row
+// whose task_count already reflects this move.
+func (d *DB) SetTasksCategory(taskIDs []int64, categoryID *int64) ([]int64, *TaskCategory, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil, fmt.Errorf("%w: task ids are required", ErrTaskCategoryInvalid)
+	}
+	if len(taskIDs) > MaxTaskCategoryBatchSize {
+		return nil, nil, fmt.Errorf("%w: at most %d tasks per request", ErrTaskCategoryInvalid, MaxTaskCategoryBatchSize)
+	}
+	for _, id := range taskIDs {
+		if id <= 0 {
+			return nil, nil, fmt.Errorf("%w: task id must be positive", ErrTaskCategoryInvalid)
+		}
+	}
+	if categoryID != nil && *categoryID <= 0 {
+		return nil, nil, fmt.Errorf("%w: category id must be positive", ErrTaskCategoryInvalid)
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Checking the category inside the transaction keeps a concurrent delete from
+	// turning the UPDATE below into a foreign key violation.
+	if categoryID != nil {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_categories WHERE id=$1)`, *categoryID).Scan(&exists); err != nil {
+			return nil, nil, err
+		}
+		if !exists {
+			return nil, nil, ErrTaskCategoryNotFound
+		}
+	}
+	rows, err := tx.Query(`
+UPDATE tasks SET category_id=$2
+WHERE id=ANY($1::bigint[]) AND deleted_at IS NULL
+RETURNING id`, taskIDs, categoryID)
+	if err != nil {
+		return nil, nil, err
+	}
+	updated := make([]int64, 0, len(taskIDs))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		updated = append(updated, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	var category *TaskCategory
+	if categoryID != nil {
+		fetched, err := scanTaskCategory(tx.QueryRow(`
+SELECT `+taskCategoryCols+`
+FROM task_categories category
+LEFT JOIN tasks task ON task.category_id=category.id
+WHERE category.id=$1
+GROUP BY category.id`, *categoryID))
+		if err != nil {
+			return nil, nil, err
+		}
+		category = &fetched
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return updated, category, nil
 }

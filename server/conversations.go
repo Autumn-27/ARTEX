@@ -315,9 +315,12 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
-	ca := s.chatAgentRef()
-	if ca == nil {
-		writeErr(w, 503, "LLM 未配置，无法对话")
+	// Same resolution as the background runner: honour the agent binding / this
+	// conversation's chosen profile before falling back to the global config, so a
+	// conversation that picked a valid LLM is not rejected just because no global
+	// config is active.
+	if s.resolveChatAgent(c) == nil {
+		writeErr(w, 503, s.chatUnavailableReason())
 		return
 	}
 
@@ -390,12 +393,7 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 		s.chatMu.Unlock()
 	}()
 	// precedence: the conversation agent's own binding → this conversation's pin → global.
-	ca := s.chatAgentRef()
-	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
-		if pa := s.chatAgentForProfile(*eff); pa != nil {
-			ca = pa
-		}
-	}
+	ca := s.resolveChatAgent(c)
 	if ca == nil {
 		return
 	}

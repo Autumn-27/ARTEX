@@ -356,6 +356,25 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     return { deleted: categoryID };
   }
+  if (path === "/tasks/category/batch" && m === "POST") {
+    const requested = Array.isArray(b.task_ids) ? b.task_ids.map(String) : [];
+    const taskIDs = [...new Set(requested)];
+    if (taskIDs.length === 0 || taskIDs.length > 100) throw new Error("task_ids 数量必须为 1-100");
+    const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
+    const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
+    if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
+    const items = taskIDs.map((id) => {
+      const task = mockTasks.find((item) => item.id === id);
+      if (!task) return { id, ok: false, error: "task not found" };
+      task.category_id = category?.id;
+      task.category_name = category?.name;
+      return { id, ok: true };
+    });
+    return {
+      items,
+      category: category ? mockTaskCategorySnapshot().find((item) => item.id === category.id) : null,
+    };
+  }
   if (seg[0] === "tasks" && seg[2] === "category" && seg.length === 3 && m === "PATCH") {
     const task = mockTasks.find((item) => item.id === seg[1]);
     if (!task) throw new Error("任务不存在");

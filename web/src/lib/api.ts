@@ -12,10 +12,12 @@ import type {
   AgentTrigger,
   Asset,
   Audit,
+  BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
   CommandRecord,
   Company,
+  CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
@@ -218,6 +220,12 @@ export const api = {
   deleteTaskCategory: (id: number) => del<{ deleted: number }>(`/task-categories/${id}`),
   updateTaskCategory: (taskId: string, categoryId?: number) =>
     patch<Task>(`/tasks/${taskId}/category`, { category_id: categoryId ?? null }),
+  // categoryId 省略/undefined = 移出分类（后端收到 null）
+  updateTasksCategory: (taskIds: string[], categoryId?: number) =>
+    post<{ items: BatchCategoryItem[]; category: TaskCategory | null }>("/tasks/category/batch", {
+      task_ids: taskIds,
+      category_id: categoryId ?? null,
+    }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
     post<TaskTemplate>("/task-templates", input),
@@ -388,12 +396,12 @@ export const api = {
       },
     ),
   addCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
-    post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
       scope,
       reason,
     }),
   updateCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
-    post<{ added: number; skipped: number; invalid: number; errors?: string[] }>(`/companies/${id}/scope`, {
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
       scope,
       reason,
       reset: true,

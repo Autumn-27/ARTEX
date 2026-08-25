@@ -812,6 +812,49 @@ func (m *Manager) SetTaskCategory(taskID string, categoryID *int64) (*pgdb.TaskC
 	return category, nil
 }
 
+// SetTasksCategory applies one category change to several tasks at once. The
+// database write and the in-memory refresh share taskStateMu, so a concurrent
+// single-task update cannot interleave and leave a live DTO stale. The returned
+// set holds the ids that were actually moved; callers report the rest as gone.
+func (m *Manager) SetTasksCategory(taskIDs []string, categoryID *int64) (map[string]bool, *pgdb.TaskCategory, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	numeric := make([]int64, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		id, err := strconv.ParseInt(taskID, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, nil, pgdb.ErrTaskCategoryTaskNotFound
+		}
+		numeric = append(numeric, id)
+	}
+	updatedIDs, category, err := m.pg.SetTasksCategory(numeric, categoryID)
+	if err != nil {
+		return nil, nil, err
+	}
+	categoryName := ""
+	if category != nil {
+		categoryName = category.Name
+	}
+	updated := make(map[string]bool, len(updatedIDs))
+	m.mu.RLock()
+	tasks := make([]*Task, 0, len(updatedIDs))
+	for _, id := range updatedIDs {
+		taskID := strconv.FormatInt(id, 10)
+		updated[taskID] = true
+		if task := m.tasks[taskID]; task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	m.mu.RUnlock()
+	for _, task := range tasks {
+		task.updateLifecycle(func(state *taskLifecycleState) {
+			state.CategoryID = cloneInt64Ptr(categoryID)
+			state.CategoryName = categoryName
+		})
+	}
+	return updated, category, nil
+}
+
 // DeleteCompanyWithAssets keeps the database cascade and live task handles in
 // one manager-level critical section. This closes the gap where a task could
 // commit its company scope immediately before registration and miss the
@@ -1515,7 +1558,14 @@ func (m *Manager) List() []*Task {
 	for _, t := range m.tasks {
 		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	// 按 id 降序(最新插入在最前)。m.tasks 是 map,遍历顺序随机,每次轮询都要重排;
+	// 若按 CreatedAt 排,同一秒创建的任务时间戳相同,排序不稳定,会在列表里频繁换
+	// 位置。id 由 BIGSERIAL 单调递增分配,唯一且稳定,顺序恒定。
+	sort.Slice(out, func(i, j int) bool {
+		ai, _ := strconv.ParseInt(out[i].ID, 10, 64)
+		aj, _ := strconv.ParseInt(out[j].ID, 10, 64)
+		return ai > aj
+	})
 	return out
 }
 

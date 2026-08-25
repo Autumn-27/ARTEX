@@ -492,6 +492,37 @@ func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 
 	return pinID
 }
 
+// resolveChatAgent picks the ChatAgent for one conversation: the agent's own
+// binding or this conversation's chosen profile first, the global active config
+// only as a fallback. Both the send precheck and the background runner MUST use
+// this — resolving differently in the two paths is how a conversation that had
+// picked a valid profile still got rejected with "LLM 未配置" when no global
+// config was active.
+func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
+	ca := s.chatAgentRef()
+	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
+		if pa := s.chatAgentForProfile(*eff); pa != nil {
+			ca = pa
+		}
+	}
+	return ca
+}
+
+// chatUnavailableReason explains why no ChatAgent could be resolved, so the user
+// knows whether to add a config, activate one, or pick one for this conversation
+// — rather than a flat "not configured" that hides which of those it is.
+func (s *Server) chatUnavailableReason() string {
+	if s.m.pg != nil {
+		if profiles, err := s.m.pg.ListProfiles(); err == nil && len(profiles) == 0 {
+			return "尚未配置 LLM：请到 系统 → LLM 配置 添加一个配置"
+		}
+		if active, err := s.m.pg.ActiveProfile(); err == nil && active == nil {
+			return "没有已激活的 LLM 配置：请到 系统 → LLM 配置 激活一个，或在本对话为该会话指定一个配置"
+		}
+	}
+	return "LLM 未就绪，无法对话：请检查 系统 → LLM 配置是否有可用且已激活的配置"
+}
+
 // providerForProfile returns a cached provider+cfg for a profile id, so every agent
 // bound/pinned to the same profile shares one provider instance (one rate limiter).
 // ok=false when the profile is missing/invalid → caller falls back to the global pair.
@@ -650,6 +681,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
 	mux.HandleFunc("DELETE /api/task-categories/{id}", s.pgDeleteTaskCategory)
+	mux.HandleFunc("POST /api/tasks/category/batch", s.updateTasksCategoryBatch)
 	mux.HandleFunc("GET /api/task-templates", s.pgListTaskTemplates)
 	mux.HandleFunc("POST /api/task-templates", s.pgCreateTaskTemplate)
 	mux.HandleFunc("PATCH /api/task-templates/{id}", s.pgUpdateTaskTemplate)

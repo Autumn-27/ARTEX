@@ -230,6 +230,13 @@ func (s *Server) addCompanyScope(w http.ResponseWriter, r *http.Request) {
 	if len(errs) > 0 {
 		out["errors"] = errs
 	}
+	// Reported separately from errors: this is pre-existing bad data, not a fault
+	// in the submitted rules, but the operator still has to see it or those assets
+	// look like the IP/CIDR rules simply never match. A failure to build the
+	// warning must not fail the scope write that already committed.
+	if warning, err := cs.MalformedIPAssetWarning(); err == nil && warning != "" {
+		out["warnings"] = []string{warning}
+	}
 	writeJSON(w, 200, out)
 }
 

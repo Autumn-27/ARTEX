@@ -27,6 +27,40 @@ type intentControlResult struct {
 	Deleted *db.IntentCleanup `json:"deleted,omitempty"`
 }
 
+// parsedTaskID carries one requested batch id together with whether it parsed.
+// Invalid ids are kept rather than dropped so the response can name them.
+type parsedTaskID struct {
+	id    string
+	valid bool
+}
+
+// normalizeBatchTaskIDs trims, canonicalizes and de-duplicates the ids of one
+// batch request while preserving the caller's order. Shared by every batch
+// endpoint so they agree on what counts as a duplicate.
+func normalizeBatchTaskIDs(raw []string) []parsedTaskID {
+	seen := map[string]bool{}
+	seenInvalid := map[string]bool{}
+	taskIDs := make([]parsedTaskID, 0, len(raw))
+	for _, item := range raw {
+		trimmed := strings.TrimSpace(item)
+		id, valid := canonicalTaskID(trimmed)
+		if !valid {
+			if seenInvalid[trimmed] {
+				continue
+			}
+			seenInvalid[trimmed] = true
+			taskIDs = append(taskIDs, parsedTaskID{id: trimmed})
+			continue
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		taskIDs = append(taskIDs, parsedTaskID{id: id, valid: true})
+	}
+	return taskIDs
+}
+
 type batchControlItem struct {
 	ID     string `json:"id"`
 	OK     bool   `json:"ok"`
@@ -192,30 +226,7 @@ func (s *Server) controlTasksBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "action must be pause|resume")
 		return
 	}
-	type parsedTaskID struct {
-		id    string
-		valid bool
-	}
-	seen := map[string]bool{}
-	seenInvalid := map[string]bool{}
-	taskIDs := make([]parsedTaskID, 0, len(req.TaskIDs))
-	for _, raw := range req.TaskIDs {
-		trimmed := strings.TrimSpace(raw)
-		id, valid := canonicalTaskID(trimmed)
-		if !valid {
-			if seenInvalid[trimmed] {
-				continue
-			}
-			seenInvalid[trimmed] = true
-			taskIDs = append(taskIDs, parsedTaskID{id: trimmed})
-			continue
-		}
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		taskIDs = append(taskIDs, parsedTaskID{id: id, valid: true})
-	}
+	taskIDs := normalizeBatchTaskIDs(req.TaskIDs)
 	if len(taskIDs) == 0 || len(taskIDs) > maxBatchControlIDs {
 		writeErr(w, 400, fmt.Sprintf("task_ids 数量必须为 1-%d", maxBatchControlIDs))
 		return

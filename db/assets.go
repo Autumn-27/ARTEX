@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -300,6 +301,27 @@ RETURNING id`, domain, icpVal, companyID, taskIDs).Scan(&id)
 	return id, err
 }
 
+// ErrAssetIPInvalid marks a non-address value in an asset's ip field. Both
+// insert_assets and the asset API report it per item with the item index, so one
+// bad entry never costs the rest of the batch.
+var ErrAssetIPInvalid = errors.New("invalid asset ip")
+
+// ValidateAssetIP keeps hostnames out of assets.ip. Network attribution casts
+// that column to inet (see try_inet in schema.sql), so a hostname stored here is
+// silently invisible to every IP/CIDR scope rule — the asset simply never gets
+// attributed and nobody can tell why. The message states the fix rather than
+// just the fault, so an agent can correct the item on its next turn. An empty
+// value is accepted: the ip field is optional for service and endpoint assets.
+func ValidateAssetIP(value string) error {
+	if value == "" || net.ParseIP(value) != nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: ip 必须是 IPv4/IPv6 地址，收到 %q。若这是主机名，请改用 type=subdomain 并填 domain 字段；"+
+			"若确实要登记地址，请先解析出 A/AAAA 记录，再用解析出的地址填 ip",
+		ErrAssetIPInvalid, value)
+}
+
 // =====================================================================
 // UpsertIP
 // =====================================================================
@@ -316,6 +338,9 @@ type UpsertIPReq struct {
 func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 	if req.IP == "" {
 		return 0, fmt.Errorf("ip is required")
+	}
+	if err := ValidateAssetIP(req.IP); err != nil {
+		return 0, err
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
@@ -659,6 +684,9 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 	if req.URL == "" {
 		return 0, fmt.Errorf("url is required")
 	}
+	if err := ValidateAssetIP(req.IP); err != nil {
+		return 0, err
+	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertHTTPService(req)
@@ -792,6 +820,9 @@ type UpsertOtherServiceReq struct {
 func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error) {
 	if req.Domain == "" && req.IP == "" {
 		return 0, fmt.Errorf("domain or ip is required")
+	}
+	if err := ValidateAssetIP(req.IP); err != nil {
+		return 0, err
 	}
 	if req.Port == 0 {
 		return 0, fmt.Errorf("port is required")
@@ -935,6 +966,9 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 	}
 	if req.Method == "" {
 		return 0, fmt.Errorf("method is required")
+	}
+	if err := ValidateAssetIP(req.IP); err != nil {
+		return 0, err
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {

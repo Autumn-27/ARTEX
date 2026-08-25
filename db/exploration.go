@@ -857,6 +857,16 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, s.e
 	return exists, err
 }
 
+// HasOpenGoal reports whether this exploration still has any goal in state 'open'.
+// false ⇒ 所有目标已 met/abandoned（或本任务无目标）⇒ 进入 goalless（人工直投）分支：
+// planner 停跑，任务是否结束改由 frontier 是否抽干决定。met 与 abandoned 都算"已了结"。
+func (s *ExplorationStore) HasOpenGoal() (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exists)
+	return exists, err
+}
+
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
