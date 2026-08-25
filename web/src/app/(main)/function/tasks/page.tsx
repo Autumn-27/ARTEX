@@ -112,6 +112,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   ChatAttachment,
   Company,
@@ -242,7 +243,9 @@ function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
 }
 
 type TaskSortField = "id" | "created" | "duration" | "status";
-type SortDirection = "asc" | "desc";
+
+const TASK_SORT_FIELDS: readonly TaskSortField[] = ["id", "created", "duration", "status"];
+const TASK_SORT_PREFERENCE_KEY = "artex_task_list_sort";
 
 const TASK_STATUS_RANK = new Map(STATUS_OPTIONS.map((option, index) => [option.value, index]));
 
@@ -292,8 +295,13 @@ export default function TasksPage() {
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
-  const [sortField, setSortField] = React.useState<TaskSortField>("id");
-  const [sortDirection, setSortDirection] = React.useState<SortDirection>("desc");
+  const [sortPreference, setSortPreference] = useStoredSortPreference(
+    TASK_SORT_PREFERENCE_KEY,
+    TASK_SORT_FIELDS,
+    "id",
+    "desc",
+  );
+  const { field: sortField, direction: sortDirection } = sortPreference;
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
@@ -329,14 +337,12 @@ export default function TasksPage() {
 
   const sortTasksBy = React.useCallback(
     (field: TaskSortField) => {
-      if (sortField === field) {
-        setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
-        return;
-      }
-      setSortField(field);
-      setSortDirection("desc");
+      setSortPreference((current) => {
+        if (current.field !== field) return { field, direction: "desc" };
+        return { field, direction: current.direction === "asc" ? "desc" : "asc" };
+      });
     },
-    [sortField],
+    [setSortPreference],
   );
 
   // reset to page 1 whenever filters or ordering change
@@ -1066,13 +1072,7 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
-          <Link
-            href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
-            className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={task.name?.trim() ? task.name : task.description}
-          >
-            {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
-          </Link>
+          <TaskNameEditor task={task} onRename={onRename} />
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
@@ -1139,7 +1139,7 @@ const TaskRow = React.memo(function TaskRow({
             </Link>
           </Button>
           <TaskControlButton task={task} onControl={onControl} />
-          <TaskMetadataActions task={task} onRename={onRename} onTogglePinned={onTogglePinned} />
+          <TaskPinAction task={task} onTogglePinned={onTogglePinned} />
           <DeleteTaskDialog task={task} onDelete={onDelete} />
         </div>
       </TableCell>
@@ -1147,117 +1147,141 @@ const TaskRow = React.memo(function TaskRow({
   );
 });
 
+function TaskNameEditor({
+  task,
+  onRename,
+}: {
+  task: Task;
+  onRename: (task: Task, name: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [name, setName] = React.useState(task.name ?? "");
+  const [saving, setSaving] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const cancelOnBlurRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!editing) setName(task.name ?? "");
+  }, [editing, task.name]);
+
+  async function finishEditing() {
+    if (cancelOnBlurRef.current) {
+      cancelOnBlurRef.current = false;
+      setName(task.name ?? "");
+      setEditing(false);
+      return;
+    }
+
+    const next = name.trim();
+    if (!next || next === task.name?.trim()) {
+      setName(task.name ?? "");
+      setEditing(false);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onRename(task, next);
+      setEditing(false);
+    } catch {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex min-w-0 items-center gap-1">
+        <Input
+          ref={inputRef}
+          value={name}
+          maxLength={200}
+          autoFocus
+          disabled={saving}
+          aria-label={`任务 #${task.id} 名称`}
+          className="h-7 min-w-28 max-w-48 px-2 font-medium"
+          onFocus={(event) => event.currentTarget.select()}
+          onChange={(event) => setName(event.target.value)}
+          onBlur={() => void finishEditing()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelOnBlurRef.current = true;
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        {saving && <Spinner className="shrink-0" />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <Link
+        href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+        className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        title={task.name?.trim() ? task.name : task.description}
+      >
+        {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
+      </Link>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        className="shrink-0 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100"
+        aria-label={`重命名任务 #${task.id}`}
+        title="重命名"
+        onClick={() => {
+          setName(task.name ?? "");
+          setEditing(true);
+        }}
+      >
+        <PencilIcon />
+      </Button>
+    </div>
+  );
+}
+
 function taskPinIcon(pinning: boolean, pinned: boolean) {
   if (pinning) return <Spinner />;
   if (pinned) return <PinOffIcon />;
   return <PinIcon />;
 }
 
-function TaskMetadataActions({
+function TaskPinAction({
   task,
-  onRename,
   onTogglePinned,
 }: {
   task: Task;
-  onRename: (task: Task, name: string) => Promise<void>;
   onTogglePinned: (task: Task) => Promise<void>;
 }) {
-  const [renameOpen, setRenameOpen] = React.useState(false);
-  const [name, setName] = React.useState(task.name ?? "");
-  const [saving, setSaving] = React.useState(false);
   const [pinning, setPinning] = React.useState(false);
   const pinned = taskIsPinned(task);
 
-  React.useEffect(() => {
-    if (renameOpen) setName(task.name ?? "");
-  }, [renameOpen, task.name]);
-
-  async function saveName() {
-    const next = name.trim();
-    if (!next) return;
-    if (next === task.name?.trim()) {
-      setRenameOpen(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      await onRename(task, next);
-      setRenameOpen(false);
-    } catch {
-      // The parent already reports the API error; keep the dialog open for retry.
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
-    <>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        aria-label={`重命名任务 #${task.id}`}
-        title="重命名"
-        onClick={() => setRenameOpen(true)}
-      >
-        <PencilIcon />
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        disabled={pinning}
-        aria-label={pinned ? `取消置顶任务 #${task.id}` : `置顶任务 #${task.id}`}
-        title={pinned ? "取消置顶" : "置顶"}
-        onClick={async () => {
-          setPinning(true);
-          try {
-            await onTogglePinned(task);
-          } finally {
-            setPinning(false);
-          }
-        }}
-      >
-        {taskPinIcon(pinning, pinned)}
-      </Button>
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>重命名任务 #{task.id}</DialogTitle>
-            <DialogDescription>新名称只用于列表和详情展示，不会改变任务描述、目标或执行状态。</DialogDescription>
-          </DialogHeader>
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor={`task-rename-${task.id}`}>任务名称</FieldLabel>
-              <Input
-                id={`task-rename-${task.id}`}
-                value={name}
-                maxLength={200}
-                autoFocus
-                onChange={(event) => setName(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void saveName();
-                  }
-                }}
-              />
-            </Field>
-          </FieldGroup>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="outline" disabled={saving}>
-                取消
-              </Button>
-            </DialogClose>
-            <Button disabled={saving || !name.trim()} onClick={() => void saveName()}>
-              {saving && <Spinner data-icon="inline-start" />}
-              保存
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      disabled={pinning}
+      aria-label={pinned ? `取消置顶任务 #${task.id}` : `置顶任务 #${task.id}`}
+      title={pinned ? "取消置顶" : "置顶"}
+      onClick={async () => {
+        setPinning(true);
+        try {
+          await onTogglePinned(task);
+        } finally {
+          setPinning(false);
+        }
+      }}
+    >
+      {taskPinIcon(pinning, pinned)}
+    </Button>
   );
 }
 
