@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-25
+
 ### Agent
 
 #### 新增的功能
@@ -21,6 +23,10 @@
 #### 新增的功能
 
 - 新增 `reset-password.sh` 重置管理员（用户名固定 `ARTEX`）密码：支持 local / docker 两种部署，连接信息可显式指定或自动从 `--dsn`/`$ARTEX_PG_DSN`/`config.json` 读取；在库内用 `pgcrypto` 生成与后端登录兼容的 bcrypt 哈希并写回 `settings.auth.password_hash`，重置后无需重启服务。密码经环境变量传入、不进入进程 argv，并做转义防注入。
+
+### 贡献者
+
+- [@Autumn-27](https://github.com/Autumn-27)
 
 ## [0.3.4] - 2026-08-24
 
@@ -261,7 +267,8 @@
 - [@Autumn-27](https://github.com/Autumn-27)
 - [@neouks](https://github.com/neouks)
 
-[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/Autumn-27/ARTEX/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/Autumn-27/ARTEX/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Autumn-27/ARTEX/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Autumn-27/ARTEX/compare/v0.3.1...v0.3.2
