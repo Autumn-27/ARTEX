@@ -305,6 +305,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.Stream = p.Streaming
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -322,14 +323,15 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	}
 	var id int64
 	// agent.Config carries no failover fields, so carry the stored ones forward —
-	// otherwise this legacy endpoint would silently reset the profile's priority
-	// and pool_exclude to zero values on every save.
+	// otherwise this legacy endpoint would silently reset the profile's priority,
+	// pool_exclude, and streaming to zero values on every save.
 	var priority int
 	var poolExclude bool
+	streaming := true // 旧库/新建默认流式
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
-				id, priority, poolExclude = p.ID, p.Priority, p.PoolExclude
+				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
 				break
 			}
 		}
@@ -338,7 +340,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
-		Priority: priority, PoolExclude: poolExclude,
+		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
 	})
 	if err != nil {
 		return err
@@ -388,6 +390,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
+	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
@@ -395,7 +398,16 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
+	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
 	return pl, wk
+}
+
+// nonStreamingResolver returns a resolver capturing a profile's streaming choice.
+// The agents read it per run; a profile change rebuilds the agents (applyLLM),
+// so the captured value is always the one in effect for this build.
+func nonStreamingResolver(cfg agent.Config) func() bool {
+	nonStreaming := !cfg.Stream
+	return func() bool { return nonStreaming }
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -441,12 +453,14 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
+	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -472,6 +486,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.Stream = p.Streaming
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -623,6 +638,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
+	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex

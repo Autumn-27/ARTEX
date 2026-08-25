@@ -98,13 +98,13 @@ func DecomposeGoals(ctx context.Context, prov llm.Provider, dataDir, goalText, d
 	if prov == nil {
 		return nil
 	}
-	return DecomposeGoalsWithProvider(ctx, prov, dataDir, goalText, desc, as, ts, taskID, emit)
+	return DecomposeGoalsWithProvider(ctx, prov, dataDir, goalText, desc, as, ts, taskID, false, emit)
 }
 
 // DecomposeGoalsWithProvider is the task-runtime variant used when a task has an
 // ordered provider chain. It preserves the same tools and write behavior while
 // letting the caller own provider selection/failover.
-func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, emit func(db.Activity)) []GoalSpec {
+func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, emit func(db.Activity)) []GoalSpec {
 	if prov == nil {
 		return nil
 	}
@@ -145,7 +145,8 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		PermissionMode:         acperm.ModeBypass,
 		DisableBackgroundTasks: true,
 		// 3 步(抽约束 → 登记范围 → 拆目标)各需一次工具调用,给足回合避免收尾前漏调 set_goals。
-		MaxTurns: 8,
+		MaxTurns:     8,
+		NonStreaming: nonStreaming, // 该 profile 选非流式时走 Provider.Complete
 	}, userMsg, captureEmit)
 	// set_goals persisted the goals directly; read them back so the caller sees what
 	// was written (empty slice ⇒ the LLM produced nothing ⇒ caller falls back).

@@ -799,6 +799,8 @@ export interface LLMProfile {
   priority?: number;
   // true = 不作为故障转移目标（仍可被 agent/任务显式绑定使用）。
   pool_exclude?: boolean;
+  // true（默认）= 流式(SSE) | false = 真·非流式(stream:false，一次性返回)。
+  streaming?: boolean;
 }
 
 // ---- LLM 轮询（故障转移）----

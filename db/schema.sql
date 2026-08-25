@@ -303,6 +303,8 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     --   pool_exclude true=不作为故障转移目标(仍可被 agent/任务显式绑定使用)。
     priority         INTEGER NOT NULL DEFAULT 0,
     pool_exclude     BOOLEAN NOT NULL DEFAULT false,
+    -- streaming=true(默认)走流式 SSE；false 走真·非流式(stream:false，一次性 JSON)。
+    streaming        BOOLEAN NOT NULL DEFAULT true,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -313,6 +315,8 @@ CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
 -- 轮询顺位/排除标记；补旧库。默认 0 / false = 全部配置都参与轮询。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
+-- 流式开关；补旧库。默认 true = 保持既有的流式行为，旧配置无感升级。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS streaming    BOOLEAN NOT NULL DEFAULT true;
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，

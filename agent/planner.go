@@ -20,19 +20,20 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
-	prov        llm.Provider
-	model       string
-	tx          *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window      int                                    // context window in tokens (for compaction)
-	windowFn    func() int                             // optional dynamic task-chain minimum
-	maxTurns    int                                    // max agent turns per run (0 = unlimited)
-	killWork    func(intentID int64) error             // engine callback to terminate a running work (nil = off)
-	steerWork   func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr   string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch   WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir     string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool                      // resolver: inject task operation constraints into system prompt? (nil = yes)
+	prov              llm.Provider
+	model             string
+	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window            int                                    // context window in tokens (for compaction)
+	windowFn          func() int                             // optional dynamic task-chain minimum
+	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -47,6 +48,12 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default).
+func (p *Planner) SetNonStreaming(fn func() bool) { p.nonStreamingFn = fn }
+
+func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonStreamingFn() }
 
 func (p *Planner) compactionWindow() int {
 	if p.windowFn != nil {
@@ -353,7 +360,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、
 		// 能证的 prove_goal、串行链记 TodoWrite),而非停止规划——planner 之后仍会被反复唤醒。
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
-		Settlement: settle,
+		Settlement:   settle,
+		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

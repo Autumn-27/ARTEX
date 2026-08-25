@@ -39,10 +39,10 @@ func TaskIDFrom(ctx context.Context) string {
 
 // Recorder wraps an llm.Provider and records every completion call.
 type Recorder struct {
-	inner   llm.Provider
-	pg      *db.DB
-	model   string // model name (from config, not in CompletionRequest)
-	prof    string // LLM profile name (from llm_profiles)
+	inner llm.Provider
+	pg    *db.DB
+	model string // model name (from config, not in CompletionRequest)
+	prof  string // LLM profile name (from llm_profiles)
 	// thinkingType / reasoningEffort 是配置级思考参数(思考开关 / 思考强度)。它们在
 	// norma 的 buildBody() 里从 provider 配置注入真正的 HTTP body,不出现在
 	// CompletionRequest 上,故 Recorder 需在此单独带一份,序列化时写进录制。
@@ -183,6 +183,58 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 		// Stream completed normally.
 		finish(streamErr)
 	}
+}
+
+// Complete implements llm.Provider for non-streaming calls, recording the same
+// metering + body trace as Stream. Metering (token usage) is always written;
+// the heavy request/response body trace is gated by the llm_record setting. The
+// raw wire bodies are captured by the shared HTTP transport (via NewCapture on
+// ctx), identical to the streaming path — a non-streaming response is a single
+// JSON body the transport tees just the same.
+func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	recordBodies := r.enabled == nil || r.enabled()
+	start := time.Now()
+	session := transcript.SessionIDFrom(ctx)
+	parsedID, worker := parseSession(session)
+	expID := db.ParseExpID(parsedID)
+	taskID := TaskIDFrom(ctx)
+	if taskID == "" {
+		taskID = parsedID
+	}
+
+	reqBody := ""
+	var capt *Capture
+	if recordBodies {
+		reqBody = r.serializeRequest(req)
+		ctx, capt = NewCapture(ctx)
+	}
+
+	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
+
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	// Lightweight metering row — always written.
+	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+	// Heavy trace row — only when body recording is on.
+	if recordBodies {
+		text, thinking := msg.Text(), thinkingText(msg)
+		r.record(req, session, taskID, worker, reqBody, capt, start, text, thinking, usage, stopReason, err)
+	}
+	return msg, stopReason, usage, err
+}
+
+// thinkingText concatenates the thinking blocks of a message (the non-streaming
+// counterpart of the streaming path's accumulated thinkingBuf).
+func thinkingText(msg llm.Message) string {
+	var b strings.Builder
+	for _, bl := range msg.Content {
+		if bl.Type == llm.BlockThinking && bl.Thinking != "" {
+			b.WriteString(bl.Thinking)
+		}
+	}
+	return b.String()
 }
 
 // recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips

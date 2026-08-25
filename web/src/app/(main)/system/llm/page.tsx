@@ -309,6 +309,7 @@ function ProfileSheet({
   const [effort, setEffort] = React.useState(NONE);
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
   const [poolExclude, setPoolExclude] = React.useState(false);
+  const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -331,6 +332,7 @@ function ProfileSheet({
     setEffort(fromStore(profile?.reasoning_effort));
     setPriority(String(profile?.priority ?? 0));
     setPoolExclude(profile?.pool_exclude ?? false);
+    setStreaming(profile?.streaming ?? true);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -398,6 +400,7 @@ function ProfileSheet({
         reasoning_effort: toStore(effort),
         priority: Number(priority) || 0,
         pool_exclude: poolExclude,
+        streaming,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -594,6 +597,16 @@ function ProfileSheet({
                 </p>
               </div>
               <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">流式输出 · streaming</Label>
+                <p className="text-muted-foreground text-xs">
+                  开启（默认）走流式 SSE，有运行中实时进度与实时 token 计数。 关闭则走真·非流式（stream:false，
+                  一次性返回完整响应）——可绕开部分网关糟糕的 SSE 实现（空帧 / 思考字段丢帧）， 代价是失去运行中的实时进度。
+                </p>
+              </div>
+              <Switch checked={streaming} onCheckedChange={setStreaming} aria-label="流式输出" />
             </div>
           </div>
 

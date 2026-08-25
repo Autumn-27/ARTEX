@@ -36,6 +36,23 @@ func (p *scriptedLLMProvider) Stream(context.Context, llm.CompletionRequest) ite
 	}
 }
 
+func (p *scriptedLLMProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	return accumulateStreamForTest(ctx, p.Stream, req)
+}
+
+// accumulateStreamForTest drains a mock's Stream to satisfy the non-streaming
+// Complete method.
+func accumulateStreamForTest(ctx context.Context, stream func(context.Context, llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error], req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	acc := llm.NewAccumulator()
+	for ev, err := range stream(ctx, req) {
+		if err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
+		acc.Add(ev)
+	}
+	return acc.Message(), acc.StopReason, acc.Usage, nil
+}
+
 // withZeroRetryBackoff sets the same-provider retry backoff to zero for the
 // duration of a (serial) test and returns a restore func for defer.
 func withZeroRetryBackoff() func() {
@@ -70,6 +87,10 @@ func (p *flakyThenOKProvider) Stream(context.Context, llm.CompletionRequest) ite
 			}
 		}
 	}
+}
+
+func (p *flakyThenOKProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	return accumulateStreamForTest(ctx, p.Stream, req)
 }
 
 func collectTaskLLMStream(seq iter.Seq2[llm.StreamEvent, error]) ([]llm.StreamEvent, error) {

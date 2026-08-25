@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/guard"
 )
 
 // ChatAgent is the generic, task-independent conversational runner behind the chat
@@ -22,20 +22,27 @@ import (
 // LS/Glob/Grep) plus whatever skills/MCP the key is made visible; NO pentest
 // graph/task context is injected (that stays exclusive to MainAgent).
 type ChatAgent struct {
-	prov        llm.Provider
-	model       string
-	workDir     string
-	tx          *transcript.Store
-	window      int
-	proxyAddr   string
-	proxyCACert string
-	webSearch   WebSearchOpts
-	guard       *guard.Guard // optional; nil disables intercept hooks for chat
+	prov           llm.Provider
+	model          string
+	workDir        string
+	tx             *transcript.Store
+	window         int
+	proxyAddr      string
+	proxyCACert    string
+	webSearch      WebSearchOpts
+	guard          *guard.Guard // optional; nil disables intercept hooks for chat
+	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
 	return &ChatAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window}
 }
+
+// SetNonStreaming wires a resolver deciding whether chat runs use the
+// non-streaming model path (true = non-streaming). nil/unset = streaming.
+func (c *ChatAgent) SetNonStreaming(fn func() bool) { c.nonStreamingFn = fn }
+
+func (c *ChatAgent) nonStreaming() bool { return c.nonStreamingFn != nil && c.nonStreamingFn() }
 
 // SetProxy points the chat agent's WebFetch/Bash at the recording proxy plus the
 // CA cert it trusts (empty addr = direct). Kept for parity with the other agents.
@@ -115,18 +122,19 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		BraveSearchAPIKey:  ws.BraveKey,
 		TavilySearchAPIKey: ws.TavilyKey,
 		WebSearchProxy:     ws.Proxy,
-		BashEnv:           proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:        sessionWorkDir,
-		MaxTurns:          maxTurns,
-		MaxDuration:       maxDuration,
-		Compaction:        compactionConfig(c.window),
-		Todos:             actool.NewTodoStore(),
+		BashEnv:            proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		WorkingDir:         sessionWorkDir,
+		MaxTurns:           maxTurns,
+		MaxDuration:        maxDuration,
+		Compaction:         compactionConfig(c.window),
+		Todos:              actool.NewTodoStore(),
 		// large tool output spills to cmd-output/ under the session dir.
 		// 截断上限用 SDK 默认(tool.Capture 的 30000 字符)。
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),
 		// 命中预算(步数)→ SDK 跑收尾:输出一句总结。Prompt 与收尾轮数按本 agent key 后台可编辑
 		// (自定义 agent 各自一份;留空/0 用通用默认:10 轮)。
-		Settlement: wrapupSettlement(agentKey, nil),
+		Settlement:   wrapupSettlement(agentKey, nil),
+		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 	}
 	if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()

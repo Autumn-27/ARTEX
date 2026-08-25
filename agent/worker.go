@@ -62,7 +62,18 @@ type Worker struct {
 	// injected into the worker system prompt. Read per run so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
 	injectConstraints func() bool
+	// nonStreamingFn resolves whether this run uses the non-streaming (Complete)
+	// path. Read per run so a profile/task toggle takes effect without rebuilding
+	// the agent. nil = streaming (default).
+	nonStreamingFn func() bool
 }
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default). Read per
+// run so a profile or task-chain toggle takes effect without rebuilding.
+func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
+
+func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
 
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the worker system prompt. nil = inject (default).
@@ -337,6 +348,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 		ToolOutputDir: cmdOutDir(runDir),
 		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
 		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
