@@ -415,8 +415,6 @@ function ProfileSheet({
       <SheetContent
         side="right"
         className="flex flex-col gap-0 p-0 data-[side=right]:min-w-[420px] data-[side=right]:sm:max-w-xl"
-        // 表单填到一半时点外面不该丢内容（Esc / ✕ 仍可关闭）。
-        onInteractOutside={(e) => e.preventDefault()}
       >
         <SheetHeader className="px-4">
           <SheetTitle className="flex items-center gap-2">

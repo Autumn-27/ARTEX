@@ -5,16 +5,34 @@ import * as React from "react";
 import Link from "next/link";
 
 import {
-  CheckIcon,
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  type DragStartEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  ArrowDownIcon,
+  ArrowUpDownIcon,
+  ArrowUpIcon,
   ChevronRightIcon,
   EyeIcon,
   FolderInputIcon,
-  FolderKanbanIcon,
+  GripVerticalIcon,
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
   PlayIcon,
   PlusIcon,
+  SaveIcon,
   SearchIcon,
   SlidersHorizontalIcon,
   StarIcon,
@@ -64,6 +82,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import {
   Field,
   FieldContent,
@@ -74,7 +93,9 @@ import {
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Sheet,
@@ -91,6 +112,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   ChatAttachment,
   Company,
@@ -101,6 +123,7 @@ import type {
   TaskCategory,
   TaskStatus,
 } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
 function fmtBytes(n: number): string {
@@ -219,12 +242,66 @@ function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
   return null;
 }
 
+type TaskSortField = "id" | "created" | "duration" | "status";
+
+const TASK_SORT_FIELDS: readonly TaskSortField[] = ["id", "created", "duration", "status"];
+const TASK_SORT_PREFERENCE_KEY = "artex_task_list_sort";
+
+const TASK_STATUS_RANK = new Map(STATUS_OPTIONS.map((option, index) => [option.value, index]));
+
+function taskIsPinned(task: Task): boolean {
+  return task.pinned ?? Boolean(task.pinned_at);
+}
+
+function compareTaskIDs(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function taskCreatedUnix(task: Task): number {
+  if (task.created_unix) return task.created_unix;
+  const parsed = Date.parse(task.created_at);
+  return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+}
+
+function compareTasks(left: Task, right: Task, field: TaskSortField, direction: SortDirection, nowSec: number): number {
+  const leftPinned = taskIsPinned(left);
+  const rightPinned = taskIsPinned(right);
+  if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+  if (leftPinned && left.pinned_at !== right.pinned_at) {
+    return (right.pinned_at ?? "").localeCompare(left.pinned_at ?? "");
+  }
+
+  let compared = 0;
+  switch (field) {
+    case "created":
+      compared = taskCreatedUnix(left) - taskCreatedUnix(right);
+      break;
+    case "duration":
+      compared = taskDuration(left, nowSec) - taskDuration(right, nowSec);
+      break;
+    case "status":
+      compared = (TASK_STATUS_RANK.get(left.status) ?? 0) - (TASK_STATUS_RANK.get(right.status) ?? 0);
+      break;
+    default:
+      compared = compareTaskIDs(left.id, right.id);
+  }
+  if (compared !== 0) return direction === "asc" ? compared : -compared;
+  return -compareTaskIDs(left.id, right.id);
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
+  const [sortPreference, setSortPreference] = useStoredSortPreference(
+    TASK_SORT_PREFERENCE_KEY,
+    TASK_SORT_FIELDS,
+    "id",
+    "desc",
+  );
+  const { field: sortField, direction: sortDirection } = sortPreference;
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
@@ -253,15 +330,30 @@ export default function TasksPage() {
     });
   }, [tasks, query, statusFilter, categoryFilter]);
 
-  // reset to page 1 whenever filters change
+  const sortNowSec = sortField === "duration" ? nowSec : 0;
+  const ordered = React.useMemo(() => {
+    return [...filtered].sort((left, right) => compareTasks(left, right, sortField, sortDirection, sortNowSec));
+  }, [filtered, sortDirection, sortField, sortNowSec]);
+
+  const sortTasksBy = React.useCallback(
+    (field: TaskSortField) => {
+      setSortPreference((current) => {
+        if (current.field !== field) return { field, direction: "desc" };
+        return { field, direction: current.direction === "asc" ? "desc" : "asc" };
+      });
+    },
+    [setSortPreference],
+  );
+
+  // reset to page 1 whenever filters or ordering change
   // biome-ignore lint/correctness/useExhaustiveDependencies: both filters intentionally reset pagination.
   React.useEffect(() => {
     setPage(1);
-  }, [query, statusFilter, categoryFilter]);
+  }, [query, statusFilter, categoryFilter, sortField, sortDirection]);
 
   const paginated = React.useMemo(
-    () => filtered.slice((page - 1) * pageSize, page * pageSize),
-    [filtered, page, pageSize],
+    () => ordered.slice((page - 1) * pageSize, page * pageSize),
+    [ordered, page, pageSize],
   );
 
   // 多选删除:选择跨翻页/筛选保留,只在任务真的消失(被删或后端不再返回)时收敛。
@@ -353,6 +445,20 @@ export default function TasksPage() {
     load();
   }, [load, loadCategories]);
 
+  const applyTaskCategoryMove = React.useCallback(
+    (taskID: string, category: TaskCategory | null) => {
+      setTasks((current) => {
+        const next = current.map((task) =>
+          task.id === taskID ? { ...task, category_id: category?.id, category_name: category?.name } : task,
+        );
+        lastRef.current = JSON.stringify(next);
+        return next;
+      });
+      loadCategories();
+    },
+    [loadCategories],
+  );
+
   React.useEffect(() => {
     if (categoryFilter === "all" || categoryFilter === UNCATEGORIZED_VALUE) return;
     if (!categories.some((category) => String(category.id) === categoryFilter)) setCategoryFilter("all");
@@ -404,6 +510,37 @@ export default function TasksPage() {
         // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
         lastRef.current = "";
         load();
+      }
+    },
+    [load],
+  );
+
+  const renameTask = React.useCallback(
+    async (task: Task, name: string) => {
+      try {
+        await api.renameTask(task.id, name);
+        toast.success(`任务 #${task.id} 已重命名`);
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`重命名失败：${(error as Error).message}`);
+        throw error;
+      }
+    },
+    [load],
+  );
+
+  const toggleTaskPinned = React.useCallback(
+    async (task: Task) => {
+      const pinned = taskIsPinned(task);
+      try {
+        await api.pinTask(task.id, !pinned);
+        toast.success(pinned ? `任务 #${task.id} 已取消置顶` : `任务 #${task.id} 已置顶`);
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(error as Error).message}`);
+        throw error;
       }
     },
     [load],
@@ -654,12 +791,17 @@ export default function TasksPage() {
             </>
           )}
           <ConcurrencySettingsDialog />
-          <CategoryManagementSheet categories={categories} onChanged={refreshCategoriesAndTasks} />
+          <CategoryManagementSheet
+            categories={categories}
+            tasks={tasks}
+            onChanged={refreshCategoriesAndTasks}
+            onTaskMoved={applyTaskCategoryMove}
+          />
           <CreateTaskSheet
             tasks={tasks}
             categories={categories}
             onCreated={refreshCategoriesAndTasks}
-            onCategoriesChanged={loadCategories}
+            onCategoriesChanged={refreshCategoriesAndTasks}
           />
         </div>
 
@@ -682,14 +824,41 @@ export default function TasksPage() {
                     aria-label="选择本页全部任务"
                   />
                 </TableHead>
-                <TableHead className="font-mono">ID</TableHead>
+                <SortableTaskHead
+                  field="id"
+                  label="ID"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  className="font-mono"
+                  onSort={sortTasksBy}
+                />
                 <TableHead>名称</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>目标</TableHead>
-                <TableHead>状态</TableHead>
+                <SortableTaskHead
+                  field="status"
+                  label="状态"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  onSort={sortTasksBy}
+                />
                 <TableHead className="text-center">目标进度</TableHead>
-                <TableHead className="text-right">创建时间</TableHead>
-                <TableHead className="text-right">运行时长</TableHead>
+                <SortableTaskHead
+                  field="created"
+                  label="创建时间"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  align="right"
+                  onSort={sortTasksBy}
+                />
+                <SortableTaskHead
+                  field="duration"
+                  label="运行时长"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  align="right"
+                  onSort={sortTasksBy}
+                />
                 <TableHead className="text-right">Token</TableHead>
                 <TableHead className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))]">
                   操作
@@ -706,6 +875,8 @@ export default function TasksPage() {
                   nowSec={task.status === "running" ? nowSec : 0}
                   onDelete={deleteTask}
                   onControl={controlTask}
+                  onRename={renameTask}
+                  onTogglePinned={toggleTaskPinned}
                   selected={selectedIds.has(task.id)}
                   onSelectedChange={toggleSelected}
                 />
@@ -725,6 +896,56 @@ export default function TasksPage() {
         />
       </CardContent>
     </Card>
+  );
+}
+
+function taskSortIcon(active: boolean, direction: SortDirection) {
+  if (!active) {
+    return <ArrowUpDownIcon className="size-3.5 opacity-40 transition-opacity group-hover/sort:opacity-100" />;
+  }
+  if (direction === "asc") return <ArrowUpIcon className="size-3.5" />;
+  return <ArrowDownIcon className="size-3.5" />;
+}
+
+function SortableTaskHead({
+  field,
+  label,
+  activeField,
+  direction,
+  align = "left",
+  className,
+  onSort,
+}: {
+  field: TaskSortField;
+  label: string;
+  activeField: TaskSortField;
+  direction: SortDirection;
+  align?: "left" | "right";
+  className?: string;
+  onSort: (field: TaskSortField) => void;
+}) {
+  const active = activeField === field;
+  let ariaSort: React.AriaAttributes["aria-sort"] = "none";
+  if (active) ariaSort = direction === "asc" ? "ascending" : "descending";
+
+  let actionLabel = `按${label}倒序排序`;
+  if (active) actionLabel = `${label}当前${direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`;
+
+  return (
+    <TableHead className={className} aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={cn(
+          "group/sort inline-flex h-full w-full items-center gap-1 outline-none focus-visible:underline",
+          align === "right" && "justify-end",
+        )}
+        aria-label={actionLabel}
+        onClick={() => onSort(field)}
+      >
+        <span>{label}</span>
+        {taskSortIcon(active, direction)}
+      </button>
+    </TableHead>
   );
 }
 
@@ -823,6 +1044,8 @@ const TaskRow = React.memo(function TaskRow({
   nowSec,
   onDelete,
   onControl,
+  onRename,
+  onTogglePinned,
   selected,
   onSelectedChange,
 }: {
@@ -830,6 +1053,8 @@ const TaskRow = React.memo(function TaskRow({
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
   onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+  onRename: (task: Task, name: string) => Promise<void>;
+  onTogglePinned: (task: Task) => Promise<void>;
   selected: boolean;
   onSelectedChange: (id: string, checked: boolean) => void;
 }) {
@@ -847,14 +1072,9 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
-          <Link
-            href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
-            className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={task.name?.trim() ? task.name : task.description}
-          >
-            {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
-          </Link>
+          <TaskNameEditor task={task} onRename={onRename} />
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
+          {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
       </TableCell>
       <TableCell className="text-muted-foreground max-w-xs">
@@ -919,12 +1139,151 @@ const TaskRow = React.memo(function TaskRow({
             </Link>
           </Button>
           <TaskControlButton task={task} onControl={onControl} />
+          <TaskPinAction task={task} onTogglePinned={onTogglePinned} />
           <DeleteTaskDialog task={task} onDelete={onDelete} />
         </div>
       </TableCell>
     </TableRow>
   );
 });
+
+function TaskNameEditor({
+  task,
+  onRename,
+}: {
+  task: Task;
+  onRename: (task: Task, name: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [name, setName] = React.useState(task.name ?? "");
+  const [saving, setSaving] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const cancelOnBlurRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!editing) setName(task.name ?? "");
+  }, [editing, task.name]);
+
+  async function finishEditing() {
+    if (cancelOnBlurRef.current) {
+      cancelOnBlurRef.current = false;
+      setName(task.name ?? "");
+      setEditing(false);
+      return;
+    }
+
+    const next = name.trim();
+    if (!next || next === task.name?.trim()) {
+      setName(task.name ?? "");
+      setEditing(false);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onRename(task, next);
+      setEditing(false);
+    } catch {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex min-w-0 items-center gap-1">
+        <Input
+          ref={inputRef}
+          value={name}
+          maxLength={200}
+          autoFocus
+          disabled={saving}
+          aria-label={`任务 #${task.id} 名称`}
+          className="h-7 min-w-28 max-w-48 px-2 font-medium"
+          onFocus={(event) => event.currentTarget.select()}
+          onChange={(event) => setName(event.target.value)}
+          onBlur={() => void finishEditing()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelOnBlurRef.current = true;
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        {saving && <Spinner className="shrink-0" />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <Link
+        href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+        className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        title={task.name?.trim() ? task.name : task.description}
+      >
+        {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
+      </Link>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        className="shrink-0 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100"
+        aria-label={`重命名任务 #${task.id}`}
+        title="重命名"
+        onClick={() => {
+          setName(task.name ?? "");
+          setEditing(true);
+        }}
+      >
+        <PencilIcon />
+      </Button>
+    </div>
+  );
+}
+
+function taskPinIcon(pinning: boolean, pinned: boolean) {
+  if (pinning) return <Spinner />;
+  if (pinned) return <PinOffIcon />;
+  return <PinIcon />;
+}
+
+function TaskPinAction({
+  task,
+  onTogglePinned,
+}: {
+  task: Task;
+  onTogglePinned: (task: Task) => Promise<void>;
+}) {
+  const [pinning, setPinning] = React.useState(false);
+  const pinned = taskIsPinned(task);
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      disabled={pinning}
+      aria-label={pinned ? `取消置顶任务 #${task.id}` : `置顶任务 #${task.id}`}
+      title={pinned ? "取消置顶" : "置顶"}
+      onClick={async () => {
+        setPinning(true);
+        try {
+          await onTogglePinned(task);
+        } finally {
+          setPinning(false);
+        }
+      }}
+    >
+      {taskPinIcon(pinning, pinned)}
+    </Button>
+  );
+}
 
 // 三态图标分开写而非嵌套三元:仓库 Biome 基线禁 noNestedTernary。
 function taskControlIcon(pending: boolean, action: "pause" | "resume" | null) {
@@ -1597,61 +1956,257 @@ function CompanyPicker({
   );
 }
 
-function CategoryManagementSheet({ categories, onChanged }: { categories: TaskCategory[]; onChanged: () => void }) {
+type CategoryManagementView = number | "uncategorized" | "new";
+
+function CategoryDropTarget({
+  value,
+  name,
+  count,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  value: string;
+  name: string;
+  count: number;
+  selected: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+}) {
+  const { isOver, setNodeRef } = useDroppable({ id: `category:${value}`, disabled });
+
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      className={cn(
+        "min-w-0 rounded-md border border-transparent px-2.5 py-2 text-left transition-colors",
+        selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+        isOver && "border-primary bg-primary/10 text-foreground",
+      )}
+      onClick={onSelect}
+    >
+      <span className="block truncate font-medium text-sm">{name}</span>
+      <span className="block truncate text-muted-foreground text-xs">{isOver ? "松开以移动" : `${count} 个任务`}</span>
+    </button>
+  );
+}
+
+function DraggableCategoryTask({ task, disabled, moving }: { task: Task; disabled: boolean; moving: boolean }) {
+  const { attributes, isDragging, listeners, setNodeRef } = useDraggable({
+    id: `task:${task.id}`,
+    disabled,
+  });
+
+  return (
+    <Item ref={setNodeRef} variant="outline" size="sm" className={cn(isDragging && "opacity-40")}>
+      <ItemMedia className="group-has-data-[slot=item-description]/item:self-center group-has-data-[slot=item-description]/item:translate-y-0">
+        {moving ? (
+          <Spinner />
+        ) : (
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            className="touch-none cursor-grab active:cursor-grabbing"
+            disabled={disabled}
+            {...listeners}
+            {...attributes}
+            aria-label={`拖动任务 #${task.id}`}
+            title="拖动任务"
+          >
+            <GripVerticalIcon />
+          </Button>
+        )}
+      </ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle className="w-full min-w-0">
+          <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`} className="truncate hover:underline">
+            {task.name?.trim() || task.description || `任务 #${task.id}`}
+          </Link>
+        </ItemTitle>
+        <ItemDescription className="line-clamp-1">
+          #{task.id} · {task.description}
+        </ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <StatusBadge domain="task" value={task.status} />
+      </ItemActions>
+    </Item>
+  );
+}
+
+function CategoryTaskDragPreview({ task }: { task: Task }) {
+  return (
+    <Item variant="outline" size="sm" className="w-80 bg-background shadow-lg">
+      <ItemMedia className="group-has-data-[slot=item-description]/item:self-center group-has-data-[slot=item-description]/item:translate-y-0">
+        <GripVerticalIcon className="size-4 text-muted-foreground" />
+      </ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle className="w-full min-w-0 truncate">
+          {task.name?.trim() || task.description || `任务 #${task.id}`}
+        </ItemTitle>
+        <ItemDescription className="line-clamp-1">#{task.id}</ItemDescription>
+      </ItemContent>
+    </Item>
+  );
+}
+
+function CategoryManagementSheet({
+  categories,
+  tasks,
+  onChanged,
+  onTaskMoved,
+}: {
+  categories: TaskCategory[];
+  tasks: Task[];
+  onChanged: () => void;
+  onTaskMoved: (taskID: string, category: TaskCategory | null) => void;
+}) {
   const [open, setOpen] = React.useState(false);
-  const [newName, setNewName] = React.useState("");
-  const [editingID, setEditingID] = React.useState<number | null>(null);
-  const [editingName, setEditingName] = React.useState("");
+  const [selectedView, setSelectedView] = React.useState<CategoryManagementView>("new");
+  const [draftName, setDraftName] = React.useState("");
   const [saving, setSaving] = React.useState(false);
-  const [deleting, setDeleting] = React.useState<TaskCategory | null>(null);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [movingTaskID, setMovingTaskID] = React.useState<string | null>(null);
+  const [activeTaskID, setActiveTaskID] = React.useState<string | null>(null);
+  const wasOpen = React.useRef(false);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor),
+  );
 
-  async function createCategory() {
-    const name = newName.trim();
-    if (!name || saving) return;
-    setSaving(true);
-    try {
-      await api.createTaskCategory(name);
-      setNewName("");
-      toast.success("分类已创建");
-      onChanged();
-    } catch (error) {
-      toast.error(`创建分类失败：${(error as Error).message}`);
-    } finally {
-      setSaving(false);
+  React.useEffect(() => {
+    if (open && !wasOpen.current) {
+      const first = categories[0];
+      if (first) {
+        setSelectedView(first.id);
+        setDraftName(first.name);
+      } else if (tasks.some((task) => task.category_id == null)) {
+        setSelectedView("uncategorized");
+        setDraftName("");
+      } else {
+        setSelectedView("new");
+        setDraftName("");
+      }
     }
-  }
+    wasOpen.current = open;
+  }, [categories, open, tasks]);
 
-  async function renameCategory() {
-    const name = editingName.trim();
-    if (!editingID || !name || saving) return;
+  const selectedCategory = React.useMemo(
+    () =>
+      typeof selectedView === "number" ? (categories.find((category) => category.id === selectedView) ?? null) : null,
+    [categories, selectedView],
+  );
+
+  const uncategorizedCount = React.useMemo(() => tasks.filter((task) => task.category_id == null).length, [tasks]);
+
+  const visibleTasks = React.useMemo(() => {
+    if (selectedView === "uncategorized") return tasks.filter((task) => task.category_id == null);
+    if (typeof selectedView === "number") return tasks.filter((task) => task.category_id === selectedView);
+    return [];
+  }, [selectedView, tasks]);
+
+  const activeTask = React.useMemo(() => tasks.find((task) => task.id === activeTaskID) ?? null, [activeTaskID, tasks]);
+
+  const selectCategory = (category: TaskCategory) => {
+    setSelectedView(category.id);
+    setDraftName(category.name);
+  };
+
+  const selectUncategorized = () => {
+    setSelectedView("uncategorized");
+    setDraftName("");
+  };
+
+  const startNew = () => {
+    setSelectedView("new");
+    setDraftName("");
+  };
+
+  async function saveCategory() {
+    const name = draftName.trim();
+    if (!name || saving || selectedView === "uncategorized") return;
     setSaving(true);
     try {
-      await api.renameTaskCategory(editingID, name);
-      setEditingID(null);
-      setEditingName("");
-      toast.success("分类已更新");
+      if (selectedView === "new") {
+        const created = await api.createTaskCategory(name);
+        setSelectedView(created.id);
+        setDraftName(created.name);
+        toast.success("分类已创建");
+      } else {
+        const updated = await api.renameTaskCategory(selectedView, name);
+        setDraftName(updated.name);
+        toast.success("分类已更新");
+      }
       onChanged();
     } catch (error) {
-      toast.error(`更新分类失败：${(error as Error).message}`);
+      toast.error(`${selectedView === "new" ? "创建" : "更新"}分类失败：${(error as Error).message}`);
     } finally {
       setSaving(false);
     }
   }
 
   async function deleteCategory() {
-    if (!deleting || saving) return;
-    setSaving(true);
+    if (!selectedCategory || deleting) return;
+    const deletedID = selectedCategory.id;
+    setDeleting(true);
     try {
-      await api.deleteTaskCategory(deleting.id);
+      await api.deleteTaskCategory(deletedID);
+      const next = categories.find((category) => category.id !== deletedID);
+      if (next) selectCategory(next);
+      else selectUncategorized();
       toast.success("分类已删除，关联任务已移入未分类");
-      setDeleting(null);
+      setDeleteOpen(false);
       onChanged();
     } catch (error) {
       toast.error(`删除分类失败：${(error as Error).message}`);
     } finally {
-      setSaving(false);
+      setDeleting(false);
     }
   }
+
+  async function moveTask(task: Task, destination: string) {
+    if (movingTaskID) return;
+    const category =
+      destination === "uncategorized" ? null : (categories.find((item) => item.id === Number(destination)) ?? null);
+    if (destination !== "uncategorized" && !category) {
+      toast.error("目标分类不存在，请刷新后重试");
+      return;
+    }
+    if (task.category_id === category?.id || (task.category_id == null && category == null)) return;
+
+    setMovingTaskID(task.id);
+    try {
+      await api.updateTaskCategory(task.id, category?.id);
+      onTaskMoved(task.id, category);
+      toast.success(`任务 #${task.id} 已移至「${category?.name ?? "未分类"}」`);
+    } catch (error) {
+      toast.error(`移动任务失败：${(error as Error).message}`);
+    } finally {
+      setMovingTaskID(null);
+    }
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    const id = String(event.active.id);
+    setActiveTaskID(id.startsWith("task:") ? id.slice("task:".length) : null);
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeID = String(event.active.id);
+    const taskID = activeID.startsWith("task:") ? activeID.slice("task:".length) : null;
+    setActiveTaskID(null);
+    if (!taskID || !event.over) return;
+    const destination = String(event.over.id);
+    if (!destination.startsWith("category:")) return;
+    const task = tasks.find((item) => item.id === taskID);
+    if (!task) return;
+    void moveTask(task, destination.slice("category:".length));
+  }
+
+  const saveLabel = saving ? "保存中" : selectedView === "new" ? "创建分类" : "保存修改";
 
   return (
     <>
@@ -1662,108 +2217,156 @@ function CategoryManagementSheet({ categories, onChanged }: { categories: TaskCa
             分类管理
           </Button>
         </SheetTrigger>
-        <SheetContent side="right" className="w-full sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>任务分类</SheetTitle>
-            <SheetDescription>创建、重命名或删除全局分类。删除分类不会删除任务。</SheetDescription>
+        <SheetContent className="grid h-full w-full! max-w-none! grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:w-[48rem]! sm:max-w-[48rem]!">
+          <SheetHeader className="border-b px-6 py-5">
+            <SheetTitle>任务分类管理</SheetTitle>
+            <SheetDescription>分类用于任务筛选与归档；修改不会影响任务执行，删除后任务会移入未分类。</SheetDescription>
           </SheetHeader>
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4">
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="new-task-category">新分类</FieldLabel>
-                <div className="flex gap-2">
-                  <Input
-                    id="new-task-category"
-                    value={newName}
-                    onChange={(event) => setNewName(event.target.value)}
-                    placeholder="例如：外网评估"
-                    maxLength={80}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void createCategory();
-                    }}
-                  />
-                  <Button
-                    size="icon"
-                    onClick={() => void createCategory()}
-                    disabled={!newName.trim() || saving}
-                    aria-label="创建分类"
-                  >
-                    {saving && editingID == null && deleting == null ? <Spinner /> : <PlusIcon />}
-                  </Button>
-                </div>
-              </Field>
-            </FieldGroup>
-            <div className="flex flex-col gap-2">
-              {categories.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">暂无分类</p>}
-              {categories.map((category) => (
-                <div key={category.id} className="flex min-w-0 items-center gap-2 rounded-md border p-2">
-                  <FolderKanbanIcon className="size-4 shrink-0 text-muted-foreground" />
-                  {editingID === category.id ? (
-                    <Input
-                      className="min-w-0 flex-1"
-                      value={editingName}
-                      maxLength={80}
-                      onChange={(event) => setEditingName(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") void renameCategory();
-                        if (event.key === "Escape") setEditingID(null);
-                      }}
-                      aria-label={`重命名分类 ${category.name}`}
+          <DndContext
+            sensors={sensors}
+            onDragStart={handleDragStart}
+            onDragCancel={() => setActiveTaskID(null)}
+            onDragEnd={handleDragEnd}
+          >
+            <div className="grid min-h-0 overflow-y-auto lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
+              <div className="flex min-h-0 flex-col border-b p-3 lg:border-r lg:border-b-0">
+                <Button type="button" variant="outline" className="w-full" onClick={startNew}>
+                  <PlusIcon data-icon="inline-start" />
+                  新建分类
+                </Button>
+                <ScrollArea className="mt-2 max-h-44 lg:max-h-none lg:flex-1">
+                  <div className="flex flex-col gap-1 pr-2">
+                    <CategoryDropTarget
+                      value="uncategorized"
+                      name="未分类"
+                      count={uncategorizedCount}
+                      selected={selectedView === "uncategorized"}
+                      disabled={movingTaskID != null}
+                      onSelect={selectUncategorized}
                     />
-                  ) : (
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 truncate text-left text-sm font-medium"
-                      onClick={() => {
-                        setEditingID(category.id);
-                        setEditingName(category.name);
-                      }}
-                      title="点击重命名"
-                    >
-                      {category.name}
-                    </button>
+                    {categories.map((category) => (
+                      <CategoryDropTarget
+                        key={category.id}
+                        value={String(category.id)}
+                        name={category.name}
+                        count={category.task_count}
+                        selected={selectedView === category.id}
+                        disabled={movingTaskID != null}
+                        onSelect={() => selectCategory(category)}
+                      />
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+              <ScrollArea className="min-h-0">
+                <FieldGroup className="p-6">
+                  {selectedView !== "uncategorized" && (
+                    <Field>
+                      <FieldLabel htmlFor="task-category-name">分类名称</FieldLabel>
+                      <Input
+                        id="task-category-name"
+                        value={draftName}
+                        onChange={(event) => setDraftName(event.target.value)}
+                        placeholder="例如：外网评估"
+                        maxLength={80}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void saveCategory();
+                        }}
+                      />
+                      <FieldDescription>
+                        {selectedCategory
+                          ? `当前有 ${selectedCategory.task_count} 个任务使用该分类。重命名后会同步更新任务列表。`
+                          : "创建后可在新建任务和任务列表筛选中使用。"}
+                      </FieldDescription>
+                    </Field>
                   )}
-                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                    {category.task_count} 个任务
-                  </span>
-                  {editingID === category.id && (
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      onClick={() => void renameCategory()}
-                      disabled={!editingName.trim() || saving}
-                      aria-label="保存分类名称"
-                    >
-                      {saving ? <Spinner /> : <CheckIcon />}
-                    </Button>
+                  {selectedView !== "new" && (
+                    <Field>
+                      <div className="flex flex-wrap items-end justify-between gap-2">
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <FieldLabel>{selectedCategory ? "分类任务" : "未分类任务"}</FieldLabel>
+                          <FieldDescription>
+                            {selectedCategory
+                              ? `该分类包含 ${visibleTasks.length} 个任务。`
+                              : `当前有 ${visibleTasks.length} 个任务尚未分类。`}
+                          </FieldDescription>
+                        </div>
+                      </div>
+                      {visibleTasks.length === 0 ? (
+                        <Empty className="min-h-36 border">
+                          <EmptyHeader>
+                            <EmptyTitle>{selectedCategory ? "该分类暂无任务" : "暂无未分类任务"}</EmptyTitle>
+                            <EmptyDescription>此处将在任务归入后显示内容。</EmptyDescription>
+                          </EmptyHeader>
+                        </Empty>
+                      ) : (
+                        <ItemGroup className="gap-2">
+                          {visibleTasks.map((task) => (
+                            <DraggableCategoryTask
+                              key={task.id}
+                              task={task}
+                              moving={movingTaskID === task.id}
+                              disabled={movingTaskID != null}
+                            />
+                          ))}
+                        </ItemGroup>
+                      )}
+                    </Field>
                   )}
-                  <Button
-                    size="icon-xs"
-                    variant="ghost"
-                    onClick={() => setDeleting(category)}
-                    disabled={saving}
-                    aria-label={`删除分类 ${category.name}`}
-                  >
-                    <Trash2Icon />
-                  </Button>
-                </div>
-              ))}
+                </FieldGroup>
+              </ScrollArea>
             </div>
-          </div>
+            <DragOverlay>{activeTask ? <CategoryTaskDragPreview task={activeTask} /> : null}</DragOverlay>
+          </DndContext>
+          <SheetFooter className="border-t px-6 py-4 sm:flex-row sm:items-center">
+            {selectedCategory && (
+              <Button
+                type="button"
+                variant="destructive"
+                className="sm:mr-auto"
+                disabled={saving || deleting}
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2Icon data-icon="inline-start" />
+                删除分类
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              关闭
+            </Button>
+            {selectedView !== "uncategorized" && (
+              <Button
+                type="button"
+                disabled={!draftName.trim() || saving || deleting}
+                onClick={() => void saveCategory()}
+              >
+                {saving ? <Spinner data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
+                {saveLabel}
+              </Button>
+            )}
+          </SheetFooter>
         </SheetContent>
       </Sheet>
-      <AlertDialog open={deleting != null} onOpenChange={(next) => !next && setDeleting(null)}>
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除分类“{deleting?.name}”？</AlertDialogTitle>
+            <AlertDialogTitle>删除分类「{selectedCategory?.name || "未命名分类"}」？</AlertDialogTitle>
             <AlertDialogDescription>
-              分类删除后，其中 {deleting?.task_count ?? 0} 个任务会自动移入“未分类”，任务数据不会被删除。
+              分类删除后，其中 {selectedCategory?.task_count ?? 0} 个任务会自动移入“未分类”，任务数据不会被删除。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void deleteCategory()} disabled={saving}>
-              删除
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deleting}
+              onClick={(event) => {
+                event.preventDefault();
+                void deleteCategory();
+              }}
+            >
+              {deleting && <Spinner data-icon="inline-start" />}
+              {deleting ? "删除中" : "删除"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

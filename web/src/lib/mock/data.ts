@@ -2935,6 +2935,7 @@ export const tools: Tool[] = [
     agents: ["worker", "mainagent"],
     enabled: true,
     kind: "builtin",
+    calls: 1842,
   },
   {
     key: "report_finding",
@@ -2953,6 +2954,7 @@ export const tools: Tool[] = [
     agents: ["worker"],
     enabled: true,
     kind: "builtin",
+    calls: 96,
   },
   {
     key: "upsert_asset",
@@ -2962,6 +2964,7 @@ export const tools: Tool[] = [
     agents: ["worker"],
     enabled: true,
     kind: "builtin",
+    calls: 417,
   },
   {
     key: "list_goals",
@@ -2971,6 +2974,7 @@ export const tools: Tool[] = [
     agents: ["planner"],
     enabled: true,
     kind: "builtin",
+    calls: 238,
   },
   {
     key: "nuclei_scan",
@@ -2985,6 +2989,7 @@ export const tools: Tool[] = [
     enabled: true,
     kind: "command",
     exec: { command: "nuclei", args: ["-u", "{{target}}"] },
+    calls: 31,
   },
 ];
 
