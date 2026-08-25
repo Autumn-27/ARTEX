@@ -935,6 +935,7 @@ export interface Tool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
+  calls?: number; // persistent runtime invocation count (older APIs may omit it)
 }
 
 // ---- Stats ----

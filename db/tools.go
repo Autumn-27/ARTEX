@@ -19,6 +19,7 @@ type Tool struct {
 	Kind        string          `json:"kind"`     // builtin | command | script | http
 	Exec        json.RawMessage `json:"exec"`     // 自定义工具执行规格(kind!=builtin)
 	Deferred    bool            `json:"deferred"` // schema 延迟(走 SearchExtraTools/ExecuteExtraTool)
+	Calls       int             `json:"calls"`    // runtime ledger aggregate; not stored in tools
 }
 
 const toolCols = `key, system, description, schema, agents, enabled, kind, exec, deferred`

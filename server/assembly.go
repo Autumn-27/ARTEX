@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/norma/skill"
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/traffic"
+	"github.com/Autumn-27/norma/skill"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
@@ -155,7 +155,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !contains(boundAgents, a.Key) {
 					continue // only defer names this agent is actually bound to
 				}
-				allNames = append(allNames, name)    // schema withheld from the prompt
+				allNames = append(allNames, name)       // schema withheld from the prompt
 				globalNames = append(globalNames, name) // advertised in the deferred block
 				globalSet[name] = true
 				if unlock != nil {
@@ -235,7 +235,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// interactive_shell is on, so Bash points at shell_open for interactive programs
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).
 	const bashInteractiveShellNote = "\n\n需要【交互输入】的程序（msfconsole / ssh 交互登录 / mysql、psql、python 等 REPL / 密码或 yes/no 提示 / nc 反弹 shell）不要用 Bash（它没有 stdin、会卡住），改用 shell_open 开交互会话（用完 shell_close）。一次性、非交互命令仍用 Bash。"
-	agent.ToolResolve = func(_ context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
+	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
 		rows, err := pg.ListTools()
 		if err != nil {
 			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
@@ -244,6 +244,14 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		byKey := make(map[string]*db.Tool, len(rows))
 		for _, t := range rows {
 			byKey[t.Key] = t
+		}
+		runInfo := agent.RunInfoFrom(ctx)
+		resolve := func(t actool.CoreTool, row *db.Tool) actool.CoreTool {
+			var schema map[string]any
+			if len(row.Schema) > 0 {
+				_ = json.Unmarshal(row.Schema, &schema)
+			}
+			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
 		}
 		out := tools[:0:0]
 		for _, t := range tools {
@@ -255,11 +263,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			if !row.Enabled || !contains(row.Agents, agentKey) {
 				continue // disabled globally or not bound to this agent → drop
 			}
-			var schema map[string]any
-			if len(row.Schema) > 0 {
-				_ = json.Unmarshal(row.Schema, &schema)
-			}
-			out = append(out, agent.DecorateTool(t, row.Description, schema))
+			out = append(out, resolve(t, row))
 		}
 		// inject: domain tools bound to this agent in the DB but absent from the
 		// incoming list. Covers agents (Auto, custom) whose base only has DefaultTools
@@ -279,11 +283,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				if !ok {
 					continue // not a domain tool; custom/host tools are injected via hostTools()
 				}
-				var schema map[string]any
-				if len(row.Schema) > 0 {
-					_ = json.Unmarshal(row.Schema, &schema)
-				}
-				out = append(out, agent.DecorateTool(inst, row.Description, schema))
+				out = append(out, resolve(inst, row))
 			}
 		}
 		// shell hints: user-defined kind="shell" tools are not callable — they are

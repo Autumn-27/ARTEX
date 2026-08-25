@@ -313,6 +313,7 @@ function ToolEditor({
 function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className="hover:border-primary/50 hover:bg-muted/40 focus-visible:ring-ring flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
     >
@@ -337,6 +338,13 @@ function ToolGridCard({ tool, onClick }: { tool: Tool; onClick: () => void }) {
             已停用
           </Badge>
         )}
+        <Badge
+          variant="secondary"
+          className="ml-auto px-1.5 py-0 text-[10px] tabular-nums"
+          title={`累计调用 ${tool.calls ?? 0} 次`}
+        >
+          调用 {tool.calls ?? 0}
+        </Badge>
       </div>
       <p className="text-muted-foreground line-clamp-1 h-4 text-xs">
         {tool.description || "（无描述）"}
