@@ -782,7 +782,7 @@ export interface Settings {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic";
+  format: "openai" | "anthropic" | "openai-responses";
   base_url?: string;
   proxy?: string;
   model: string;

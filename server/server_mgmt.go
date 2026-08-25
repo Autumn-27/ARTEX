@@ -1926,11 +1926,13 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 
 	var candidates []candidate
 	switch provider {
-	case "openai":
+	case "openai", "openai-responses":
+		// Responses API shares the OpenAI model list at /v1/models; tolerate a full
+		// endpoint URL of either format.
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		b := strings.TrimRight(strings.TrimSuffix(baseURL, "/chat/completions"), "/")
+		b := strings.TrimRight(strings.TrimSuffix(strings.TrimSuffix(baseURL, "/chat/completions"), "/responses"), "/")
 		candidates = append(candidates, candidate{b + "/models", bearerHdr()})
 	default: // anthropic
 		if baseURL == "" {

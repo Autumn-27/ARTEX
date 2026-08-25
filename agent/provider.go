@@ -132,6 +132,12 @@ func FromEnv() (Config, bool) {
 		if c.Model == "" {
 			c.Model = "gpt-4o"
 		}
+	case "openai-responses":
+		c.Format = llm.FormatOpenAIResponses
+		c.APIKey = oaiKey
+		if c.Model == "" {
+			c.Model = "gpt-5"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		c.APIKey = anthKey
@@ -165,6 +171,13 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		if c.Model == "" {
 			c.Model = "gpt-4o"
 		}
+	case "openai-responses":
+		c.Format = llm.FormatOpenAIResponses
+		// provider appends "/responses"; tolerate a full endpoint URL.
+		c.BaseURL = strings.TrimRight(strings.TrimSuffix(c.BaseURL, "/responses"), "/")
+		if c.Model == "" {
+			c.Model = "gpt-5"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		// provider appends "/v1/messages".
@@ -186,10 +199,13 @@ func isFalsy(s string) bool {
 	return false
 }
 
-// Provider returns the short provider name ("anthropic"/"openai").
+// Provider returns the short provider name ("anthropic"/"openai"/"openai-responses").
 func (c Config) Provider() string {
-	if c.Format == llm.FormatOpenAI {
+	switch c.Format {
+	case llm.FormatOpenAI:
 		return "openai"
+	case llm.FormatOpenAIResponses:
+		return "openai-responses"
 	}
 	return "anthropic"
 }
