@@ -6,6 +6,7 @@ import {
   ArrowUpIcon,
   Bot,
   ChevronDownIcon,
+  ListChecksIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PaperclipIcon,
@@ -762,6 +763,7 @@ function ConversationItem({
   onCancelRename,
   onTogglePinned,
   onDelete,
+  selectionMode,
   selectedForDelete,
   onSelectedForDeleteChange,
 }: {
@@ -777,6 +779,7 @@ function ConversationItem({
   onCancelRename: () => void;
   onTogglePinned: () => void;
   onDelete: () => void;
+  selectionMode: boolean;
   selectedForDelete: boolean;
   onSelectedForDeleteChange: (checked: boolean) => void;
 }) {
@@ -799,12 +802,14 @@ function ConversationItem({
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
-      <Checkbox
-        checked={selectedForDelete}
-        onCheckedChange={(checked) => onSelectedForDeleteChange(checked === true)}
-        aria-label={`选择对话「${conv.title || "新对话"}」`}
-        className="ml-1 shrink-0"
-      />
+      {selectionMode && (
+        <Checkbox
+          checked={selectedForDelete}
+          onCheckedChange={(checked) => onSelectedForDeleteChange(checked === true)}
+          aria-label={`选择对话「${conv.title || "新对话"}」`}
+          className="ml-1 shrink-0"
+        />
+      )}
       {renaming ? (
         <input
           ref={renameInputRef}
@@ -906,6 +911,10 @@ export default function ChatPage() {
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
   const [selectedConversationIds, setSelectedConversationIds] = React.useState<Set<number>>(() => new Set());
+  // selectionMode gates the multi-select UI: off by default (clean list, no
+  // checkboxes); the header "多选" button turns it on, "完成" turns it off and
+  // clears the selection.
+  const [selectionMode, setSelectionMode] = React.useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
   // Pending text + uploaded attachments handed off from a draft that created a
@@ -991,6 +1000,11 @@ export default function ChatPage() {
     setSelectedConversationIds(checked ? new Set(convs.map((conversation) => conversation.id)) : new Set());
   }
 
+  function exitSelectionMode() {
+    setSelectionMode(false);
+    setSelectedConversationIds(new Set());
+  }
+
   async function del(id: number) {
     try {
       await api.deleteConversation(id);
@@ -1036,6 +1050,9 @@ export default function ChatPage() {
         toast.error(`${failed.length} 个对话删除失败：${details}${failed.length > 3 ? " 等" : ""}`);
       }
       setBulkDeleteOpen(false);
+      // Fully successful → return to the clean list; keep selection mode on if
+      // some failed so the user can retry the remaining ones.
+      if (failed.length === 0) setSelectionMode(false);
       reloadConvs();
     } catch (error) {
       toast.error(`批量删除失败：${(error as Error).message}`);
@@ -1084,29 +1101,48 @@ export default function ChatPage() {
             <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
               <PlusIcon /> 新建对话
             </Button>
-            {convs.length > 0 && (
-              <div className="flex items-center gap-2 px-1">
-                <Checkbox
-                  checked={conversationHeaderChecked}
-                  onCheckedChange={(checked) => toggleAllConversations(checked === true)}
-                  aria-label="选择全部对话"
-                />
-                <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
-                  {selectedConversationCount > 0 ? `已选 ${selectedConversationCount} 个` : `共 ${convs.length} 个`}
-                </span>
-                {selectedConversationCount > 0 && (
+            {convs.length > 0 &&
+              (selectionMode ? (
+                <div className="flex items-center gap-2 px-1">
+                  <Checkbox
+                    checked={conversationHeaderChecked}
+                    onCheckedChange={(checked) => toggleAllConversations(checked === true)}
+                    aria-label="选择全部对话"
+                  />
+                  <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
+                    {selectedConversationCount > 0 ? `已选 ${selectedConversationCount} 个` : `共 ${convs.length} 个`}
+                  </span>
+                  {selectedConversationCount > 0 && (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={bulkDeleting}
+                      onClick={() => setBulkDeleteOpen(true)}
+                    >
+                      <Trash2Icon data-icon="inline-start" />
+                      删除
+                    </Button>
+                  )}
+                  <Button size="sm" variant="ghost" onClick={exitSelectionMode}>
+                    完成
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-1">
+                  <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
+                    共 {convs.length} 个
+                  </span>
                   <Button
                     size="sm"
-                    variant="destructive"
-                    disabled={bulkDeleting}
-                    onClick={() => setBulkDeleteOpen(true)}
+                    variant="ghost"
+                    className="text-muted-foreground"
+                    onClick={() => setSelectionMode(true)}
                   >
-                    <Trash2Icon data-icon="inline-start" />
-                    删除
+                    <ListChecksIcon data-icon="inline-start" />
+                    多选
                   </Button>
-                )}
-              </div>
-            )}
+                </div>
+              ))}
           </div>
           <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
@@ -1126,6 +1162,7 @@ export default function ChatPage() {
                   onCancelRename={() => setRenamingId(null)}
                   onTogglePinned={() => void togglePinned(c)}
                   onDelete={() => del(c.id)}
+                  selectionMode={selectionMode}
                   selectedForDelete={selectedConversationIds.has(c.id)}
                   onSelectedForDeleteChange={(checked) => toggleConversationSelected(c.id, checked)}
                 />
