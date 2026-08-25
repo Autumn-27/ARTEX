@@ -1084,6 +1084,11 @@ export interface LLMRecordItem {
 export interface LLMRecordDetail extends LLMRecordItem {
   request_body: string;
   response_body: string;
+  // provider 实际收发的 HTTP 原文：请求为 buildBody() 发出的完整 body（含工具
+  // schema），响应为原始 SSE 帧。上面的 request_body/response_body 是归一化视图，
+  // 丢弃了工具 schema 与 tool_use 块。旧记录为空。
+  raw_request?: string;
+  raw_response?: string;
 }
 
 // One distinct task with its LLM-record count (task picker on the records page).

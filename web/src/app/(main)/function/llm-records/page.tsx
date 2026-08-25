@@ -9,6 +9,8 @@ import {
   Loader2Icon,
   XIcon,
   Trash2Icon,
+  CopyIcon,
+  CheckIcon,
 } from "lucide-react";
 
 import {
@@ -74,6 +76,47 @@ function tryFormatJSON(s: string): string {
   }
 }
 
+// 复制当前框内文本的小按钮。复制成功后短暂显示对勾。text 为空/仅占位符时禁用。
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const disabled = !text;
+  const copy = async () => {
+    if (disabled) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // navigator.clipboard 在非安全上下文(如 http 局域网)不可用，回退到 execCommand。
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch { /* 忽略：不支持则静默 */ }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-5 shrink-0"
+      disabled={disabled}
+      title={copied ? "已复制" : "复制内容"}
+      onClick={copy}
+    >
+      {copied ? <CheckIcon className="size-3 text-emerald-600" /> : <CopyIcon className="size-3" />}
+    </Button>
+  );
+}
+
 const PAGE_SIZES = [25, 50, 100];
 
 export default function LLMRecordsPage() {
@@ -96,6 +139,21 @@ export default function LLMRecordsPage() {
   const [selected, setSelected] = React.useState<LLMRecordItem | null>(null);
   const [detail, setDetail] = React.useState<LLMRecordDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
+  // 归一化视图 / HTTP 原文视图。原文是排查 provider 侧问题的唯一依据：归一化视图
+  // 不含工具 schema，响应里也没有 tool_use 块。
+  const [rawView, setRawView] = React.useState(false);
+
+  const hasRaw = !!(detail?.raw_request || detail?.raw_response);
+  // 开关保持用户选择，但切到一条无原文的旧记录时自动落回解析视图，而不是显示空白。
+  const showRaw = rawView && hasRaw;
+  // 原文请求体是 JSON，pretty-print 只改排版不改语义，便于阅读；原文响应是 SSE
+  // 帧，tryFormatJSON 解析失败会原样返回，故两边共用一个函数即可。
+  const reqText = showRaw
+    ? detail?.raw_request && tryFormatJSON(detail.raw_request)
+    : detail?.request_body && tryFormatJSON(detail.request_body);
+  const respText = showRaw
+    ? detail?.raw_response
+    : detail?.response_body && tryFormatJSON(detail.response_body);
 
   // Per-task delete (task picker + confirm dialog)
   const [tasks, setTasks] = React.useState<LLMTask[]>([]);
@@ -427,10 +485,22 @@ export default function LLMRecordsPage() {
               ) : (
                 <Badge variant="destructive" className="text-xs">Error</Badge>
               )}
+              {/* 原文视图开关。旧记录没有原文，此时禁用而非静默回退，避免看着像
+                  「原文与解析一致」。 */}
+              <Button
+                variant={showRaw ? "secondary" : "ghost"}
+                size="sm"
+                className="ml-auto h-7 shrink-0 text-xs"
+                disabled={!hasRaw}
+                title={hasRaw ? "查看与 provider 实际收发的 HTTP 原文" : "该记录录制于此功能上线前，无原文"}
+                onClick={() => setRawView((v) => !v)}
+              >
+                原文
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"
-                className="ml-auto size-7 shrink-0"
+                className="size-7 shrink-0"
                 onClick={() => setSelected(null)}
               >
                 <XIcon />
@@ -439,8 +509,9 @@ export default function LLMRecordsPage() {
             {/* Request / Response split */}
             <div className="grid min-h-0 flex-1 grid-cols-2 divide-x">
               <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="border-b px-3 py-1 text-[11px] font-medium text-muted-foreground">
-                  Request
+                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-[11px] font-medium text-muted-foreground">
+                  <span>Request{showRaw && " · 原文"}</span>
+                  <CopyButton text={reqText || ""} />
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">
                   {detailLoading ? (
@@ -450,14 +521,15 @@ export default function LLMRecordsPage() {
                     </div>
                   ) : (
                     <pre className="p-3 font-mono text-xs break-all whitespace-pre-wrap">
-                      {detail?.request_body ? tryFormatJSON(detail.request_body) : "（空）"}
+                      {reqText || "（空）"}
                     </pre>
                   )}
                 </div>
               </div>
               <div className="flex min-h-0 min-w-0 flex-col">
-                <div className="border-b px-3 py-1 text-[11px] font-medium text-muted-foreground">
-                  Response
+                <div className="flex items-center gap-2 border-b py-0.5 pr-1.5 pl-3 text-[11px] font-medium text-muted-foreground">
+                  <span>Response{showRaw && " · 原文（SSE）"}</span>
+                  <CopyButton text={respText || ""} />
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">
                   {detailLoading ? (
@@ -470,7 +542,7 @@ export default function LLMRecordsPage() {
                       "p-3 font-mono text-xs break-all whitespace-pre-wrap",
                       selected.status !== "ok" && "text-red-600 dark:text-red-400",
                     )}>
-                      {detail?.response_body ? tryFormatJSON(detail.response_body) : "（空）"}
+                      {respText || "（空）"}
                     </pre>
                   )}
                 </div>
