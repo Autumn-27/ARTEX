@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -761,6 +762,8 @@ function ConversationItem({
   onCancelRename,
   onTogglePinned,
   onDelete,
+  selectedForDelete,
+  onSelectedForDeleteChange,
 }: {
   conv: Conversation;
   agent?: Agent;
@@ -774,6 +777,8 @@ function ConversationItem({
   onCancelRename: () => void;
   onTogglePinned: () => void;
   onDelete: () => void;
+  selectedForDelete: boolean;
+  onSelectedForDeleteChange: (checked: boolean) => void;
 }) {
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const renameInputRef = React.useRef<HTMLInputElement>(null);
@@ -794,6 +799,12 @@ function ConversationItem({
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
+      <Checkbox
+        checked={selectedForDelete}
+        onCheckedChange={(checked) => onSelectedForDeleteChange(checked === true)}
+        aria-label={`选择对话「${conv.title || "新对话"}」`}
+        className="ml-1 shrink-0"
+      />
       {renaming ? (
         <input
           ref={renameInputRef}
@@ -894,6 +905,9 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
+  const [selectedConversationIds, setSelectedConversationIds] = React.useState<Set<number>>(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
+  const [bulkDeleting, setBulkDeleting] = React.useState(false);
   // Pending text + uploaded attachments handed off from a draft that created a
   // conversation via the paperclip, keyed by the new conversation id (consumed once
   // by ChatView on mount; ids never repeat, so leftover entries are harmless).
@@ -923,6 +937,15 @@ export default function ChatPage() {
     reloadConvs();
   }, [reloadConvs]);
 
+  React.useEffect(() => {
+    setSelectedConversationIds((current) => {
+      if (current.size === 0) return current;
+      const live = new Set(convs.map((conversation) => conversation.id));
+      const next = new Set([...current].filter((id) => live.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [convs]);
+
   // Restore the open conversation from the URL (?c=<id>) on mount, so a refresh
   // returns to the same thread instead of the empty draft view. Runs after
   // hydration (not a lazy useState init) to avoid a server/client mismatch.
@@ -948,13 +971,77 @@ export default function ChatPage() {
   // are task-specific and stay hidden from the chat page.
   const chatAgents = agents.filter((a) => !a.builtin || a.role === "assistant");
 
+  const selectedConversationCount = selectedConversationIds.size;
+  const allConversationsSelected = convs.length > 0 && selectedConversationCount === convs.length;
+  const someConversationsSelected = selectedConversationCount > 0 && !allConversationsSelected;
+  let conversationHeaderChecked: boolean | "indeterminate" = false;
+  if (allConversationsSelected) conversationHeaderChecked = true;
+  else if (someConversationsSelected) conversationHeaderChecked = "indeterminate";
+
+  function toggleConversationSelected(id: number, checked: boolean) {
+    setSelectedConversationIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleAllConversations(checked: boolean) {
+    setSelectedConversationIds(checked ? new Set(convs.map((conversation) => conversation.id)) : new Set());
+  }
+
   async function del(id: number) {
     try {
       await api.deleteConversation(id);
       if (selectedId === id) setSelectedId(null);
+      setSelectedConversationIds((current) => {
+        if (!current.has(id)) return current;
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
       reloadConvs();
     } catch (e) {
       toast.error("删除失败：" + (e as Error).message);
+    }
+  }
+
+  async function deleteSelectedConversations() {
+    const ids = [...selectedConversationIds];
+    if (ids.length === 0 || bulkDeleting) return;
+    setBulkDeleting(true);
+    const deleted = new Set<number>();
+    const failed: { id: number; error: string }[] = [];
+    try {
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const result = await api.deleteConversations(ids.slice(offset, offset + 100));
+        for (const item of result.items) {
+          if (item.ok) deleted.add(item.id);
+          else failed.push({ id: item.id, error: item.error ?? "对话不存在" });
+        }
+      }
+      if (deleted.has(selectedId ?? -1)) setSelectedId(null);
+      setSelectedConversationIds((current) => {
+        const next = new Set(current);
+        for (const id of deleted) next.delete(id);
+        return next;
+      });
+      if (deleted.size > 0) toast.success(`已删除 ${deleted.size} 个对话`);
+      if (failed.length > 0) {
+        const details = failed
+          .slice(0, 3)
+          .map((item) => `#${item.id}（${item.error}）`)
+          .join("；");
+        toast.error(`${failed.length} 个对话删除失败：${details}${failed.length > 3 ? " 等" : ""}`);
+      }
+      setBulkDeleteOpen(false);
+      reloadConvs();
+    } catch (error) {
+      toast.error(`批量删除失败：${(error as Error).message}`);
+      reloadConvs();
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -993,10 +1080,33 @@ export default function ChatPage() {
       <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(10rem,15rem)_minmax(0,1fr)] gap-3 md:grid-cols-[18rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:gap-4">
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
-          <div className="border-b p-2">
+          <div className="flex flex-col gap-2 border-b p-2">
             <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
               <PlusIcon /> 新建对话
             </Button>
+            {convs.length > 0 && (
+              <div className="flex items-center gap-2 px-1">
+                <Checkbox
+                  checked={conversationHeaderChecked}
+                  onCheckedChange={(checked) => toggleAllConversations(checked === true)}
+                  aria-label="选择全部对话"
+                />
+                <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
+                  {selectedConversationCount > 0 ? `已选 ${selectedConversationCount} 个` : `共 ${convs.length} 个`}
+                </span>
+                {selectedConversationCount > 0 && (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={bulkDeleting}
+                    onClick={() => setBulkDeleteOpen(true)}
+                  >
+                    <Trash2Icon data-icon="inline-start" />
+                    删除
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
           <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
@@ -1016,6 +1126,8 @@ export default function ChatPage() {
                   onCancelRename={() => setRenamingId(null)}
                   onTogglePinned={() => void togglePinned(c)}
                   onDelete={() => del(c.id)}
+                  selectedForDelete={selectedConversationIds.has(c.id)}
+                  onSelectedForDeleteChange={(checked) => toggleConversationSelected(c.id, checked)}
                 />
               ))}
             </div>
@@ -1056,6 +1168,28 @@ export default function ChatPage() {
           )}
         </div>
       </div>
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除选中的 {selectedConversationCount} 个对话？</AlertDialogTitle>
+            <AlertDialogDescription>对话消息和执行记录将一并删除，此操作不可撤销。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkDeleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={bulkDeleting || selectedConversationCount === 0}
+              onClick={(event) => {
+                event.preventDefault();
+                void deleteSelectedConversations();
+              }}
+            >
+              {bulkDeleting && <Loader2Icon data-icon="inline-start" className="animate-spin" />}
+              {bulkDeleting ? "删除中" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -233,6 +233,16 @@ function sortMockConversations() {
   });
 }
 
+function sortMockTasks() {
+  mockTasks.sort((a, b) => {
+    const aPinned = a.pinned_at ? 1 : 0;
+    const bPinned = b.pinned_at ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+    if (a.pinned_at !== b.pinned_at) return (b.pinned_at ?? "").localeCompare(a.pinned_at ?? "");
+    return b.id.localeCompare(a.id, undefined, { numeric: true });
+  });
+}
+
 function normalizedTemplateName(value: unknown): string {
   return String(value ?? "")
     .trim()
@@ -268,7 +278,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/auth/change-password") return { ok: true };
 
   // ── tasks ──
-  if (path === "/tasks" && m === "GET") return { tasks: mockTasks, active: mockActiveTask };
+  if (path === "/tasks" && m === "GET") {
+    sortMockTasks();
+    return { tasks: mockTasks, active: mockActiveTask };
+  }
   if (path === "/tasks" && m === "POST") {
     let suffix = 1;
     while (mockTasks.some((item) => item.id === `t-new-${suffix}`)) suffix++;
@@ -435,6 +448,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const index = mockTaskTemplates.findIndex((item) => item.id === id);
     if (index >= 0) mockTaskTemplates.splice(index, 1);
     return { deleted: id };
+  }
+  if (seg[0] === "tasks" && seg.length === 2 && m === "PATCH") {
+    const task = mockTasks.find((item) => item.id === seg[1]);
+    if (!task) throw new Error("任务不存在");
+    if (typeof b.name === "string") task.name = b.name.trim();
+    if (typeof b.pinned === "boolean") {
+      task.pinned = b.pinned;
+      task.pinned_at = b.pinned ? (task.pinned_at ?? new Date().toISOString()) : null;
+    }
+    sortMockTasks();
+    return structuredClone(task);
   }
   if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") {
     const id = seg[1];
@@ -1186,6 +1210,18 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const index = mockConversations.findIndex((item) => item.id === id);
     if (index >= 0) mockConversations.splice(index, 1);
     return { deleted: id };
+  }
+  if (path === "/conversations/delete/batch" && m === "POST") {
+    const ids = Array.isArray(b.ids)
+      ? [...new Set(b.ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
+      : [];
+    const items = ids.map((id) => {
+      const index = mockConversations.findIndex((item) => item.id === id);
+      if (index < 0) return { id, ok: false, error: "conversation not found" };
+      mockConversations.splice(index, 1);
+      return { id, ok: true };
+    });
+    return { items };
   }
   if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 3 && m === "GET") {
     const items = D.conversationMessages[Number(seg[1])] ?? [];

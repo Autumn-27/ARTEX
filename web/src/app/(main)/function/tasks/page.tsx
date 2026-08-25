@@ -17,6 +17,9 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import {
+  ArrowDownIcon,
+  ArrowUpDownIcon,
+  ArrowUpIcon,
   ChevronRightIcon,
   EyeIcon,
   FolderInputIcon,
@@ -24,6 +27,9 @@ import {
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
+  PencilIcon,
+  PinIcon,
+  PinOffIcon,
   PlayIcon,
   PlusIcon,
   SaveIcon,
@@ -235,12 +241,59 @@ function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
   return null;
 }
 
+type TaskSortField = "id" | "created" | "duration" | "status";
+type SortDirection = "asc" | "desc";
+
+const TASK_STATUS_RANK = new Map(STATUS_OPTIONS.map((option, index) => [option.value, index]));
+
+function taskIsPinned(task: Task): boolean {
+  return task.pinned ?? Boolean(task.pinned_at);
+}
+
+function compareTaskIDs(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function taskCreatedUnix(task: Task): number {
+  if (task.created_unix) return task.created_unix;
+  const parsed = Date.parse(task.created_at);
+  return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+}
+
+function compareTasks(left: Task, right: Task, field: TaskSortField, direction: SortDirection, nowSec: number): number {
+  const leftPinned = taskIsPinned(left);
+  const rightPinned = taskIsPinned(right);
+  if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+  if (leftPinned && left.pinned_at !== right.pinned_at) {
+    return (right.pinned_at ?? "").localeCompare(left.pinned_at ?? "");
+  }
+
+  let compared = 0;
+  switch (field) {
+    case "created":
+      compared = taskCreatedUnix(left) - taskCreatedUnix(right);
+      break;
+    case "duration":
+      compared = taskDuration(left, nowSec) - taskDuration(right, nowSec);
+      break;
+    case "status":
+      compared = (TASK_STATUS_RANK.get(left.status) ?? 0) - (TASK_STATUS_RANK.get(right.status) ?? 0);
+      break;
+    default:
+      compared = compareTaskIDs(left.id, right.id);
+  }
+  if (compared !== 0) return direction === "asc" ? compared : -compared;
+  return -compareTaskIDs(left.id, right.id);
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
+  const [sortField, setSortField] = React.useState<TaskSortField>("id");
+  const [sortDirection, setSortDirection] = React.useState<SortDirection>("desc");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
@@ -269,15 +322,32 @@ export default function TasksPage() {
     });
   }, [tasks, query, statusFilter, categoryFilter]);
 
-  // reset to page 1 whenever filters change
+  const sortNowSec = sortField === "duration" ? nowSec : 0;
+  const ordered = React.useMemo(() => {
+    return [...filtered].sort((left, right) => compareTasks(left, right, sortField, sortDirection, sortNowSec));
+  }, [filtered, sortDirection, sortField, sortNowSec]);
+
+  const sortTasksBy = React.useCallback(
+    (field: TaskSortField) => {
+      if (sortField === field) {
+        setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+        return;
+      }
+      setSortField(field);
+      setSortDirection("desc");
+    },
+    [sortField],
+  );
+
+  // reset to page 1 whenever filters or ordering change
   // biome-ignore lint/correctness/useExhaustiveDependencies: both filters intentionally reset pagination.
   React.useEffect(() => {
     setPage(1);
-  }, [query, statusFilter, categoryFilter]);
+  }, [query, statusFilter, categoryFilter, sortField, sortDirection]);
 
   const paginated = React.useMemo(
-    () => filtered.slice((page - 1) * pageSize, page * pageSize),
-    [filtered, page, pageSize],
+    () => ordered.slice((page - 1) * pageSize, page * pageSize),
+    [ordered, page, pageSize],
   );
 
   // 多选删除:选择跨翻页/筛选保留,只在任务真的消失(被删或后端不再返回)时收敛。
@@ -434,6 +504,37 @@ export default function TasksPage() {
         // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
         lastRef.current = "";
         load();
+      }
+    },
+    [load],
+  );
+
+  const renameTask = React.useCallback(
+    async (task: Task, name: string) => {
+      try {
+        await api.renameTask(task.id, name);
+        toast.success(`任务 #${task.id} 已重命名`);
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`重命名失败：${(error as Error).message}`);
+        throw error;
+      }
+    },
+    [load],
+  );
+
+  const toggleTaskPinned = React.useCallback(
+    async (task: Task) => {
+      const pinned = taskIsPinned(task);
+      try {
+        await api.pinTask(task.id, !pinned);
+        toast.success(pinned ? `任务 #${task.id} 已取消置顶` : `任务 #${task.id} 已置顶`);
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(error as Error).message}`);
+        throw error;
       }
     },
     [load],
@@ -717,14 +818,41 @@ export default function TasksPage() {
                     aria-label="选择本页全部任务"
                   />
                 </TableHead>
-                <TableHead className="font-mono">ID</TableHead>
+                <SortableTaskHead
+                  field="id"
+                  label="ID"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  className="font-mono"
+                  onSort={sortTasksBy}
+                />
                 <TableHead>名称</TableHead>
                 <TableHead>描述</TableHead>
                 <TableHead>目标</TableHead>
-                <TableHead>状态</TableHead>
+                <SortableTaskHead
+                  field="status"
+                  label="状态"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  onSort={sortTasksBy}
+                />
                 <TableHead className="text-center">目标进度</TableHead>
-                <TableHead className="text-right">创建时间</TableHead>
-                <TableHead className="text-right">运行时长</TableHead>
+                <SortableTaskHead
+                  field="created"
+                  label="创建时间"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  align="right"
+                  onSort={sortTasksBy}
+                />
+                <SortableTaskHead
+                  field="duration"
+                  label="运行时长"
+                  activeField={sortField}
+                  direction={sortDirection}
+                  align="right"
+                  onSort={sortTasksBy}
+                />
                 <TableHead className="text-right">Token</TableHead>
                 <TableHead className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))]">
                   操作
@@ -741,6 +869,8 @@ export default function TasksPage() {
                   nowSec={task.status === "running" ? nowSec : 0}
                   onDelete={deleteTask}
                   onControl={controlTask}
+                  onRename={renameTask}
+                  onTogglePinned={toggleTaskPinned}
                   selected={selectedIds.has(task.id)}
                   onSelectedChange={toggleSelected}
                 />
@@ -760,6 +890,56 @@ export default function TasksPage() {
         />
       </CardContent>
     </Card>
+  );
+}
+
+function taskSortIcon(active: boolean, direction: SortDirection) {
+  if (!active) {
+    return <ArrowUpDownIcon className="size-3.5 opacity-40 transition-opacity group-hover/sort:opacity-100" />;
+  }
+  if (direction === "asc") return <ArrowUpIcon className="size-3.5" />;
+  return <ArrowDownIcon className="size-3.5" />;
+}
+
+function SortableTaskHead({
+  field,
+  label,
+  activeField,
+  direction,
+  align = "left",
+  className,
+  onSort,
+}: {
+  field: TaskSortField;
+  label: string;
+  activeField: TaskSortField;
+  direction: SortDirection;
+  align?: "left" | "right";
+  className?: string;
+  onSort: (field: TaskSortField) => void;
+}) {
+  const active = activeField === field;
+  let ariaSort: React.AriaAttributes["aria-sort"] = "none";
+  if (active) ariaSort = direction === "asc" ? "ascending" : "descending";
+
+  let actionLabel = `按${label}倒序排序`;
+  if (active) actionLabel = `${label}当前${direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`;
+
+  return (
+    <TableHead className={className} aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={cn(
+          "group/sort inline-flex h-full w-full items-center gap-1 outline-none focus-visible:underline",
+          align === "right" && "justify-end",
+        )}
+        aria-label={actionLabel}
+        onClick={() => onSort(field)}
+      >
+        <span>{label}</span>
+        {taskSortIcon(active, direction)}
+      </button>
+    </TableHead>
   );
 }
 
@@ -858,6 +1038,8 @@ const TaskRow = React.memo(function TaskRow({
   nowSec,
   onDelete,
   onControl,
+  onRename,
+  onTogglePinned,
   selected,
   onSelectedChange,
 }: {
@@ -865,6 +1047,8 @@ const TaskRow = React.memo(function TaskRow({
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
   onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+  onRename: (task: Task, name: string) => Promise<void>;
+  onTogglePinned: (task: Task) => Promise<void>;
   selected: boolean;
   onSelectedChange: (id: string, checked: boolean) => void;
 }) {
@@ -890,6 +1074,7 @@ const TaskRow = React.memo(function TaskRow({
             {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
           </Link>
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
+          {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
       </TableCell>
       <TableCell className="text-muted-foreground max-w-xs">
@@ -954,12 +1139,127 @@ const TaskRow = React.memo(function TaskRow({
             </Link>
           </Button>
           <TaskControlButton task={task} onControl={onControl} />
+          <TaskMetadataActions task={task} onRename={onRename} onTogglePinned={onTogglePinned} />
           <DeleteTaskDialog task={task} onDelete={onDelete} />
         </div>
       </TableCell>
     </TableRow>
   );
 });
+
+function taskPinIcon(pinning: boolean, pinned: boolean) {
+  if (pinning) return <Spinner />;
+  if (pinned) return <PinOffIcon />;
+  return <PinIcon />;
+}
+
+function TaskMetadataActions({
+  task,
+  onRename,
+  onTogglePinned,
+}: {
+  task: Task;
+  onRename: (task: Task, name: string) => Promise<void>;
+  onTogglePinned: (task: Task) => Promise<void>;
+}) {
+  const [renameOpen, setRenameOpen] = React.useState(false);
+  const [name, setName] = React.useState(task.name ?? "");
+  const [saving, setSaving] = React.useState(false);
+  const [pinning, setPinning] = React.useState(false);
+  const pinned = taskIsPinned(task);
+
+  React.useEffect(() => {
+    if (renameOpen) setName(task.name ?? "");
+  }, [renameOpen, task.name]);
+
+  async function saveName() {
+    const next = name.trim();
+    if (!next) return;
+    if (next === task.name?.trim()) {
+      setRenameOpen(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onRename(task, next);
+      setRenameOpen(false);
+    } catch {
+      // The parent already reports the API error; keep the dialog open for retry.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label={`重命名任务 #${task.id}`}
+        title="重命名"
+        onClick={() => setRenameOpen(true)}
+      >
+        <PencilIcon />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        disabled={pinning}
+        aria-label={pinned ? `取消置顶任务 #${task.id}` : `置顶任务 #${task.id}`}
+        title={pinned ? "取消置顶" : "置顶"}
+        onClick={async () => {
+          setPinning(true);
+          try {
+            await onTogglePinned(task);
+          } finally {
+            setPinning(false);
+          }
+        }}
+      >
+        {taskPinIcon(pinning, pinned)}
+      </Button>
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>重命名任务 #{task.id}</DialogTitle>
+            <DialogDescription>新名称只用于列表和详情展示，不会改变任务描述、目标或执行状态。</DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor={`task-rename-${task.id}`}>任务名称</FieldLabel>
+              <Input
+                id={`task-rename-${task.id}`}
+                value={name}
+                maxLength={200}
+                autoFocus
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void saveName();
+                  }
+                }}
+              />
+            </Field>
+          </FieldGroup>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={saving}>
+                取消
+              </Button>
+            </DialogClose>
+            <Button disabled={saving || !name.trim()} onClick={() => void saveName()}>
+              {saving && <Spinner data-icon="inline-start" />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 // 三态图标分开写而非嵌套三元:仓库 Biome 基线禁 noNestedTernary。
 function taskControlIcon(pending: boolean, action: "pause" | "resume" | null) {

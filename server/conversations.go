@@ -203,11 +203,85 @@ func (s *Server) pgDeleteConversation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.cancelConversation(c.ID)
 	if err := pg.DeleteConversation(c.ID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": c.ID})
+}
+
+const maxConversationDeleteBatch = 100
+
+type conversationDeleteItem struct {
+	ID    int64  `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) cancelConversation(id int64) {
+	busyKey := s.convBusyKey(id)
+	s.chatMu.Lock()
+	cancel := s.chatCancel[busyKey]
+	s.chatMu.Unlock()
+	if cancel != nil {
+		cancel(agent.AbortChatStoppedByUser)
+	}
+}
+
+// pgDeleteConversationsBatch deletes up to 100 selected conversations in one
+// database statement. Missing ids are reported per item so a stale list does not
+// hide what was actually removed.
+func (s *Server) pgDeleteConversationsBatch(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var request struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !decodeConversationRequest(w, r, &request) {
+		return
+	}
+	ids := make([]int64, 0, len(request.IDs))
+	seen := make(map[int64]struct{}, len(request.IDs))
+	for _, id := range request.IDs {
+		if id <= 0 {
+			writeErr(w, http.StatusBadRequest, "对话 id 无效")
+			return
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 || len(ids) > maxConversationDeleteBatch {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("ids 数量必须为 1-%d", maxConversationDeleteBatch))
+		return
+	}
+	for _, id := range ids {
+		s.cancelConversation(id)
+	}
+	deleted, err := pg.DeleteConversations(ids)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	deletedSet := make(map[int64]struct{}, len(deleted))
+	for _, id := range deleted {
+		deletedSet[id] = struct{}{}
+	}
+	items := make([]conversationDeleteItem, 0, len(ids))
+	for _, id := range ids {
+		_, ok := deletedSet[id]
+		item := conversationDeleteItem{ID: id, OK: ok}
+		if !ok {
+			item.Error = "conversation not found"
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) convBusyKey(id int64) string { return "conv-" + strconv.FormatInt(id, 10) }

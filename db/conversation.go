@@ -209,6 +209,28 @@ func (d *DB) DeleteConversation(id int64) error {
 	return err
 }
 
+// DeleteConversations removes existing threads in one statement and returns the
+// ids that were actually present. Child activities and trigger runs cascade.
+func (d *DB) DeleteConversations(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return []int64{}, nil
+	}
+	rows, err := d.Query(`DELETE FROM conversations WHERE id=ANY($1::bigint[]) RETURNING id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	deleted := make([]int64, 0, len(ids))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		deleted = append(deleted, id)
+	}
+	return deleted, rows.Err()
+}
+
 // AppendConvActivity records one step of a conversation (human message or an agent
 // execution step) and returns its id. Mirrors ExplorationStore.AppendActivity but
 // keyed by conversation_id. Reuses the Activity struct (NodeID is ignored here).

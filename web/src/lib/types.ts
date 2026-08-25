@@ -9,6 +9,8 @@ export interface Task {
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   category_id?: number;
   category_name?: string;
+  pinned?: boolean;
+  pinned_at?: string | null;
   description: string;
   goal: string;
   status: TaskStatus;

@@ -15,6 +15,8 @@ type Task struct {
 	Name          string     `json:"name"` // 可选任务名称;空=未命名
 	CategoryID    *int64     `json:"category_id,omitempty"`
 	CategoryName  string     `json:"category_name,omitempty"`
+	Pinned        bool       `json:"pinned"`
+	PinnedAt      *time.Time `json:"pinned_at,omitempty"`
 	Description   string     `json:"description"`
 	Goal          string     `json:"goal"`
 	ExplorationID int64      `json:"exploration_id"`
@@ -304,13 +306,14 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
+	t.Pinned = t.PinnedAt != nil
 	return &t, nil
 }
 
@@ -320,11 +323,11 @@ func (d *DB) SetParentRef(id int64, parentRef string) error {
 	return err
 }
 
-// ListTasks returns alive tasks, newest first.
+// ListTasks returns alive tasks with pinned tasks first, then newest ids.
 func (d *DB) ListTasks() ([]*Task, error) {
-	// 按 id 降序:id 是 BIGSERIAL,单调递增即插入顺序,最新的在最前。不用 created_at
-	// 是因为同一时刻创建的多个任务时间戳相同,排序不稳定,列表会频繁换位(见 List)。
-	rows, err := d.Query(`SELECT ` + taskCols + ` FROM tasks WHERE deleted_at IS NULL ORDER BY id DESC`)
+	// id 是 BIGSERIAL，同一时刻创建的任务也有稳定且唯一的顺序。
+	rows, err := d.Query(`SELECT ` + taskCols + ` FROM tasks WHERE deleted_at IS NULL
+ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +350,33 @@ func (d *DB) ListTasks() ([]*Task, error) {
 		}
 	}
 	return out, nil
+}
+
+// TaskPatch updates task list metadata without changing execution state.
+type TaskPatch struct {
+	Name   *string
+	Pinned *bool
+}
+
+// UpdateTask applies a partial task name/pin mutation and returns the updated row.
+// Re-pinning an already pinned task preserves its original position.
+func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
+	task, err := scanTask(d.QueryRow(`UPDATE tasks SET
+	name = CASE WHEN $2::boolean THEN $3 ELSE name END,
+	pinned_at = CASE
+		WHEN $4::boolean IS NULL THEN pinned_at
+		WHEN $4::boolean THEN COALESCE(pinned_at, now())
+		ELSE NULL
+	END
+WHERE id=$1 AND deleted_at IS NULL
+RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return task, nil
 }
 
 // GetTask returns one alive task (nil if not found/deleted).

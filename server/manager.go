@@ -32,6 +32,7 @@ type Task struct {
 	Name         string `json:"name"` // 可选任务名称;空=未命名
 	CategoryID   *int64 `json:"category_id,omitempty"`
 	CategoryName string `json:"category_name,omitempty"`
+	PinnedAt     int64  `json:"pinned_at,omitempty"`
 	Description  string `json:"description"`
 	Goal         string `json:"goal"`
 	CreatedAt    int64  `json:"created_at"`
@@ -77,6 +78,8 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
+	Name          string
+	PinnedAt      int64
 	Status        string
 	Paused        bool
 	Queued        bool
@@ -102,6 +105,8 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
+		Name:          t.Name,
+		PinnedAt:      t.PinnedAt,
 		Status:        t.Status,
 		Paused:        t.Paused,
 		Queued:        t.Queued,
@@ -124,6 +129,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.lifecycleMu.Lock()
 	state := t.lifecycleSnapshotLocked()
 	update(&state)
+	t.Name = state.Name
+	t.PinnedAt = state.PinnedAt
 	t.Status = state.Status
 	t.Paused = state.Paused
 	t.Queued = state.Queued
@@ -698,6 +705,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
+		PinnedAt:    unixOrZero(pt.PinnedAt),
 		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
@@ -712,6 +720,32 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
+}
+
+// UpdateTaskMetadata changes list-only task metadata without interrupting any
+// planner, main-agent, or worker call.
+func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, nil
+	}
+	updated, err := m.pg.UpdateTask(id, patch)
+	if err != nil || updated == nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	task := m.tasks[taskID]
+	m.mu.RUnlock()
+	if task == nil {
+		return nil, nil
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) {
+		state.Name = updated.Name
+		state.PinnedAt = unixOrZero(updated.PinnedAt)
+	})
+	return task, nil
 }
 
 // CreateTask creates a task + its exploration and makes it active.
@@ -1558,10 +1592,17 @@ func (m *Manager) List() []*Task {
 	for _, t := range m.tasks {
 		out = append(out, t)
 	}
-	// 按 id 降序(最新插入在最前)。m.tasks 是 map,遍历顺序随机,每次轮询都要重排;
-	// 若按 CreatedAt 排,同一秒创建的任务时间戳相同,排序不稳定,会在列表里频繁换
-	// 位置。id 由 BIGSERIAL 单调递增分配,唯一且稳定,顺序恒定。
+	// 置顶任务优先，组内按置顶时间倒序；普通任务按 id 倒序。m.tasks 是 map，
+	// 每次轮询都必须重排，id 则为同刻创建任务提供稳定且唯一的兜底顺序。
 	sort.Slice(out, func(i, j int) bool {
+		iState := out[i].lifecycleSnapshot()
+		jState := out[j].lifecycleSnapshot()
+		if (iState.PinnedAt > 0) != (jState.PinnedAt > 0) {
+			return iState.PinnedAt > 0
+		}
+		if iState.PinnedAt != jState.PinnedAt {
+			return iState.PinnedAt > jState.PinnedAt
+		}
 		ai, _ := strconv.ParseInt(out[i].ID, 10, 64)
 		aj, _ := strconv.ParseInt(out[j].ID, 10, 64)
 		return ai > aj
