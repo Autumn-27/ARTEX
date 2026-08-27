@@ -466,7 +466,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v6_insert_assets_related"
+	const flag = "tool_schema_refresh_v7_list_facts_paging"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -482,7 +482,9 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
 	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
-	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true}
+	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
+	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true, "list_facts": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if !refreshBuiltin[sd.Key] {
 			continue
