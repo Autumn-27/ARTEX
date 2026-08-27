@@ -646,8 +646,10 @@ export const api = {
     thinking_type = "",
     reasoning_effort = "",
     profile_id?: number,
+    streaming = true, // 用该配置真实的收发模式来测，别让"流式能通、非流式不通"漏到会话里
   ) =>
-    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string }>("/llm/test", {
+    // reply = 模型实际回复(已截断);一个字都不回的配置后端直接判失败
+    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
       provider,
       model,
       base_url,
@@ -656,6 +658,7 @@ export const api = {
       thinking_type,
       reasoning_effort,
       profile_id,
+      streaming,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {

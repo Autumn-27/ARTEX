@@ -1337,6 +1337,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		ThinkingType    string `json:"thinking_type"`
 		ReasoningEffort string `json:"reasoning_effort"`
 		ProfileID       *int64 `json:"profile_id"` // 测已存 profile 时传入：api_key 为空则用它存的 key
+		Streaming       *bool  `json:"streaming"`  // 省略=流式，与保存 profile 时同一套默认
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1347,6 +1348,11 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
+	// 同理，收发模式也照该 profile 的选择来：只支持其中一种通道的端点必须在这里就
+	// 暴露，而不是等会话里才发现"测试通过的配置根本跑不动"。
+	if req.Streaming != nil {
+		cfg.Stream = *req.Streaming
+	}
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
 	if cfg.APIKey == "" && req.ProfileID != nil {
@@ -1363,12 +1369,27 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
 		return
 	}
-	lat, err := agent.TestConnection(r.Context(), cfg)
+	lat, reply, err := agent.TestConnection(r.Context(), cfg)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model})
+	// 回传模型实际回复，让"测试通过"有据可查：看得见它确实说了话，而不只是 HTTP 200。
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model, "reply": truncateReply(reply),
+	})
+}
+
+// truncateReply clips a connection-test reply for display. A model told to answer
+// "OK" can still ramble (or think out loud); the UI only needs enough to show it
+// really said something. Rune-based so multibyte text never splits mid-character.
+func truncateReply(s string) string {
+	const max = 200
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 type createTaskReq struct {
