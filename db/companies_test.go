@@ -177,9 +177,13 @@ func TestCompanyScopeInvalid(t *testing.T) {
 	}
 	defer cleanupCompany(d, id)
 
-	// TLD-only domains and overly broad CIDRs should be rejected
-	lines := []string{"com", "1.2.3.4/8"} // rejected
-	added, _, invalid, _ := cs.AddScope(id, lines, "test")
+	// Explicitly typed TLD-only domains and overly broad CIDRs should be
+	// rejected. Untyped plain text is intentionally classified as a keyword.
+	inputs := []ScopeInput{
+		{Kind: "domain", Value: "com"},
+		{Kind: "cidr", Value: "1.2.3.4/8"},
+	}
+	added, _, invalid, _ := cs.AddScopeInputs(id, inputs, "test")
 	if added != 0 {
 		t.Errorf("want 0 added for invalid lines, got %d", added)
 	}

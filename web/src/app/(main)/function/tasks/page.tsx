@@ -2613,8 +2613,8 @@ function CreateTaskSheet({
                 portalContainer={sheetContentRef}
               />
               <FieldDescription>
-                将所选企业的域名、IP、CIDR、ICP 和企业关键词作为 Agent
-                可选范围上下文；不会自动生成意图或强制改变执行目标。
+                创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
+                作为范围上下文；不会自动生成意图或强制改变执行目标。
               </FieldDescription>
             </Field>
             <Field>

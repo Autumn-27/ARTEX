@@ -39,7 +39,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, copyText } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -199,12 +199,12 @@ function HttpCodeBlock({ raw }: { raw: string }) {
   }, [copied]);
 
   const copyPacket = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
+    const ok = await copyText(value);
+    if (ok) {
       setCopied(true);
-    } catch {
-      toast.error("复制失败，请使用 Ctrl/Cmd+A 后复制");
+      return;
     }
+    toast.error("复制失败，请使用 Ctrl/Cmd+A 后复制");
   };
 
   const renderLine = (line: string, index: number) => {

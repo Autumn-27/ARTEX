@@ -509,9 +509,35 @@ func TestCreateTaskWithCompanyScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	emptyCompany, _, err := d.Companies().UpsertCompany(fmt.Sprintf("Task Empty Company %d", suffix), "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		_, _ = d.Exec(`DELETE FROM companies WHERE id IN ($1,$2)`, companyA, companyB)
+		_, _ = d.Exec(`DELETE FROM companies WHERE id IN ($1,$2,$3)`, companyA, companyB, emptyCompany)
 	})
+
+	existingTask, err := d.CreateTask("existing company asset owner", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(existingTask.ID) })
+	var companyAssetA, companyAssetB int64
+	domainA := fmt.Sprintf("task-company-a-%d.example.test", suffix)
+	domainB := fmt.Sprintf("task-company-b-%d.example.test", suffix)
+	if err := d.QueryRow(`
+INSERT INTO assets(type, domain, root_domain, company_id, company_source, task_ids)
+VALUES ('root_domain',$1,$1,$2,'explicit',ARRAY[$3]::bigint[])
+RETURNING id`, domainA, companyA, existingTask.ID).Scan(&companyAssetA); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`
+INSERT INTO assets(type, domain, root_domain, company_id, company_source)
+VALUES ('root_domain',$1,$1,$2,'explicit')
+RETURNING id`, domainB, companyB).Scan(&companyAssetB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Assets().DeleteByIDs([]int64{companyAssetA, companyAssetB}) })
 
 	task, err := d.CreateTaskWithOptions("company-scoped task", "use company scope", TaskCreateOptions{
 		CompanyIDs: []int64{companyA, companyB},
@@ -536,6 +562,57 @@ func TestCreateTaskWithCompanyScopes(t *testing.T) {
 	}
 	if scopeCount != 2 {
 		t.Fatalf("company task scope rows=%d want 2", scopeCount)
+	}
+	assets, err := d.Assets().QueryByTask(task.ID, "root_domain", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 2 {
+		t.Fatalf("company task assets=%d want 2: %+v", len(assets), assets)
+	}
+	assetByID := make(map[int64]*Asset, len(assets))
+	for _, asset := range assets {
+		assetByID[asset.ID] = asset
+	}
+	for assetID, companyName := range map[int64]string{
+		companyAssetA: fmt.Sprintf("Task Company A %d", suffix),
+		companyAssetB: fmt.Sprintf("Task Company B %d", suffix),
+	} {
+		asset := assetByID[assetID]
+		if asset == nil {
+			t.Errorf("company asset %d missing from task", assetID)
+			continue
+		}
+		if asset.TaskSource != taskCompanyAssetSource || asset.TaskSourceSummary != "任务创建时关联企业："+companyName {
+			t.Errorf("asset %d provenance=%q/%q", assetID, asset.TaskSource, asset.TaskSourceSummary)
+		}
+	}
+	var existingAssociation bool
+	if err := d.QueryRow(`SELECT $1=ANY(task_ids) FROM assets WHERE id=$2`, existingTask.ID, companyAssetA).Scan(&existingAssociation); err != nil {
+		t.Fatal(err)
+	}
+	if !existingAssociation {
+		t.Fatal("company snapshot removed the asset's existing task association")
+	}
+	var existingSource string
+	if err := d.QueryRow(`SELECT source FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, existingTask.ID, companyAssetA).Scan(&existingSource); err != nil {
+		t.Fatal(err)
+	}
+	if existingSource == taskCompanyAssetSource {
+		t.Fatalf("company snapshot overwrote another task's provenance: %q", existingSource)
+	}
+
+	emptyTask, err := d.CreateTaskWithOptions("empty company scope", "no current assets", TaskCreateOptions{
+		CompanyIDs: []int64{emptyCompany},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assets, err := d.Assets().QueryByTask(emptyTask.ID, "", 10, 0); err != nil || len(assets) != 0 {
+		t.Fatalf("empty company task assets=%+v err=%v", assets, err)
+	}
+	if err := d.DeleteTask(emptyTask.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	duplicateTask, err := d.CreateTaskWithOptions("duplicate company scope", "deduplicate", TaskCreateOptions{

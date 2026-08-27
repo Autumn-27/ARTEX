@@ -42,8 +42,34 @@ const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
 const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
 const mockTaskScopes = new Map<string, TaskScopeRow[]>();
+type MockTaskAssetSource = Pick<Asset, "task_source" | "task_source_summary" | "task_source_node_id">;
+const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
 let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
+
+function mockTaskAssetSourceKey(taskID: string, assetID: number): string {
+  return JSON.stringify([taskID, assetID]);
+}
+
+function setMockTaskAssetSource(taskID: string, assetID: number, source: MockTaskAssetSource) {
+  mockTaskAssetSources.set(mockTaskAssetSourceKey(taskID, assetID), source);
+}
+
+function mockAssetForTask(taskID: string, asset: Asset): Asset {
+  const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, asset.id));
+  return source ? { ...asset, ...source } : asset;
+}
+
+function deleteMockTaskAssetSources(taskID: string, assetID?: number) {
+  if (assetID !== undefined) {
+    mockTaskAssetSources.delete(mockTaskAssetSourceKey(taskID, assetID));
+    return;
+  }
+  for (const key of mockTaskAssetSources.keys()) {
+    const [linkedTaskID] = JSON.parse(key) as [string, number];
+    if (linkedTaskID === taskID) mockTaskAssetSources.delete(key);
+  }
+}
 
 function mockTaskAssetID(taskID: string): number | undefined {
   const numeric = Number(taskID);
@@ -289,7 +315,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const now = new Date();
     const profileIDs = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
     const sourceTaskIDs = [...((b.source_task_ids as string[] | undefined) ?? [])];
-    const companyIDs = [...((b.company_ids as number[] | undefined) ?? [])];
+    const companyIDs = [...new Set((b.company_ids as number[] | undefined) ?? [])];
+    if (companyIDs.some((companyID) => !mockCompanies.some((company) => company.id === companyID))) {
+      throw new Error("关联企业不存在或无效");
+    }
     const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
     const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
     if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
@@ -318,7 +347,19 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       source_task_ids: sourceTaskIDs,
       company_ids: companyIDs,
     };
-    mockTaskAssetIDs.set(id, nextMockTaskAssetID++);
+    const numericTaskID = nextMockTaskAssetID++;
+    mockTaskAssetIDs.set(id, numericTaskID);
+    const selectedCompanies = new Set(companyIDs);
+    for (const asset of mockAssets) {
+      if (asset.company_id === undefined || !selectedCompanies.has(asset.company_id)) continue;
+      if (!asset.task_ids.includes(numericTaskID)) asset.task_ids.push(numericTaskID);
+      const company = mockCompanies.find((candidate) => candidate.id === asset.company_id);
+      setMockTaskAssetSource(id, asset.id, {
+        task_source: "company",
+        task_source_summary: `任务创建时关联企业：${company?.name ?? `#${asset.company_id}`}`,
+        task_source_node_id: undefined,
+      });
+    }
     for (const item of mockTasks) item.active = false;
     mockTasks.unshift(created);
     mockActiveTask = id;
@@ -462,9 +503,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") {
     const id = seg[1];
+    const numericTaskID = mockTaskAssetID(id);
     const index = mockTasks.findIndex((item) => item.id === id);
     if (index >= 0) mockTasks.splice(index, 1);
     mockTaskAssetIDs.delete(id);
+    deleteMockTaskAssetSources(id);
+    if (numericTaskID !== undefined) {
+      for (const asset of mockAssets) asset.task_ids = asset.task_ids.filter((taskID) => taskID !== numericTaskID);
+    }
 
     let findingsDeleted = 0;
     if (b.delete_findings) {
@@ -701,7 +747,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     });
     const limit = Number(q.get("limit") ?? 50);
     const offset = Number(q.get("offset") ?? 0);
-    const page = list.slice(offset, offset + limit);
+    const page = list.slice(offset, offset + limit).map((asset) => (taskID ? mockAssetForTask(taskID, asset) : asset));
     return { count: page.length, total: list.length, assets: page };
   }
   if (path === "/assets" && m === "DELETE") {
@@ -792,9 +838,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           asset.task_ids.push(numericTaskID);
           mutation.assets_linked++;
         }
-        asset.task_source = "manual";
-        asset.task_source_summary = "用户在测试资产页手工新增";
-        asset.task_source_node_id = undefined;
+        setMockTaskAssetSource(seg[1], asset.id, {
+          task_source: "manual",
+          task_source_summary: "用户在测试资产页手工新增",
+          task_source_node_id: undefined,
+        });
       }
       mockTaskScopes.set(seg[1], currentScopes);
       return mutation;
@@ -812,9 +860,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         asset.task_ids.push(numericTaskID);
         mutation.attached++;
       }
-      asset.task_source = "manual";
-      asset.task_source_summary = sourceSummary;
-      asset.task_source_node_id = undefined;
+      setMockTaskAssetSource(seg[1], asset.id, {
+        task_source: "manual",
+        task_source_summary: sourceSummary,
+        task_source_node_id: undefined,
+      });
     }
     return mutation;
   }
@@ -824,11 +874,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (numericTaskID === undefined || !asset) throw new Error("任务或资产不存在");
     if (!asset.task_ids.includes(numericTaskID)) throw new Error("资产未关联当前任务");
     asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
-    if (asset.task_ids.length === 0) {
-      asset.task_source = undefined;
-      asset.task_source_summary = undefined;
-      asset.task_source_node_id = undefined;
-    }
+    deleteMockTaskAssetSources(seg[1], asset.id);
     return { detached: asset.id };
   }
   if (seg[0] === "tasks" && seg[2] === "intent-assets" && seg.length === 3 && m === "GET") {
@@ -843,8 +889,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     const sourceTaskID = mockTaskAssetID(seg[1]) ?? 0;
     const assets: IntentAsset[] = mappings.flatMap((mapping) => {
-      const asset = mockAssets.find((item) => item.id === mapping.assetID);
-      if (!asset) return [];
+      const storedAsset = mockAssets.find((item) => item.id === mapping.assetID);
+      if (!storedAsset) return [];
+      const asset = mockAssetForTask(seg[1], storedAsset);
       return [
         {
           intent_id: mapping.intentID,
