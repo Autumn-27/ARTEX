@@ -71,6 +71,7 @@ import type {
   TokenTotal,
   TokenUsage,
   Tool,
+  ToolStat,
   TrafficDetail,
   TrafficHost,
   TrafficResp,
@@ -940,6 +941,13 @@ export const api = {
     sp.set("page", String(params?.page ?? 0));
     sp.set("size", String(params?.size ?? 50));
     return get<{ commands: CommandRecord[]; total: number }>(`/commands?${sp}`);
+  },
+  // 各工具调用次数；沿用列表的 task/q 筛选，统计的是整个结果集而非当前页。
+  commandStats: (params?: { task?: string; q?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.task) sp.set("task", params.task);
+    if (params?.q) sp.set("q", params.q);
+    return get<{ stats: ToolStat[] }>(`/commands/stats?${sp}`);
   },
 
   // ---- LLM records ----
