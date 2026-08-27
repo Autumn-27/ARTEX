@@ -1065,6 +1065,13 @@ export interface CommandRecord {
   created_at: string;
 }
 
+// 单个工具的调用统计（/commands/stats）；errors 为其中失败的次数。
+export interface ToolStat {
+  tool: string;
+  total: number;
+  errors: number;
+}
+
 // ---- LLM recording ----
 export interface LLMRecordItem {
   id: number;

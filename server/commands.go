@@ -15,19 +15,43 @@ func (s *Server) pgListCommands(w http.ResponseWriter, r *http.Request) {
 	size := atoiDefault(q.Get("size"), 50)
 	keyword := q.Get("q")
 
-	var expID *int64
-	if tv := q.Get("task"); tv != "" {
-		if n, err := strconv.ParseInt(tv, 10, 64); err == nil {
-			expID = &n
-		}
-	}
-
-	records, total, err := s.m.PG().ListCommands(expID, keyword, page, size)
+	records, total, err := s.m.PG().ListCommands(commandTaskFilter(q.Get("task")), keyword, page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"commands": records, "total": total})
+}
+
+// pgToolStats returns per-tool call counts for the tool-execution history, under
+// the same task/keyword filters the list takes — the summary describes the whole
+// filtered set, not the page on screen.
+func (s *Server) pgToolStats(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	pg := s.m.PG()
+	if pg == nil {
+		writeJSON(w, 200, map[string]any{"stats": []db.ToolStat{}})
+		return
+	}
+	stats, err := pg.ToolStats(commandTaskFilter(q.Get("task")), q.Get("q"))
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"stats": stats})
+}
+
+// commandTaskFilter parses the ?task= exploration id. Absent or unparsable → nil
+// (no filter), matching the list endpoint's long-standing lenient behaviour.
+func commandTaskFilter(v string) *int64 {
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &n
 }
 
 // pgListLLMRecords returns paginated LLM call records.

@@ -1128,6 +1128,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── 工具执行历史 ──
   if (path === "/commands" && m === "GET") return { commands: D.commandRecords, total: D.commandRecords.length };
+  if (path === "/commands/stats" && m === "GET") {
+    const tally = new Map<string, { tool: string; total: number; errors: number }>();
+    for (const c of D.commandRecords) {
+      const tool = c.tool || "-";
+      const s = tally.get(tool) ?? { tool, total: 0, errors: 0 };
+      s.total++;
+      if (c.is_error) s.errors++;
+      tally.set(tool, s);
+    }
+    return { stats: [...tally.values()].sort((a, b) => b.total - a.total || a.tool.localeCompare(b.tool)) };
+  }
 
   // ── LLM ──
   if (path === "/llm/records" && m === "GET") return { records: mockLLMRecords, total: mockLLMRecords.length };

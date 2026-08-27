@@ -19,18 +19,10 @@ type CommandRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ListCommands returns tool executions (tool_use + paired tool_result) across all
-// explorations, with optional filtering and pagination. Covers every tool, not
-// just Bash; q matches the tool name or its input.
-func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
-	if size <= 0 {
-		size = 50
-	}
-	if page < 0 {
-		page = 0
-	}
-	offset := page * size
-
+// commandFilter builds the WHERE clause shared by the tool-execution list and
+// its per-tool tally, so the summary always describes exactly the rows the table
+// pages through. Returns the clause, its args, and the next placeholder index.
+func commandFilter(expID *int64, q string) (string, []any, int) {
 	where := `WHERE u.kind = 'tool_use'`
 	args := []any{}
 	argN := 1
@@ -45,6 +37,59 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 		args = append(args, "%"+q+"%")
 		argN++
 	}
+	return where, args, argN
+}
+
+// ToolStat is one tool's execution tally for the usage summary.
+type ToolStat struct {
+	Tool   string `json:"tool"`
+	Total  int    `json:"total"`
+	Errors int    `json:"errors"`
+}
+
+// ToolStats counts executions grouped by tool under the same filters
+// ListCommands takes. Unpaginated on purpose: the tally describes the whole
+// filtered set, not the page currently on screen.
+func (d *DB) ToolStats(expID *int64, q string) ([]ToolStat, error) {
+	where, args, _ := commandFilter(expID, q)
+
+	rows, err := d.Query(`
+SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool, COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE COALESCE(r.is_error,false)) AS errors
+FROM activity u
+LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
+`+where+`
+GROUP BY 1
+ORDER BY total DESC, tool ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []ToolStat{}
+	for rows.Next() {
+		var s ToolStat
+		if err := rows.Scan(&s.Tool, &s.Total, &s.Errors); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ListCommands returns tool executions (tool_use + paired tool_result) across all
+// explorations, with optional filtering and pagination. Covers every tool, not
+// just Bash; q matches the tool name or its input.
+func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
+	if size <= 0 {
+		size = 50
+	}
+	if page < 0 {
+		page = 0
+	}
+	offset := page * size
+
+	where, args, argN := commandFilter(expID, q)
 
 	// count
 	var total int

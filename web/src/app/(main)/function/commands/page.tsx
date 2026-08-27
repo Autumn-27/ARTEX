@@ -2,17 +2,18 @@
 
 import * as React from "react";
 
-import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, SearchIcon, TerminalIcon } from "lucide-react";
+import { BarChart3Icon, ChevronLeftIcon, ChevronRightIcon, Loader2Icon, SearchIcon, TerminalIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { CommandRecord } from "@/lib/types";
+import type { CommandRecord, ToolStat } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function fmtTime(ts: string) {
@@ -59,6 +60,11 @@ export default function CommandsPage() {
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
 
+  // 各工具调用次数。弹窗打开时才拉取（多一次聚合查询，不必每次翻页都付）。
+  const [statsOpen, setStatsOpen] = React.useState(false);
+  const [stats, setStats] = React.useState<ToolStat[]>([]);
+  const [statsLoading, setStatsLoading] = React.useState(false);
+
   // Selected execution is rendered in a right-side detail sheet.
   const [selected, setSelected] = React.useState<CommandRecord | null>(null);
 
@@ -96,6 +102,24 @@ export default function CommandsPage() {
     };
   }, [page, size, queryQ, taskFilter]);
 
+  // 统计跟随筛选条件走，和表格描述的是同一批记录（但不分页）。
+  React.useEffect(() => {
+    if (!statsOpen) return;
+    let alive = true;
+    setStatsLoading(true);
+    api
+      .commandStats({ task: taskFilter || undefined, q: queryQ || undefined })
+      .then((r) => alive && setStats(r.stats ?? []))
+      .catch(() => alive && setStats([]))
+      .finally(() => alive && setStatsLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [statsOpen, queryQ, taskFilter]);
+
+  const statsTotal = stats.reduce((n, s) => n + s.total, 0);
+  const statsErrors = stats.reduce((n, s) => n + s.errors, 0);
+  const statsMax = stats.reduce((n, s) => Math.max(n, s.total), 0);
   const totalPages = Math.max(1, Math.ceil(total / size));
   const rangeStart = total === 0 ? 0 : page * size + 1;
   const rangeEnd = page * size + commands.length;
@@ -140,6 +164,11 @@ export default function CommandsPage() {
             ))}
           </SelectContent>
         </Select>
+
+        <Button variant="outline" size="sm" className="h-8" onClick={() => setStatsOpen(true)}>
+          <BarChart3Icon className="size-4" />
+          统计
+        </Button>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span className="tabular-nums">
@@ -242,6 +271,66 @@ export default function CommandsPage() {
           </div>
         </Card>
       </div>
+
+      {/* 工具调用统计：与表格同一批记录（同筛选、不分页） */}
+      <Dialog open={statsOpen} onOpenChange={setStatsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>工具调用统计</DialogTitle>
+            <DialogDescription>
+              {taskFilter || queryQ ? "当前筛选条件下的全部记录" : "全部工具执行记录"}
+              {stats.length > 0 && (
+                <>
+                  {" · "}
+                  <span className="tabular-nums">{stats.length}</span> 个工具 ·{" "}
+                  <span className="tabular-nums">{statsTotal}</span> 次调用
+                  {statsErrors > 0 && (
+                    <>
+                      {" · 失败 "}
+                      <span className="tabular-nums text-red-600 dark:text-red-400">{statsErrors}</span>
+                    </>
+                  )}
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {statsLoading && stats.length === 0 ? (
+            <div className="py-10 text-center">
+              <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : stats.length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">暂无统计数据</div>
+          ) : (
+            <div className="-mr-2 max-h-[55vh] space-y-1 overflow-auto pr-2">
+              {stats.map((s) => (
+                <div key={s.tool} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md p-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-mono text-xs font-medium">{s.tool}</span>
+                      {s.errors > 0 && (
+                        <span className="text-[11px] tabular-nums text-red-600 dark:text-red-400">失败 {s.errors}</span>
+                      )}
+                    </div>
+                    <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${statsMax > 0 ? (s.total / statsMax) * 100 : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs font-semibold tabular-nums">{s.total}</div>
+                    <div className="text-[11px] tabular-nums text-muted-foreground">
+                      {statsTotal > 0 ? ((s.total / statsTotal) * 100).toFixed(1) : "0.0"}%
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
         <SheetContent className="w-full! max-w-none! gap-0 p-0 sm:w-[46rem]! sm:max-w-[46rem]!">
