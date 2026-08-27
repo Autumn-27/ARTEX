@@ -1,5 +1,7 @@
 github.com/Autumn-27/norma v0.3.1 h1:cSRojFJjivm4l3ck/KJXym7VyCnM1GLY7iq1pRYk4kk=
 github.com/Autumn-27/norma v0.3.1/go.mod h1:BudWrf7iHl96FgHqFr/HwN3mKYmGjJDt+xL2ZHXfFZw=
+github.com/Autumn-27/norma v0.3.2 h1:3gW84SbSrz8luW8kbi2tv3O7CLdRMQvyylCHj1QUdNk=
+github.com/Autumn-27/norma v0.3.2/go.mod h1:BudWrf7iHl96FgHqFr/HwN3mKYmGjJDt+xL2ZHXfFZw=
 github.com/andybalholm/brotli v1.2.1 h1:R+f5xP285VArJDRgowrfb9DqL18yVK0gKAW/F+eTWro=
 github.com/andybalholm/brotli v1.2.1/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 h1:DklsrG3dyBCFEj5IhUbnKptjxatkF07cF2ak3yi77so=

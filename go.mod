@@ -3,7 +3,7 @@ module github.com/Autumn-27/artex
 go 1.26.3
 
 require (
-	github.com/Autumn-27/norma v0.3.1
+	github.com/Autumn-27/norma v0.3.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lqqyt2423/go-mitmproxy v1.9.2
