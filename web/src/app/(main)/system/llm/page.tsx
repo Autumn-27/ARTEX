@@ -369,8 +369,22 @@ function ProfileSheet({
     try {
       // 用配置实际会跑的思考参数来测，这样不支持该字段的模型在这里就失败，
       // 而不是等到跑任务时才炸。传 profile id：Key 输入框留空时用已存的 Key。
-      const r = await api.testLLM(format, model, baseUrl, apiKey, proxy, toStore(thinkingType), toStore(effort), profileId);
-      if (r.ok) toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`);
+      const r = await api.testLLM(
+        format,
+        model,
+        baseUrl,
+        apiKey,
+        proxy,
+        toStore(thinkingType),
+        toStore(effort),
+        profileId,
+        streaming,
+      );
+      // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
+      if (r.ok)
+        toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`, {
+          description: r.reply ? `回复：${r.reply}` : undefined,
+        });
       else toast.error(`连接失败：${r.error ?? "未知"}`);
     } catch (e) {
       toast.error(`测试出错：${(e as Error).message}`);
