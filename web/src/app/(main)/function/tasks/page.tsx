@@ -17,6 +17,7 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import {
+  ArchiveIcon,
   ArrowDownIcon,
   ArrowUpDownIcon,
   ArrowUpIcon,
@@ -38,6 +39,7 @@ import {
   StarIcon,
   TagsIcon,
   Trash2Icon,
+  Undo2Icon,
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -57,6 +59,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -95,6 +98,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -110,8 +114,11 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   ChatAttachment,
@@ -120,6 +127,8 @@ import type {
   DeleteTaskResult,
   LLMProfile,
   Task,
+  TaskArchive,
+  TaskArchiveState,
   TaskCategory,
   TaskStatus,
 } from "@/lib/types";
@@ -235,6 +244,7 @@ const UNCATEGORIZED_VALUE = "uncategorized";
 // (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
 // 两边不会出现一个可点、另一个不可点的分歧。
 const PAUSABLE_STATUSES = new Set<TaskStatus>(["created", "queued", "running"]);
+const ARCHIVABLE_STATUSES = new Set<TaskStatus>(["paused", "done", "failed", "timeout"]);
 
 function taskControlAction(status: TaskStatus): "pause" | "resume" | null {
   if (status === "paused") return "resume";
@@ -246,6 +256,7 @@ type TaskSortField = "id" | "created" | "duration" | "status";
 
 const TASK_SORT_FIELDS: readonly TaskSortField[] = ["id", "created", "duration", "status"];
 const TASK_SORT_PREFERENCE_KEY = "artex_task_list_sort";
+const TASK_FILTER_PREFERENCE_KEY = "artex_task_list_filters";
 
 const TASK_STATUS_RANK = new Map(STATUS_OPTIONS.map((option, index) => [option.value, index]));
 
@@ -290,11 +301,14 @@ function compareTasks(left: Task, right: Task, field: TaskSortField, direction: 
 }
 
 export default function TasksPage() {
+  const [activeTab, setActiveTab] = React.useState("current");
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
+  const [categoriesLoaded, setCategoriesLoaded] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
+  const [filtersHydrated, setFiltersHydrated] = React.useState(false);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     TASK_SORT_PREFERENCE_KEY,
     TASK_SORT_FIELDS,
@@ -307,6 +321,35 @@ export default function TasksPage() {
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
   const [batchControlling, setBatchControlling] = React.useState<"pause" | "resume" | null>(null);
   const [movingCategory, setMovingCategory] = React.useState(false);
+
+  React.useEffect(() => {
+    const raw = getLocalStorageValue(TASK_FILTER_PREFERENCE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { status?: unknown; category?: unknown };
+        if (parsed.status === "all" || STATUS_OPTIONS.some((option) => option.value === parsed.status)) {
+          setStatusFilter(parsed.status as TaskStatus | "all");
+        }
+        if (
+          typeof parsed.category === "string" &&
+          (parsed.category === "all" || parsed.category === UNCATEGORIZED_VALUE || /^\d+$/.test(parsed.category))
+        ) {
+          setCategoryFilter(parsed.category);
+        }
+      } catch {
+        // Ignore malformed or legacy preferences and retain the defaults.
+      }
+    }
+    setFiltersHydrated(true);
+  }, []);
+
+  React.useEffect(() => {
+    if (!filtersHydrated) return;
+    setLocalStorageValue(
+      TASK_FILTER_PREFERENCE_KEY,
+      JSON.stringify({ status: statusFilter, category: categoryFilter }),
+    );
+  }, [categoryFilter, filtersHydrated, statusFilter]);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -426,7 +469,10 @@ export default function TasksPage() {
   const loadCategories = React.useCallback(() => {
     api
       .taskCategories()
-      .then(setCategories)
+      .then((next) => {
+        setCategories(next);
+        setCategoriesLoaded(true);
+      })
       .catch(() => {
         // Category management remains retryable without blocking the task list.
       });
@@ -460,9 +506,10 @@ export default function TasksPage() {
   );
 
   React.useEffect(() => {
+    if (!categoriesLoaded) return;
     if (categoryFilter === "all" || categoryFilter === UNCATEGORIZED_VALUE) return;
     if (!categories.some((category) => String(category.id) === categoryFilter)) setCategoryFilter("all");
-  }, [categories, categoryFilter]);
+  }, [categories, categoriesLoaded, categoryFilter]);
 
   // 只在确有 running 任务时才每秒 tick——其余情况「运行时长」是静态值,空转的 tick 会白白
   // 重渲染整张表。
@@ -546,6 +593,22 @@ export default function TasksPage() {
     [load],
   );
 
+  const queueTaskArchive = React.useCallback(
+    async (task: Task) => {
+      try {
+        await api.archiveTask(task.id);
+        toast.success(`任务 #${task.id} 已进入归档队列`);
+        setActiveTab("archived");
+        lastRef.current = "";
+        load();
+      } catch (error) {
+        toast.error(`归档失败：${(error as Error).message}`);
+        throw error;
+      }
+    },
+    [load],
+  );
+
   // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
   // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
   const deleteTasks = React.useCallback(
@@ -614,6 +677,30 @@ export default function TasksPage() {
     () => selectedTasks.filter((task) => taskControlAction(task.status) === "resume").map((task) => task.id),
     [selectedTasks],
   );
+  const archivableTaskIDs = React.useMemo(
+    () => selectedTasks.filter((task) => ARCHIVABLE_STATUSES.has(task.status) && !task.queued).map((task) => task.id),
+    [selectedTasks],
+  );
+
+  const archiveSelectedTasks = React.useCallback(async () => {
+    if (archivableTaskIDs.length === 0) return;
+    const result = await api.archiveTasks(archivableTaskIDs);
+    const succeeded = result.items.filter((item) => item.ok);
+    const failed = result.items.filter((item) => !item.ok);
+    if (succeeded.length > 0) toast.success(`已将 ${succeeded.length} 个任务加入归档队列`);
+    if (failed.length > 0) {
+      toast.error(
+        `${failed.length} 个任务无法归档：${failed
+          .slice(0, 3)
+          .map((item) => `#${item.id}（${item.error || "状态已变化"}）`)
+          .join("；")}`,
+      );
+    }
+    setSelectedIds(new Set());
+    setActiveTab("archived");
+    lastRef.current = "";
+    load();
+  }, [archivableTaskIDs, load]);
 
   const controlSelectedTasks = React.useCallback(
     async (action: "pause" | "resume", ids: string[]) => {
@@ -689,213 +776,237 @@ export default function TasksPage() {
   );
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 px-0 pt-6">
-        <div className="flex flex-wrap items-center gap-2 px-4 lg:px-6">
-          <div className="relative w-full sm:max-w-xs">
-            <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
-            <Input
-              placeholder="搜索描述 / 目标 / ID"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="pl-8"
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => setQuery("")}
-                aria-label="清除搜索"
-                className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
-              >
-                <XIcon className="size-4" />
-              </button>
-            )}
-          </div>
-          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as TaskStatus | "all")}>
-            <SelectTrigger className="w-36">
-              <SelectValue placeholder="状态" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                <SelectItem value="all">全部状态</SelectItem>
-                {STATUS_OPTIONS.map((s) => (
-                  <SelectItem key={s.value} value={s.value}>
-                    {s.label}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-            <SelectTrigger className="w-40">
-              <SelectValue placeholder="任务分类" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                <SelectItem value="all">全部分类</SelectItem>
-                <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
-                {categories.map((category) => (
-                  <SelectItem key={category.id} value={String(category.id)}>
-                    {category.name}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <span className="text-muted-foreground text-xs tabular-nums">
-            {filtered.length}/{tasks.length} 条
-          </span>
-          {selectedIds.size > 0 && (
-            <>
-              <span className="text-xs tabular-nums">已选 {selectedIds.size} 个</span>
-              <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
-                取消选择
-              </Button>
-              {pausableTaskIDs.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={batchControlling !== null}
-                  onClick={() => void controlSelectedTasks("pause", pausableTaskIDs)}
-                >
-                  {batchControlling === "pause" ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <PauseIcon data-icon="inline-start" />
+    <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
+      <TabsList className="mx-4 lg:mx-6">
+        <TabsTrigger value="current">当前任务</TabsTrigger>
+        <TabsTrigger value="archived">已归档</TabsTrigger>
+      </TabsList>
+      <TabsContent value="current">
+        <Card>
+          <CardContent className="flex flex-col gap-4 px-0 pt-6">
+            <div className="flex flex-wrap items-center gap-2 px-4 lg:px-6">
+              <div className="relative w-full sm:max-w-xs">
+                <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+                <Input
+                  placeholder="搜索描述 / 目标 / ID"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="pl-8"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label="清除搜索"
+                    className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
+                  >
+                    <XIcon className="size-4" />
+                  </button>
+                )}
+              </div>
+              <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as TaskStatus | "all")}>
+                <SelectTrigger className="w-36">
+                  <SelectValue placeholder="状态" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="all">全部状态</SelectItem>
+                    {STATUS_OPTIONS.map((s) => (
+                      <SelectItem key={s.value} value={s.value}>
+                        {s.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                <SelectTrigger className="w-40">
+                  <SelectValue placeholder="任务分类" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="all">全部分类</SelectItem>
+                    <SelectItem value={UNCATEGORIZED_VALUE}>未分类</SelectItem>
+                    {categories.map((category) => (
+                      <SelectItem key={category.id} value={String(category.id)}>
+                        {category.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <span className="text-muted-foreground text-xs tabular-nums">
+                {filtered.length}/{tasks.length} 条
+              </span>
+              {selectedIds.size > 0 && (
+                <>
+                  <span className="text-xs tabular-nums">已选 {selectedIds.size} 个</span>
+                  <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                    取消选择
+                  </Button>
+                  {pausableTaskIDs.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={batchControlling !== null}
+                      onClick={() => void controlSelectedTasks("pause", pausableTaskIDs)}
+                    >
+                      {batchControlling === "pause" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <PauseIcon data-icon="inline-start" />
+                      )}
+                      暂停 {pausableTaskIDs.length}
+                    </Button>
                   )}
-                  暂停 {pausableTaskIDs.length}
-                </Button>
-              )}
-              {resumableTaskIDs.length > 0 && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={batchControlling !== null}
-                  onClick={() => void controlSelectedTasks("resume", resumableTaskIDs)}
-                >
-                  {batchControlling === "resume" ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <PlayIcon data-icon="inline-start" />
+                  {resumableTaskIDs.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={batchControlling !== null}
+                      onClick={() => void controlSelectedTasks("resume", resumableTaskIDs)}
+                    >
+                      {batchControlling === "resume" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <PlayIcon data-icon="inline-start" />
+                      )}
+                      继续 {resumableTaskIDs.length}
+                    </Button>
                   )}
-                  继续 {resumableTaskIDs.length}
-                </Button>
-              )}
-              <MoveTasksCategoryDialog
-                categories={categories}
-                count={selectedIds.size}
-                moving={movingCategory}
-                onMove={moveSelectedTasksCategory}
-              />
-              <BulkDeleteTasksDialog ids={[...selectedIds]} onDelete={deleteTasks} />
-            </>
-          )}
-          <ConcurrencySettingsDialog />
-          <CategoryManagementSheet
-            categories={categories}
-            tasks={tasks}
-            onChanged={refreshCategoriesAndTasks}
-            onTaskMoved={applyTaskCategoryMove}
-          />
-          <CreateTaskSheet
-            tasks={tasks}
-            categories={categories}
-            onCreated={refreshCategoriesAndTasks}
-            onCategoriesChanged={refreshCategoriesAndTasks}
-          />
-        </div>
-
-        {tasks.length === 0 ? (
-          <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
-            暂无任务，点击右上角「新建任务」开始。
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
-            没有匹配的任务。
-          </div>
-        ) : (
-          <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
-            <TableHeader className="[&_tr]:border-t">
-              <TableRow>
-                <TableHead className="w-10">
-                  <Checkbox
-                    checked={headerChecked}
-                    onCheckedChange={(checked) => toggleSelectedPage(checked === true)}
-                    aria-label="选择本页全部任务"
+                  {archivableTaskIDs.length > 0 && (
+                    <ArchiveConfirmDialog
+                      count={archivableTaskIDs.length}
+                      onConfirm={archiveSelectedTasks}
+                      trigger={
+                        <Button size="sm" variant="outline">
+                          <ArchiveIcon data-icon="inline-start" />
+                          归档 {archivableTaskIDs.length}
+                        </Button>
+                      }
+                    />
+                  )}
+                  <MoveTasksCategoryDialog
+                    categories={categories}
+                    count={selectedIds.size}
+                    moving={movingCategory}
+                    onMove={moveSelectedTasksCategory}
                   />
-                </TableHead>
-                <SortableTaskHead
-                  field="id"
-                  label="ID"
-                  activeField={sortField}
-                  direction={sortDirection}
-                  className="font-mono"
-                  onSort={sortTasksBy}
-                />
-                <TableHead>名称</TableHead>
-                <TableHead>描述</TableHead>
-                <TableHead>目标</TableHead>
-                <SortableTaskHead
-                  field="status"
-                  label="状态"
-                  activeField={sortField}
-                  direction={sortDirection}
-                  onSort={sortTasksBy}
-                />
-                <TableHead className="text-center">目标进度</TableHead>
-                <SortableTaskHead
-                  field="created"
-                  label="创建时间"
-                  activeField={sortField}
-                  direction={sortDirection}
-                  align="right"
-                  onSort={sortTasksBy}
-                />
-                <SortableTaskHead
-                  field="duration"
-                  label="运行时长"
-                  activeField={sortField}
-                  direction={sortDirection}
-                  align="right"
-                  onSort={sortTasksBy}
-                />
-                <TableHead className="text-right">Token</TableHead>
-                <TableHead className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))]">
-                  操作
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {paginated.map((task) => (
-                <TaskRow
-                  key={task.id}
-                  task={task}
-                  // running 任务才吃 nowSec;其余行传 0 —— props 不变,memo 就能拦下每秒 tick
-                  // 带来的整表重渲染,只让在跑的那几行走时长。
-                  nowSec={task.status === "running" ? nowSec : 0}
-                  onDelete={deleteTask}
-                  onControl={controlTask}
-                  onRename={renameTask}
-                  onTogglePinned={toggleTaskPinned}
-                  selected={selectedIds.has(task.id)}
-                  onSelectedChange={toggleSelected}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        )}
-        <TablePagination
-          page={page}
-          pageSize={pageSize}
-          total={filtered.length}
-          onPageChange={setPage}
-          onPageSizeChange={(nextPageSize) => {
-            setPageSize(nextPageSize);
-            setPage(1);
-          }}
-        />
-      </CardContent>
-    </Card>
+                  <BulkDeleteTasksDialog ids={[...selectedIds]} onDelete={deleteTasks} />
+                </>
+              )}
+              <ConcurrencySettingsDialog />
+              <CategoryManagementSheet
+                categories={categories}
+                tasks={tasks}
+                onChanged={refreshCategoriesAndTasks}
+                onTaskMoved={applyTaskCategoryMove}
+              />
+              <CreateTaskSheet
+                tasks={tasks}
+                categories={categories}
+                onCreated={refreshCategoriesAndTasks}
+                onCategoriesChanged={refreshCategoriesAndTasks}
+              />
+            </div>
+
+            {tasks.length === 0 ? (
+              <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
+                暂无任务，点击右上角「新建任务」开始。
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
+                没有匹配的任务。
+              </div>
+            ) : (
+              <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
+                <TableHeader className="[&_tr]:border-t">
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={headerChecked}
+                        onCheckedChange={(checked) => toggleSelectedPage(checked === true)}
+                        aria-label="选择本页全部任务"
+                      />
+                    </TableHead>
+                    <SortableTaskHead
+                      field="id"
+                      label="ID"
+                      activeField={sortField}
+                      direction={sortDirection}
+                      className="font-mono"
+                      onSort={sortTasksBy}
+                    />
+                    <TableHead>名称</TableHead>
+                    <TableHead>描述</TableHead>
+                    <TableHead>目标</TableHead>
+                    <SortableTaskHead
+                      field="status"
+                      label="状态"
+                      activeField={sortField}
+                      direction={sortDirection}
+                      onSort={sortTasksBy}
+                    />
+                    <TableHead className="text-center">目标进度</TableHead>
+                    <SortableTaskHead
+                      field="created"
+                      label="创建时间"
+                      activeField={sortField}
+                      direction={sortDirection}
+                      align="right"
+                      onSort={sortTasksBy}
+                    />
+                    <SortableTaskHead
+                      field="duration"
+                      label="运行时长"
+                      activeField={sortField}
+                      direction={sortDirection}
+                      align="right"
+                      onSort={sortTasksBy}
+                    />
+                    <TableHead className="text-right">Token</TableHead>
+                    <TableHead className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))]">
+                      操作
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {paginated.map((task) => (
+                    <TaskRow
+                      key={task.id}
+                      task={task}
+                      // running 任务才吃 nowSec;其余行传 0 —— props 不变,memo 就能拦下每秒 tick
+                      // 带来的整表重渲染,只让在跑的那几行走时长。
+                      nowSec={task.status === "running" ? nowSec : 0}
+                      onDelete={deleteTask}
+                      onControl={controlTask}
+                      onRename={renameTask}
+                      onTogglePinned={toggleTaskPinned}
+                      onArchive={queueTaskArchive}
+                      selected={selectedIds.has(task.id)}
+                      onSelectedChange={toggleSelected}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+            <TablePagination
+              page={page}
+              pageSize={pageSize}
+              total={filtered.length}
+              onPageChange={setPage}
+              onPageSizeChange={(nextPageSize) => {
+                setPageSize(nextPageSize);
+                setPage(1);
+              }}
+            />
+          </CardContent>
+        </Card>
+      </TabsContent>
+      <TabsContent value="archived">
+        <TaskArchivesPanel onChanged={load} />
+      </TabsContent>
+    </Tabs>
   );
 }
 
@@ -1046,6 +1157,7 @@ const TaskRow = React.memo(function TaskRow({
   onControl,
   onRename,
   onTogglePinned,
+  onArchive,
   selected,
   onSelectedChange,
 }: {
@@ -1055,6 +1167,7 @@ const TaskRow = React.memo(function TaskRow({
   onControl: (id: string, action: "pause" | "resume") => Promise<void>;
   onRename: (task: Task, name: string) => Promise<void>;
   onTogglePinned: (task: Task) => Promise<void>;
+  onArchive: (task: Task) => Promise<void>;
   selected: boolean;
   onSelectedChange: (id: string, checked: boolean) => void;
 }) {
@@ -1140,6 +1253,7 @@ const TaskRow = React.memo(function TaskRow({
           </Button>
           <TaskControlButton task={task} onControl={onControl} />
           <TaskPinAction task={task} onTogglePinned={onTogglePinned} />
+          <TaskArchiveAction task={task} onArchive={onArchive} />
           <DeleteTaskDialog task={task} onDelete={onDelete} />
         </div>
       </TableCell>
@@ -1147,13 +1261,7 @@ const TaskRow = React.memo(function TaskRow({
   );
 });
 
-function TaskNameEditor({
-  task,
-  onRename,
-}: {
-  task: Task;
-  onRename: (task: Task, name: string) => Promise<void>;
-}) {
+function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task, name: string) => Promise<void> }) {
   const [editing, setEditing] = React.useState(false);
   const [name, setName] = React.useState(task.name ?? "");
   const [saving, setSaving] = React.useState(false);
@@ -1253,13 +1361,7 @@ function taskPinIcon(pinning: boolean, pinned: boolean) {
   return <PinIcon />;
 }
 
-function TaskPinAction({
-  task,
-  onTogglePinned,
-}: {
-  task: Task;
-  onTogglePinned: (task: Task) => Promise<void>;
-}) {
+function TaskPinAction({ task, onTogglePinned }: { task: Task; onTogglePinned: (task: Task) => Promise<void> }) {
   const [pinning, setPinning] = React.useState(false);
   const pinned = taskIsPinned(task);
 
@@ -1323,6 +1425,553 @@ function TaskControlButton({
     >
       {taskControlIcon(pending, action)}
     </Button>
+  );
+}
+
+function archiveBlockReason(task: Task): string {
+  if (task.queued) return "排队中的任务必须先暂停";
+  if (!ARCHIVABLE_STATUSES.has(task.status)) return "运行中或尚未结束的任务必须先暂停";
+  if (task.archive_blocked_by_task_id) {
+    return `任务被未归档任务 #${task.archive_blocked_by_task_id} 直接继承，请先归档依赖任务`;
+  }
+  return "";
+}
+
+function ArchiveConfirmDialog({
+  count,
+  trigger,
+  onConfirm,
+}: {
+  count: number;
+  trigger: React.ReactNode;
+  onConfirm: () => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !pending && setOpen(next)}>
+      <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{count === 1 ? "归档任务" : `归档 ${count} 个任务`}</AlertDialogTitle>
+          <AlertDialogDescription className="[overflow-wrap:anywhere]">
+            归档会停止任务调度，将图谱、LLM 历史、文件以及独占资产和流量压缩到本地冷存储。归档完成后可从“已归档”中还原。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={pending}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={pending}
+            onClick={async (event) => {
+              event.preventDefault();
+              setPending(true);
+              try {
+                await onConfirm();
+                setOpen(false);
+              } finally {
+                setPending(false);
+              }
+            }}
+          >
+            {pending && <Spinner data-icon="inline-start" />}
+            确认归档
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function TaskArchiveAction({ task, onArchive }: { task: Task; onArchive: (task: Task) => Promise<void> }) {
+  const reason = archiveBlockReason(task);
+  const trigger = (
+    <Button size="icon" variant="ghost" disabled={Boolean(reason)} aria-label={`归档任务 #${task.id}`}>
+      <ArchiveIcon />
+    </Button>
+  );
+  if (reason) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">{trigger}</span>
+        </TooltipTrigger>
+        <TooltipContent>{reason}</TooltipContent>
+      </Tooltip>
+    );
+  }
+  return <ArchiveConfirmDialog count={1} trigger={trigger} onConfirm={() => onArchive(task)} />;
+}
+
+const ARCHIVE_PROCESSING_STATES = new Set<TaskArchiveState>([
+  "archive_queued",
+  "archiving",
+  "restore_queued",
+  "restoring",
+  "delete_queued",
+  "deleting",
+]);
+
+const ARCHIVE_FAILED_STATES = new Set<TaskArchiveState>(["archive_failed", "restore_failed", "delete_failed"]);
+
+function archiveStateLabel(state: TaskArchiveState): string {
+  const labels: Record<TaskArchiveState, string> = {
+    archive_queued: "等待归档",
+    archiving: "归档中",
+    archive_failed: "归档失败",
+    ready: "可还原",
+    restore_queued: "等待还原",
+    restoring: "还原中",
+    restore_failed: "还原失败",
+    delete_queued: "等待删除",
+    deleting: "删除中",
+    delete_failed: "删除失败",
+  };
+  return labels[state];
+}
+
+function ArchiveStateBadge({ state }: { state: TaskArchiveState }) {
+  let variant: "default" | "secondary" | "destructive" | "outline" = "outline";
+  if (state === "ready") variant = "secondary";
+  if (ARCHIVE_PROCESSING_STATES.has(state)) variant = "default";
+  if (ARCHIVE_FAILED_STATES.has(state)) variant = "destructive";
+  return <Badge variant={variant}>{archiveStateLabel(state)}</Badge>;
+}
+
+function formatArchiveBytes(bytes: number): string {
+  if (bytes <= 0) return "—";
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function archiveCompressionLabel(archive: TaskArchive): string {
+  if (archive.original_size <= 0 || archive.compressed_size <= 0) return "—";
+  const saved = Math.max(0, 100 - (archive.compressed_size / archive.original_size) * 100);
+  return `${formatArchiveBytes(archive.compressed_size)} · 节省 ${saved.toFixed(0)}%`;
+}
+
+function archiveDataTotal(archive: TaskArchive): number {
+  return Object.values(archive.data_counts).reduce((sum, value) => sum + (Number(value) || 0), 0);
+}
+
+function archiveDate(value?: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString();
+}
+
+function ArchiveDeleteDialog({
+  archives,
+  onConfirm,
+  trigger,
+}: {
+  archives: TaskArchive[];
+  onConfirm: () => Promise<void>;
+  trigger: React.ReactNode;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+  const rows = archives.reduce((sum, archive) => sum + archiveDataTotal(archive), 0);
+  const bytes = archives.reduce((sum, archive) => sum + archive.compressed_size, 0);
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !pending && setOpen(next)}>
+      <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>永久删除 {archives.length} 个任务归档？</AlertDialogTitle>
+          <AlertDialogDescription className="[overflow-wrap:anywhere]">
+            将永久删除约 {formatArchiveBytes(bytes)} 的归档包及 {rows.toLocaleString()} 条关联数据快照。此操作不可恢复。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={pending}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={pending}
+            onClick={async (event) => {
+              event.preventDefault();
+              setPending(true);
+              try {
+                await onConfirm();
+                setOpen(false);
+              } finally {
+                setPending(false);
+              }
+            }}
+          >
+            {pending && <Spinner data-icon="inline-start" />}
+            永久删除
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
+  const [archives, setArchives] = React.useState<TaskArchive[]>([]);
+  const [query, setQuery] = React.useState("");
+  const [stateFilter, setStateFilter] = React.useState("all");
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(20);
+  const [total, setTotal] = React.useState(0);
+  const [selected, setSelected] = React.useState<Set<number>>(() => new Set());
+  const [loading, setLoading] = React.useState(true);
+  const pendingRestoreIDs = React.useRef(new Set<number>());
+
+  const load = React.useCallback(async () => {
+    try {
+      const result = await api.taskArchives({
+        page,
+        size: pageSize,
+        q: query.trim(),
+        state: stateFilter === "all" ? undefined : stateFilter,
+      });
+      setArchives(result.items);
+      setTotal(result.total);
+      setSelected((current) => {
+        const visible = new Set(result.items.map((archive) => archive.id));
+        return new Set([...current].filter((id) => visible.has(id)));
+      });
+      const pending = [...pendingRestoreIDs.current];
+      if (pending.length > 0) {
+        const states = await Promise.allSettled(pending.map((id) => api.taskArchive(id)));
+        let restored = false;
+        states.forEach((state, index) => {
+          if (state.status !== "rejected" || !(state.reason instanceof Error)) return;
+          if (!state.reason.message.includes("归档不存在")) return;
+          pendingRestoreIDs.current.delete(pending[index]);
+          restored = true;
+        });
+        if (restored) onChanged();
+      }
+    } catch (error) {
+      toast.error(`读取归档列表失败：${(error as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [onChanged, page, pageSize, query, stateFilter]);
+
+  React.useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 2_000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const selectable = React.useMemo(
+    () => archives.filter((archive) => !ARCHIVE_PROCESSING_STATES.has(archive.state)),
+    [archives],
+  );
+  const selectedArchives = React.useMemo(
+    () => archives.filter((archive) => selected.has(archive.id)),
+    [archives, selected],
+  );
+  const restorable = selectedArchives.filter(
+    (archive) => archive.state === "ready" || archive.state === "restore_failed",
+  );
+  const deletable = selectedArchives.filter(
+    (archive) => archive.state === "ready" || archive.state === "delete_failed",
+  );
+  const selectedAll = selectable.length > 0 && selectable.every((archive) => selected.has(archive.id));
+  const selectedSome = selectable.some((archive) => selected.has(archive.id));
+
+  const afterAction = React.useCallback(() => {
+    setSelected(new Set());
+    void load();
+    onChanged();
+  }, [load, onChanged]);
+
+  async function restoreMany(items: TaskArchive[]) {
+    try {
+      const result =
+        items.length === 1
+          ? {
+              items: [
+                {
+                  id: String(items[0].id),
+                  ok: true,
+                  queued: true,
+                  archive_id: (await api.restoreTaskArchive(items[0].id)).id,
+                },
+              ],
+            }
+          : await api.restoreTaskArchives(items.map((archive) => archive.id));
+      const succeeded = result.items.filter((item) => item.ok).length;
+      const failed = result.items.length - succeeded;
+      for (const item of result.items) {
+        const archiveID = Number(item.archive_id ?? item.id);
+        if (item.ok && Number.isSafeInteger(archiveID) && archiveID > 0) pendingRestoreIDs.current.add(archiveID);
+      }
+      if (succeeded > 0) toast.success(`已将 ${succeeded} 个任务加入还原队列`);
+      if (failed > 0) toast.error(`${failed} 个任务无法还原`);
+      afterAction();
+    } catch (error) {
+      toast.error(`还原失败：${(error as Error).message}`);
+    }
+  }
+
+  async function deleteMany(items: TaskArchive[]) {
+    try {
+      const result =
+        items.length === 1
+          ? {
+              items: [
+                {
+                  id: String(items[0].id),
+                  ok: true,
+                  queued: true,
+                  archive_id: (await api.deleteTaskArchive(items[0].id)).id,
+                },
+              ],
+            }
+          : await api.deleteTaskArchives(items.map((archive) => archive.id));
+      const succeeded = result.items.filter((item) => item.ok).length;
+      const failed = result.items.length - succeeded;
+      if (succeeded > 0) toast.success(`已将 ${succeeded} 个归档加入永久删除队列`);
+      if (failed > 0) toast.error(`${failed} 个归档无法删除`);
+      afterAction();
+    } catch (error) {
+      toast.error(`永久删除失败：${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  async function retry(archive: TaskArchive) {
+    try {
+      if (archive.state === "archive_failed") await api.archiveTask(String(archive.task_id));
+      if (archive.state === "restore_failed") await api.restoreTaskArchive(archive.id);
+      if (archive.state === "delete_failed") await api.deleteTaskArchive(archive.id);
+      toast.success("已重新加入处理队列");
+      afterAction();
+    } catch (error) {
+      toast.error(`重试失败：${(error as Error).message}`);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4 px-0 pt-6">
+        <div className="flex flex-wrap items-center gap-2 px-4 lg:px-6">
+          <div className="relative w-full sm:max-w-xs">
+            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder="搜索任务名称 / 描述 / ID"
+              className="pl-8"
+            />
+          </div>
+          <Select
+            value={stateFilter}
+            onValueChange={(value) => {
+              setStateFilter(value);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="w-36">
+              <SelectValue placeholder="处理状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="archive_queued">等待归档</SelectItem>
+                <SelectItem value="archiving">归档中</SelectItem>
+                <SelectItem value="ready">可还原</SelectItem>
+                <SelectItem value="restore_queued">等待还原</SelectItem>
+                <SelectItem value="restoring">还原中</SelectItem>
+                <SelectItem value="delete_queued">等待删除</SelectItem>
+                <SelectItem value="deleting">删除中</SelectItem>
+                <SelectItem value="archive_failed">归档失败</SelectItem>
+                <SelectItem value="restore_failed">还原失败</SelectItem>
+                <SelectItem value="delete_failed">删除失败</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <span className="text-muted-foreground text-xs tabular-nums">{total} 个归档</span>
+          {selectedArchives.length > 0 && (
+            <>
+              <span className="text-xs tabular-nums">已选 {selectedArchives.length} 个</span>
+              {restorable.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => void restoreMany(restorable)}>
+                  <Undo2Icon data-icon="inline-start" />
+                  还原 {restorable.length}
+                </Button>
+              )}
+              {deletable.length > 0 && (
+                <ArchiveDeleteDialog
+                  archives={deletable}
+                  onConfirm={() => deleteMany(deletable)}
+                  trigger={
+                    <Button size="sm" variant="destructive">
+                      <Trash2Icon data-icon="inline-start" />
+                      永久删除 {deletable.length}
+                    </Button>
+                  }
+                />
+              )}
+            </>
+          )}
+        </div>
+        {loading ? (
+          <div className="flex justify-center py-20">
+            <Spinner />
+          </div>
+        ) : archives.length === 0 ? (
+          <Empty className="mx-4 border border-dashed lg:mx-6">
+            <EmptyHeader>
+              <EmptyTitle>暂无任务归档</EmptyTitle>
+              <EmptyDescription>暂停或终态任务可从当前任务列表归档。</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
+            <TableHeader className="[&_tr]:border-t">
+              <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={selectedAll || (selectedSome ? "indeterminate" : false)}
+                    onCheckedChange={(checked) =>
+                      setSelected(checked === true ? new Set(selectable.map((archive) => archive.id)) : new Set())
+                    }
+                    aria-label="选择当前页归档"
+                  />
+                </TableHead>
+                <TableHead>任务</TableHead>
+                <TableHead>原状态</TableHead>
+                <TableHead>分类</TableHead>
+                <TableHead>归档时间</TableHead>
+                <TableHead>压缩大小</TableHead>
+                <TableHead>数据量</TableHead>
+                <TableHead className="min-w-44">处理状态</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {archives.map((archive) => {
+                const processing = ARCHIVE_PROCESSING_STATES.has(archive.state);
+                const canRestore = archive.state === "ready" || archive.state === "restore_failed";
+                const canDelete = archive.state === "ready" || archive.state === "delete_failed";
+                return (
+                  <TableRow key={archive.id} data-state={selected.has(archive.id) ? "selected" : undefined}>
+                    <TableCell>
+                      <Checkbox
+                        checked={selected.has(archive.id)}
+                        disabled={processing}
+                        onCheckedChange={(checked) =>
+                          setSelected((current) => {
+                            const next = new Set(current);
+                            if (checked === true) next.add(archive.id);
+                            else next.delete(archive.id);
+                            return next;
+                          })
+                        }
+                        aria-label={`选择任务归档 #${archive.task_id}`}
+                      />
+                    </TableCell>
+                    <TableCell className="max-w-sm">
+                      <div className="flex min-w-0 flex-col gap-0.5">
+                        <span className="truncate font-medium">
+                          {archive.task_name || archive.task_description || `任务 #${archive.task_id}`}
+                        </span>
+                        <span className="text-muted-foreground truncate text-xs">
+                          #{archive.task_id} · {archive.task_description}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge domain="task" value={archive.original_status} dot />
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">{archive.category_name || "未分类"}</TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap text-xs">
+                      {archiveDate(archive.archived_at || archive.requested_at)}
+                    </TableCell>
+                    <TableCell
+                      className="whitespace-nowrap text-xs"
+                      title={`压缩前 ${formatArchiveBytes(archive.original_size)}`}
+                    >
+                      {archiveCompressionLabel(archive)}
+                    </TableCell>
+                    <TableCell className="text-xs tabular-nums">{archiveDataTotal(archive).toLocaleString()}</TableCell>
+                    <TableCell>
+                      <div className="flex min-w-0 flex-col gap-1.5">
+                        <ArchiveStateBadge state={archive.state} />
+                        {processing && <Progress value={archive.progress} />}
+                        {archive.error && (
+                          <p className="text-destructive text-xs [overflow-wrap:anywhere]">{archive.error}</p>
+                        )}
+                        {[...new Set(archive.warnings ?? [])].map((warning) => (
+                          <p
+                            key={warning}
+                            className="text-amber-700 text-xs [overflow-wrap:anywhere] dark:text-amber-400"
+                          >
+                            {warning}
+                          </p>
+                        ))}
+                        <span className="text-muted-foreground text-xs">
+                          {archive.phase} · {archive.progress}%
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-0.5">
+                        {ARCHIVE_FAILED_STATES.has(archive.state) && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => void retry(archive)}
+                            aria-label="重试归档操作"
+                            title="重试"
+                          >
+                            <Undo2Icon />
+                          </Button>
+                        )}
+                        {canRestore && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => void restoreMany([archive])}
+                            aria-label="还原任务"
+                            title="还原任务"
+                          >
+                            <Undo2Icon />
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <ArchiveDeleteDialog
+                            archives={[archive]}
+                            onConfirm={() => deleteMany([archive])}
+                            trigger={
+                              <Button size="icon" variant="ghost" aria-label="永久删除归档" title="永久删除">
+                                <Trash2Icon />
+                              </Button>
+                            }
+                          />
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={total}
+          onPageChange={setPage}
+          onPageSizeChange={(size) => {
+            setPageSize(size);
+            setPage(1);
+          }}
+        />
+      </CardContent>
+    </Card>
   );
 }
 

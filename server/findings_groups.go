@@ -37,6 +37,7 @@ func (s *Server) findingGroups(w http.ResponseWriter, r *http.Request) {
 		Status:    normFilter(q.Get("status")),
 		VulnClass: normFilter(q.Get("vulnclass")),
 		TaskID:    normFilter(q.Get("task_id")),
+		Query:     q.Get("q"),
 		Sort:      q.Get("sort"),
 	}
 	groups, total, findingTotal, err := s.m.pg.ListFindingGroups(filter, page, limit)

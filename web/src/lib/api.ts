@@ -10,6 +10,7 @@ import type {
   Agent,
   AgentDetail,
   AgentTrigger,
+  ArchiveBatchItem,
   Asset,
   Audit,
   BatchCategoryItem,
@@ -59,6 +60,8 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskArchive,
+  TaskArchivePage,
   TaskAssetMutation,
   TaskAssetScopeMutation,
   TaskCategory,
@@ -253,6 +256,27 @@ export const api = {
     post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
     post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
+  taskArchives: (input?: { page?: number; size?: number; q?: string; state?: string }) => {
+    const query = new URLSearchParams();
+    query.set("page", String(input?.page ?? 1));
+    query.set("size", String(input?.size ?? 20));
+    if (input?.q) query.set("q", input.q);
+    if (input?.state) query.set("state", input.state);
+    return get<TaskArchivePage>(`/task-archives?${query.toString()}`).then((response) => ({
+      ...response,
+      items: arr(response.items),
+    }));
+  },
+  taskArchive: (id: number) => get<TaskArchive>(`/task-archives/${id}`),
+  archiveTask: (id: string) => post<TaskArchive>(`/tasks/${id}/archive`),
+  archiveTasks: (taskIds: string[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/tasks/archive/batch", { task_ids: taskIds }),
+  restoreTaskArchive: (id: number) => post<TaskArchive>(`/task-archives/${id}/restore`),
+  restoreTaskArchives: (archiveIds: number[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/task-archives/restore/batch", { archive_ids: archiveIds }),
+  deleteTaskArchive: (id: number) => del<TaskArchive>(`/task-archives/${id}`),
+  deleteTaskArchives: (archiveIds: number[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/task-archives/delete/batch", { archive_ids: archiveIds }),
   controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel", reason?: string) =>
     post<{
       id: number;
@@ -429,6 +453,7 @@ export const api = {
     if (q.status && q.status !== "all") p.set("status", q.status);
     if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
     if (q.task && q.task !== "all") p.set("task_id", q.task);
+    if (q.query?.trim()) p.set("q", q.query.trim());
     if (q.sort) p.set("sort", q.sort);
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
@@ -438,6 +463,7 @@ export const api = {
     if (q.status && q.status !== "all") p.set("status", q.status);
     if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
     if (q.task && q.task !== "all") p.set("task_id", q.task);
+    if (q.query?.trim()) p.set("q", q.query.trim());
     if (q.sort) p.set("sort", q.sort);
     return get<FindingGroupsPage>(`/exploration/findings/groups?${p.toString()}`);
   },
@@ -459,6 +485,7 @@ export const api = {
       if (f.status && f.status !== "all") p.set("status", f.status);
       if (f.vulnclass && f.vulnclass !== "all") p.set("vulnclass", f.vulnclass);
       if (f.task && f.task !== "all") p.set("task_id", f.task);
+      if (f.query?.trim()) p.set("q", f.query.trim());
       if (f.sort) p.set("sort", f.sort);
     }
     const token = getToken();

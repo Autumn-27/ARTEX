@@ -129,6 +129,27 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
 
 const kindLabel = (k: string) => (k === "thinking" ? "推理" : k === "result" ? "总结" : "说明");
 
+function ActivityTime({ ts }: { ts: string }) {
+  const date = new Date(ts);
+  if (!ts || Number.isNaN(date.getTime())) return null;
+  return (
+    <time
+      dateTime={date.toISOString()}
+      title={date.toLocaleString("zh-CN")}
+      className="text-[10px] text-muted-foreground tabular-nums"
+      suppressHydrationWarning
+    >
+      {date.toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })}
+    </time>
+  );
+}
+
 // toolInputText renders a tool_use input for display. For Bash it pulls the shell
 // command out of the raw input JSON ({"command":…,"description":…}) so the UI shows
 // the command itself instead of JSON; other tools fall back to the raw text.
@@ -520,6 +541,7 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
             {text}
           </div>
         )}
+        <ActivityTime ts={step.ts} />
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
         <Icon className="size-3.5 text-primary" />
@@ -549,7 +571,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
     };
   }, [inView, step.seq, getDetail, step.summary]);
   return (
-    <div ref={ref} className="mb-2 mt-1 flex">
+    <div ref={ref} className="mb-2 mt-1 flex min-w-0 flex-col gap-1">
       <div
         className={
           "min-w-0 flex-1 break-words rounded-lg bg-muted px-3 py-2 " +
@@ -562,6 +584,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
           <Markdown text={full ?? step.summary} />
         )}
       </div>
+      <ActivityTime ts={step.ts} />
     </div>
   );
 }

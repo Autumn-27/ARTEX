@@ -3,6 +3,8 @@
 import * as React from "react";
 
 import {
+  ArrowDownWideNarrowIcon,
+  ArrowUpNarrowWideIcon,
   CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -291,6 +293,7 @@ function HttpCodeBlock({ raw }: { raw: string }) {
 // single page, which would only ever list the methods on that page.
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 const PAGE_SIZES = [25, 50, 100, 200];
+type HostCountSortDirection = "asc" | "desc";
 
 export default function TrafficPage() {
   const [page, setPage] = React.useState(0);
@@ -309,6 +312,7 @@ export default function TrafficPage() {
   const [hosts, setHosts] = React.useState<TrafficHost[]>([]); // target picker
   const [selectedHosts, setSelectedHosts] = React.useState<string[]>([]); // checked in picker
   const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [hostCountSortDirection, setHostCountSortDirection] = React.useState<HostCountSortDirection>("desc");
 
   const [deleteMode, setDeleteMode] = React.useState<"filter" | "selected" | null>(null); // null = dialog closed
   const [deleting, setDeleting] = React.useState(false);
@@ -367,6 +371,14 @@ export default function TrafficPage() {
   // Delete traffic for the current host filter (substring) or the checked
   // hosts (exact batch), then refetch.
   const allSelected = hosts.length > 0 && hosts.every((h) => selectedHosts.includes(h.host));
+  const sortedHosts = React.useMemo(
+    () =>
+      [...hosts].sort((a, b) => {
+        const countOrder = hostCountSortDirection === "asc" ? a.count - b.count : b.count - a.count;
+        return countOrder || a.host.localeCompare(b.host);
+      }),
+    [hosts, hostCountSortDirection],
+  );
 
   const confirmDelete = () => {
     setDeleting(true);
@@ -455,28 +467,49 @@ export default function TrafficPage() {
             </Button>
           </PopoverTrigger>
           <PopoverContent
-            className="w-80 p-0 data-open:animate-none data-closed:animate-none"
+            className="w-[calc(100vw-2rem)] p-0 data-open:animate-none data-closed:animate-none sm:w-80"
             align="start"
             collisionPadding={16}
           >
             <div className="flex items-center justify-between border-b px-3 py-2">
               <span className="text-xs font-medium text-muted-foreground">按目标批量删除</span>
-              {hosts.length > 0 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-xs"
-                  onClick={() => setSelectedHosts(allSelected ? [] : hosts.map((h) => h.host))}
-                >
-                  {allSelected ? "取消全选" : "全选"}
-                </Button>
-              )}
+              <div className="flex items-center gap-1">
+                {hosts.length > 0 && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        onClick={() => setHostCountSortDirection((current) => (current === "desc" ? "asc" : "desc"))}
+                        aria-label={
+                          hostCountSortDirection === "desc"
+                            ? "数据包数量当前倒序，点击切换为正序"
+                            : "数据包数量当前正序，点击切换为倒序"
+                        }
+                      >
+                        {hostCountSortDirection === "desc" ? <ArrowDownWideNarrowIcon /> : <ArrowUpNarrowWideIcon />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>按数据包数量{hostCountSortDirection === "desc" ? "倒序" : "正序"}</TooltipContent>
+                  </Tooltip>
+                )}
+                {hosts.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => setSelectedHosts(allSelected ? [] : hosts.map((h) => h.host))}
+                  >
+                    {allSelected ? "取消全选" : "全选"}
+                  </Button>
+                )}
+              </div>
             </div>
             <div className="max-h-64 overflow-y-auto">
               {hosts.length === 0 ? (
                 <div className="px-3 py-6 text-center text-xs text-muted-foreground">暂无流量记录</div>
               ) : (
-                hosts.map((h, index) => (
+                sortedHosts.map((h, index) => (
                   <label
                     key={h.host}
                     htmlFor={`traffic-host-${index}`}

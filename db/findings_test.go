@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,6 +172,33 @@ func TestFindingsPageAndStats(t *testing.T) {
 	if one, _ = d.GetFinding(ids[0]); one.Report != "# 报告\n正文" {
 		t.Fatalf("report not read back: %q", one.Report)
 	}
+	for _, test := range []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "name", query: "严重漏洞标题", want: 1},
+		{name: "summary", query: "summary", want: 6},
+		{name: "evidence", query: "poc", want: 6},
+		{name: "report", query: "正文", want: 1},
+		{name: "case insensitive vulnclass", query: strings.ToUpper(vc), want: 6},
+	} {
+		t.Run("query_"+test.name, func(t *testing.T) {
+			matches, searchTotal, searchErr := d.ListFindingsPage(
+				FindingFilter{VulnClass: vc, Query: test.query}, 1, 20,
+			)
+			if searchErr != nil || searchTotal != test.want || len(matches) != test.want {
+				t.Fatalf("query %q: len=%d total=%d err=%v, want %d", test.query, len(matches), searchTotal, searchErr, test.want)
+			}
+		})
+	}
+	if _, err := d.Exec(`UPDATE findings SET name=$1 WHERE id=$2`, "literal %_ marker", ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	matches, searchTotal, err := d.ListFindingsPage(FindingFilter{VulnClass: vc, Query: "%_"}, 1, 20)
+	if err != nil || searchTotal != 1 || len(matches) != 1 || matches[0].ID != ids[1] {
+		t.Fatalf("query wildcards must be literal: matches=%+v total=%d err=%v", matches, searchTotal, err)
+	}
 	if miss, err := d.GetFinding(-1); err != nil || miss != nil {
 		t.Fatalf("GetFinding(-1): want nil,nil got %+v,%v", miss, err)
 	}
@@ -276,6 +304,14 @@ func TestFindingGroupsAndUnassignedPaging(t *testing.T) {
 		if _, setErr := d.SetFindingStatus(id, item.status); setErr != nil {
 			t.Fatalf("SetFindingStatus[%d]: %v", i, setErr)
 		}
+	}
+	matchedGroups, matchedGroupTotal, matchedFindingTotal, err := d.ListFindingGroups(
+		FindingFilter{VulnClass: vc, Query: "summary 0"}, 1, 10,
+	)
+	if err != nil || matchedGroupTotal != 1 || matchedFindingTotal != 1 || len(matchedGroups) != 1 ||
+		matchedGroups[0].TaskID == nil || *matchedGroups[0].TaskID != taskA.ID {
+		t.Fatalf("query-filtered groups: %+v groups=%d findings=%d err=%v",
+			matchedGroups, matchedGroupTotal, matchedFindingTotal, err)
 	}
 	// Retained findings from deleted tasks join the same bucket as findings that
 	// were created without any task.

@@ -103,6 +103,28 @@ func TestFindingGroupsReturnsTaskBucketsAndNormalizesPagination(t *testing.T) {
 	}
 
 	request = httptest.NewRequest(http.MethodGet,
+		"/api/exploration/findings/groups?vulnclass="+marker+"&q=finding+2&page=1&limit=10", nil)
+	recorder = httptest.NewRecorder()
+	s.findingGroups(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("searched groups status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	page = struct {
+		Items        []db.FindingGroup `json:"items"`
+		Total        int               `json:"total"`
+		FindingTotal int               `json:"finding_total"`
+		Page         int               `json:"page"`
+		PageSize     int               `json:"page_size"`
+	}{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Total != 1 || page.FindingTotal != 1 || page.Items[0].TaskID == nil ||
+		*page.Items[0].TaskID != mustTaskID(t, taskB.ID) {
+		t.Fatalf("unexpected searched group page: %+v", page)
+	}
+
+	request = httptest.NewRequest(http.MethodGet,
 		"/api/exploration/findings/groups?vulnclass="+marker+"&page=-4&limit=0", nil)
 	recorder = httptest.NewRecorder()
 	s.findingGroups(recorder, request)

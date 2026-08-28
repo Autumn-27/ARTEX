@@ -56,8 +56,22 @@ type TaskDTO struct {
 	LLMFailoverState   string        `json:"llm_failover_state"`
 	LLMFailoverReason  string        `json:"llm_failover_reason,omitempty"`
 	SourceTaskIDs      []string      `json:"source_task_ids"`
+	ArchiveBlockedBy   string        `json:"archive_blocked_by_task_id,omitempty"`
 	CompanyIDs         []int64       `json:"company_ids"`
 	CoverageEnabled    bool          `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+}
+
+func applyTaskArchiveBlocker(dto *TaskDTO, blockers map[int64]int64) {
+	if dto == nil || len(blockers) == 0 {
+		return
+	}
+	taskID, err := strconv.ParseInt(dto.ID, 10, 64)
+	if err != nil {
+		return
+	}
+	if dependentID := blockers[taskID]; dependentID > 0 {
+		dto.ArchiveBlockedBy = strconv.FormatInt(dependentID, 10)
+	}
 }
 
 // TokenTotalDTO is a whole-task (all agents) token aggregate.

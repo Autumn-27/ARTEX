@@ -10,6 +10,7 @@ import {
   normalizeCompanyScopeValue,
 } from "../company-scope";
 import type {
+  ArchiveBatchItem,
   Asset,
   BatchControlItem,
   Company,
@@ -18,6 +19,7 @@ import type {
   IntentAsset,
   ScopeRow,
   Task,
+  TaskArchive,
   TaskAssetMutation,
   TaskAssetScopeMutation,
   TaskCategory,
@@ -40,6 +42,15 @@ const mockConversations = structuredClone(D.conversations);
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
+type MockTaskArchiveSnapshot = {
+  task: Task;
+  numericTaskID: number;
+  assetIDs: number[];
+  assetSources: Array<[number, MockTaskAssetSource]>;
+};
+type MockTaskArchive = TaskArchive & { snapshot: MockTaskArchiveSnapshot };
+const mockTaskArchives: MockTaskArchive[] = [];
+let nextMockTaskArchiveID = 1;
 const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
 const mockTaskScopes = new Map<string, TaskScopeRow[]>();
 type MockTaskAssetSource = Pick<Asset, "task_source" | "task_source_summary" | "task_source_node_id">;
@@ -49,6 +60,195 @@ let mockActiveTask = D.ACTIVE_TASK;
 
 function mockTaskAssetSourceKey(taskID: string, assetID: number): string {
   return JSON.stringify([taskID, assetID]);
+}
+
+function publicMockTaskArchive(archive: MockTaskArchive): TaskArchive {
+  const { snapshot: _snapshot, ...item } = archive;
+  return structuredClone(item);
+}
+
+function mockArchiveTaskID(taskID: string): number {
+  const numeric = Number(taskID);
+  if (Number.isSafeInteger(numeric) && numeric > 0) return numeric;
+  return mockTaskAssetID(taskID) ?? 0;
+}
+
+function mockTaskArchiveBlocker(taskID: string): string | undefined {
+  return mockTasks.find(
+    (candidate) =>
+      candidate.id !== taskID &&
+      (candidate.source_task_ids ?? []).map(String).includes(taskID) &&
+      !mockTaskArchives.some(
+        (archive) =>
+          archive.snapshot.task.id === candidate.id &&
+          (archive.state === "archive_queued" || archive.state === "archiving"),
+      ),
+  )?.id;
+}
+
+function publicMockTask(task: Task): Task {
+  const item = structuredClone(task);
+  const blocker = mockTaskArchiveBlocker(task.id);
+  if (blocker) item.archive_blocked_by_task_id = blocker;
+  else delete item.archive_blocked_by_task_id;
+  return item;
+}
+
+function mockArchiveTask(taskID: string): MockTaskArchive {
+  const task = mockTasks.find((item) => item.id === taskID);
+  if (!task) throw new Error("任务不存在");
+  if (!["paused", "done", "failed", "timeout"].includes(task.status) && !task.paused) {
+    throw new Error(task.queued ? "排队中的任务必须先暂停" : "运行中的任务必须先暂停");
+  }
+  const existing = mockTaskArchives.find((item) => item.task_id === mockArchiveTaskID(taskID));
+  if (existing) throw new Error("任务已经在归档队列中");
+  const dependent = mockTasks.find(
+    (candidate) =>
+      candidate.id !== taskID &&
+      (candidate.source_task_ids ?? []).map(String).includes(taskID) &&
+      !mockTaskArchives.some(
+        (archive) =>
+          archive.snapshot.task.id === candidate.id &&
+          (archive.state === "archive_queued" || archive.state === "archiving"),
+      ),
+  );
+  if (dependent) throw new Error(`任务被未归档任务 #${dependent.id} 直接继承，暂不能归档`);
+
+  const numericTaskID = mockArchiveTaskID(taskID);
+  const assetIDs = mockAssets.filter((asset) => asset.task_ids.includes(numericTaskID)).map((asset) => asset.id);
+  const assetSources: Array<[number, MockTaskAssetSource]> = [];
+  for (const assetID of assetIDs) {
+    const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, assetID));
+    if (source) assetSources.push([assetID, structuredClone(source)]);
+  }
+  const findings = mockFindings.filter((finding) => finding.task_id === taskID);
+  const llmRecords = mockLLMRecords.filter((record) => record.task_id === taskID);
+  const tokens = task.tokens ?? { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+  const now = new Date().toISOString();
+  const archive: MockTaskArchive = {
+    id: nextMockTaskArchiveID++,
+    task_id: numericTaskID,
+    state: "archive_queued",
+    phase: "等待归档",
+    progress: 0,
+    format_version: 1,
+    original_size: 0,
+    compressed_size: 0,
+    task_name: task.name ?? "",
+    task_description: task.description,
+    task_goal: task.goal,
+    original_status: task.status,
+    category_id: task.category_id,
+    category_name: task.category_name,
+    source_task_ids: (task.source_task_ids ?? []).map(mockArchiveTaskID).filter((id) => id > 0),
+    remaining_timeout_seconds: 0,
+    data_counts: {
+      assets: assetIDs.length,
+      findings: findings.length,
+      llm_records: llmRecords.length,
+    },
+    aggregate_stats: {
+      tokens: {
+        calls: llmRecords.length,
+        input_tokens: tokens.input_tokens,
+        output_tokens: tokens.output_tokens,
+        cache_read_tokens: tokens.cache_read_tokens,
+        cache_write_tokens: tokens.cache_write_tokens,
+      },
+      findings: findings.reduce<Record<string, number>>((counts, finding) => {
+        counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
+        return counts;
+      }, {}),
+    },
+    requested_at: now,
+    created_at: now,
+    updated_at: now,
+    snapshot: { task: structuredClone(task), numericTaskID, assetIDs, assetSources },
+  };
+  mockTaskArchives.unshift(archive);
+  setTimeout(() => {
+    if (archive.state !== "archive_queued") return;
+    archive.state = "archiving";
+    archive.phase = "压缩任务数据";
+    archive.progress = 55;
+    archive.updated_at = new Date().toISOString();
+  }, 100);
+  setTimeout(() => {
+    if (archive.state !== "archiving" && archive.state !== "archive_queued") return;
+    archive.state = "ready";
+    archive.phase = "归档完成";
+    archive.progress = 100;
+    archive.archived_at = new Date().toISOString();
+    archive.updated_at = archive.archived_at;
+    archive.original_size = Math.max(4096, JSON.stringify(archive.snapshot).length * 4);
+    archive.compressed_size = Math.max(1024, Math.round(archive.original_size * 0.32));
+    const index = mockTasks.findIndex((item) => item.id === taskID);
+    if (index >= 0) mockTasks.splice(index, 1);
+    for (const asset of mockAssets) asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
+    deleteMockTaskAssetSources(taskID);
+    if (mockActiveTask === taskID) {
+      mockActiveTask = mockTasks[0]?.id ?? "";
+      for (const item of mockTasks) item.active = item.id === mockActiveTask;
+    }
+  }, 500);
+  return archive;
+}
+
+function mockRestoreArchive(archive: MockTaskArchive): void {
+  if (archive.state !== "ready" && archive.state !== "restore_failed") throw new Error("当前归档状态不可还原");
+  archive.state = "restore_queued";
+  archive.phase = "等待还原";
+  archive.progress = 0;
+  archive.error = undefined;
+  archive.updated_at = new Date().toISOString();
+  setTimeout(() => {
+    if (archive.state !== "restore_queued") return;
+    archive.state = "restoring";
+    archive.phase = "恢复任务数据";
+    archive.progress = 60;
+    archive.updated_at = new Date().toISOString();
+  }, 100);
+  setTimeout(() => {
+    if (archive.state !== "restoring" && archive.state !== "restore_queued") return;
+    const restored = structuredClone(archive.snapshot.task);
+    restored.active = false;
+    restored.queued = false;
+    if (!mockTasks.some((task) => task.id === restored.id)) mockTasks.push(restored);
+    mockTaskAssetIDs.set(restored.id, archive.snapshot.numericTaskID);
+    for (const assetID of archive.snapshot.assetIDs) {
+      const asset = mockAssets.find((candidate) => candidate.id === assetID);
+      if (asset && !asset.task_ids.includes(archive.snapshot.numericTaskID)) {
+        asset.task_ids.push(archive.snapshot.numericTaskID);
+      }
+    }
+    for (const [assetID, source] of archive.snapshot.assetSources) setMockTaskAssetSource(restored.id, assetID, source);
+    const index = mockTaskArchives.indexOf(archive);
+    if (index >= 0) mockTaskArchives.splice(index, 1);
+    sortMockTasks();
+  }, 500);
+}
+
+function mockDeleteArchive(archive: MockTaskArchive): void {
+  if (archive.state !== "ready" && archive.state !== "delete_failed") throw new Error("当前归档状态不可永久删除");
+  const dependent = mockTaskArchives.find(
+    (candidate) => candidate.id !== archive.id && candidate.source_task_ids.includes(archive.task_id),
+  );
+  if (dependent) throw new Error(`归档仍被任务 #${dependent.task_id} 依赖，无法永久删除`);
+  archive.state = "delete_queued";
+  archive.phase = "等待永久删除";
+  archive.progress = 0;
+  archive.error = undefined;
+  archive.updated_at = new Date().toISOString();
+  setTimeout(() => {
+    if (archive.state !== "delete_queued") return;
+    archive.state = "deleting";
+    archive.phase = "删除归档包";
+    archive.progress = 70;
+  }, 100);
+  setTimeout(() => {
+    const index = mockTaskArchives.indexOf(archive);
+    if (index >= 0) mockTaskArchives.splice(index, 1);
+  }, 450);
 }
 
 function setMockTaskAssetSource(taskID: string, assetID: number, source: MockTaskAssetSource) {
@@ -96,6 +296,16 @@ function mockAssetMatchesDSL(asset: Asset, dsl: string): boolean {
   if (!query) return true;
   const haystack = JSON.stringify(asset).toLowerCase();
   return query.split(/\s+/).every((term) => haystack.includes(term));
+}
+
+function mockFindingMatchesQuery(finding: (typeof mockFindings)[number], query: string | null): boolean {
+  const needle = query?.trim().toLowerCase();
+  if (!needle) return true;
+  return [finding.name, finding.vulnclass, finding.summary, finding.evidence, finding.report].some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(needle),
+  );
 }
 
 function mockTaskCategorySnapshot(): TaskCategory[] {
@@ -303,10 +513,111 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/auth/login" || path === "/auth/init") return { token: "mock-demo" };
   if (path === "/auth/change-password") return { ok: true };
 
+  // ── task cold archives ──
+  if (path === "/task-archives" && m === "GET") {
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
+    const query = (q.get("q") ?? "").trim().toLowerCase();
+    const state = (q.get("state") ?? "").trim();
+    const filtered = mockTaskArchives.filter((archive) => {
+      if (state && archive.state !== state) return false;
+      if (!query) return true;
+      return [archive.task_id, archive.task_name, archive.task_description].some((value) =>
+        String(value ?? "")
+          .toLowerCase()
+          .includes(query),
+      );
+    });
+    const offset = (page - 1) * size;
+    return {
+      items: filtered.slice(offset, offset + size).map(publicMockTaskArchive),
+      total: filtered.length,
+      page,
+      size,
+    };
+  }
+  if (seg[0] === "task-archives" && seg.length === 2 && m === "GET") {
+    const archive = mockTaskArchives.find((item) => item.id === Number(seg[1]));
+    if (!archive) throw new Error("归档不存在");
+    return publicMockTaskArchive(archive);
+  }
+  if (seg[0] === "task-archives" && seg[2] === "restore" && seg.length === 3 && m === "POST") {
+    const archive = mockTaskArchives.find((item) => item.id === Number(seg[1]));
+    if (!archive) throw new Error("归档不存在");
+    mockRestoreArchive(archive);
+    return publicMockTaskArchive(archive);
+  }
+  if (seg[0] === "task-archives" && seg.length === 2 && m === "DELETE") {
+    const archive = mockTaskArchives.find((item) => item.id === Number(seg[1]));
+    if (!archive) throw new Error("归档不存在");
+    mockDeleteArchive(archive);
+    return publicMockTaskArchive(archive);
+  }
+  if (path === "/task-archives/restore/batch" && m === "POST") {
+    const ids = bodyIDs(b.archive_ids).map(Number);
+    const items = ids.map<ArchiveBatchItem>((id) => {
+      const archive = mockTaskArchives.find((item) => item.id === id);
+      if (!archive) return { id: String(id), archive_id: id, ok: false, queued: false, error: "归档不存在" };
+      try {
+        mockRestoreArchive(archive);
+        return { id: String(id), archive_id: id, ok: true, queued: true };
+      } catch (error) {
+        return { id: String(id), archive_id: id, ok: false, queued: false, error: (error as Error).message };
+      }
+    });
+    return { items };
+  }
+  if (path === "/task-archives/delete/batch" && m === "POST") {
+    const ids = bodyIDs(b.archive_ids).map(Number);
+    const items = ids.map<ArchiveBatchItem>((id) => {
+      const archive = mockTaskArchives.find((item) => item.id === id);
+      if (!archive) return { id: String(id), archive_id: id, ok: false, queued: false, error: "归档不存在" };
+      try {
+        mockDeleteArchive(archive);
+        return { id: String(id), archive_id: id, ok: true, queued: true };
+      } catch (error) {
+        return { id: String(id), archive_id: id, ok: false, queued: false, error: (error as Error).message };
+      }
+    });
+    return { items };
+  }
+  if (path === "/tasks/archive/batch" && m === "POST") {
+    const requested = bodyIDs(b.task_ids);
+    const selected = new Set(requested);
+    const ordered: string[] = [];
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (id: string) => {
+      if (visited.has(id) || visiting.has(id)) return;
+      visiting.add(id);
+      for (const candidate of mockTasks) {
+        if (!selected.has(candidate.id) || !(candidate.source_task_ids ?? []).map(String).includes(id)) continue;
+        visit(candidate.id);
+      }
+      visiting.delete(id);
+      visited.add(id);
+      ordered.push(id);
+    };
+    for (const id of requested) visit(id);
+    const byID = new Map<string, ArchiveBatchItem>();
+    for (const id of ordered) {
+      try {
+        const archive = mockArchiveTask(id);
+        byID.set(id, { id, archive_id: archive.id, ok: true, queued: true });
+      } catch (error) {
+        byID.set(id, { id, ok: false, queued: false, error: (error as Error).message });
+      }
+    }
+    return { items: requested.map((id) => byID.get(id) ?? { id, ok: false, queued: false, error: "任务不存在" }) };
+  }
+  if (seg[0] === "tasks" && seg[2] === "archive" && seg.length === 3 && m === "POST") {
+    return publicMockTaskArchive(mockArchiveTask(seg[1]));
+  }
+
   // ── tasks ──
   if (path === "/tasks" && m === "GET") {
     sortMockTasks();
-    return { tasks: mockTasks, active: mockActiveTask };
+    return { tasks: mockTasks.map(publicMockTask), active: mockActiveTask };
   }
   if (path === "/tasks" && m === "POST") {
     let suffix = 1;
@@ -493,7 +804,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "tasks" && seg.length === 2 && m === "GET") {
     const task = mockTasks.find((item) => item.id === seg[1]);
     if (!task) throw new Error("任务不存在");
-    return structuredClone(task);
+    return publicMockTask(task);
   }
   if (seg[0] === "tasks" && seg.length === 2 && m === "PATCH") {
     const task = mockTasks.find((item) => item.id === seg[1]);
@@ -998,6 +1309,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const filterStatus = q.get("status");
     const filterVulnclass = q.get("vulnclass");
     const filterTask = q.get("task_id");
+    list = list.filter((finding) => mockFindingMatchesQuery(finding, q.get("q")));
     if (filterSeverity) list = list.filter((finding) => finding.severity === filterSeverity);
     if (filterStatus) list = list.filter((finding) => finding.status === filterStatus);
     if (filterVulnclass) list = list.filter((finding) => finding.vulnclass === filterVulnclass);
@@ -1108,6 +1420,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const fStatus = q.get("status");
     const fVuln = q.get("vulnclass");
     const fTask = q.get("task_id");
+    list = list.filter((finding) => mockFindingMatchesQuery(finding, q.get("q")));
     if (fSev) list = list.filter((f) => f.severity === fSev);
     if (fStatus) list = list.filter((f) => f.status === fStatus);
     if (fVuln) list = list.filter((f) => f.vulnclass === fVuln);

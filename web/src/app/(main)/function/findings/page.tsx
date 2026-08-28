@@ -13,6 +13,7 @@ import {
   FileTextIcon,
   FlaskConicalIcon,
   InfoIcon,
+  SearchIcon,
   ShieldAlertIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -47,6 +48,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -55,6 +57,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
+import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingGroup, FindingStats, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -73,6 +76,7 @@ const FINDING_STATUSES: FindingStatus[] = [
 ];
 
 const UNASSIGNED_TASK = "__unassigned__";
+const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
 
 interface GroupFindingsState {
   items: Finding[];
@@ -125,6 +129,8 @@ export default function FindingsPage() {
   const [vulnclass, setVulnclass] = React.useState<string>("all");
   const [task, setTask] = React.useState<string>("all");
   const [sort, setSort] = React.useState<"severity" | "time">("severity");
+  const [search, setSearch] = React.useState("");
+  const [query, setQuery] = React.useState("");
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [groups, setGroups] = React.useState<FindingGroup[]>([]);
   const [groupTotal, setGroupTotal] = React.useState(0);
@@ -132,14 +138,53 @@ export default function FindingsPage() {
   const [groupFindings, setGroupFindings] = React.useState<Record<string, GroupFindingsState>>({});
   const [total, setTotal] = React.useState(0);
   const [stats, setStats] = React.useState<FindingStats>(EMPTY_STATS);
+  const [statsLoaded, setStatsLoaded] = React.useState(false);
+  const [preferencesHydrated, setPreferencesHydrated] = React.useState(false);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
   const [deepenFinding, setDeepenFinding] = React.useState<Finding | null>(null);
   const [deepenDescription, setDeepenDescription] = React.useState("");
   const [deepening, setDeepening] = React.useState(false);
-  const filterFingerprint = `${severity}:${status}:${vulnclass}:${task}:${sort}`;
+  const filterFingerprint = JSON.stringify([severity, status, vulnclass, task, sort, query]);
   const activeFilterFingerprint = React.useRef(filterFingerprint);
   activeFilterFingerprint.current = filterFingerprint;
+
+  React.useEffect(() => {
+    const raw = getLocalStorageValue(FINDING_LIST_PREFERENCE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as {
+          severity?: unknown;
+          status?: unknown;
+          vulnclass?: unknown;
+          task?: unknown;
+          sort?: unknown;
+        };
+        if (parsed.severity === "all" || SEVERITIES.includes(parsed.severity as Severity)) {
+          setSeverity(parsed.severity as "all" | Severity);
+        }
+        if (parsed.status === "all" || FINDING_STATUSES.includes(parsed.status as FindingStatus)) {
+          setStatus(parsed.status as "all" | FindingStatus);
+        }
+        if (typeof parsed.vulnclass === "string" && parsed.vulnclass) setVulnclass(parsed.vulnclass);
+        if (typeof parsed.task === "string" && parsed.task) setTask(parsed.task);
+        if (parsed.sort === "severity" || parsed.sort === "time") setSort(parsed.sort);
+      } catch {
+        // Ignore malformed or legacy preferences and retain the defaults.
+      }
+    }
+    setPreferencesHydrated(true);
+  }, []);
+
+  React.useEffect(() => {
+    if (!preferencesHydrated) return;
+    setLocalStorageValue(FINDING_LIST_PREFERENCE_KEY, JSON.stringify({ severity, status, vulnclass, task, sort }));
+  }, [preferencesHydrated, severity, sort, status, task, vulnclass]);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   const setFindings = React.useCallback((update: (current: Finding[]) => Finding[]) => {
     setGroupFindings((current) => {
@@ -191,7 +236,7 @@ export default function FindingsPage() {
       await api.exportFindings({
         format: exportFormat,
         scope: exportScope,
-        filters: { severity, status, vulnclass, task, sort },
+        filters: { severity, status, vulnclass, task, query, sort },
         ids: [...selectedIds],
       });
       setExportOpen(false);
@@ -224,6 +269,7 @@ export default function FindingsPage() {
         status,
         vulnclass,
         task,
+        query,
         sort,
       });
       if (request !== groupsRequest.current || activeFilterFingerprint.current !== requestFilter) return;
@@ -233,7 +279,7 @@ export default function FindingsPage() {
     } catch {
       // Polling keeps the last successful snapshot visible.
     }
-  }, [filterFingerprint, page, pageSize, severity, status, vulnclass, task, sort]);
+  }, [filterFingerprint, page, pageSize, severity, status, vulnclass, task, query, sort]);
 
   const loadGroup = React.useCallback(
     async (key: string, groupPage: number, groupPageSize: number) => {
@@ -260,6 +306,7 @@ export default function FindingsPage() {
           status,
           vulnclass,
           task: key,
+          query,
           sort,
         });
         if (groupRequests.current[key] !== request || activeFilterFingerprint.current !== requestFilter) return;
@@ -291,7 +338,7 @@ export default function FindingsPage() {
         }));
       }
     },
-    [filterFingerprint, severity, status, vulnclass, sort],
+    [filterFingerprint, severity, status, vulnclass, query, sort],
   );
 
   React.useEffect(() => {
@@ -367,7 +414,10 @@ export default function FindingsPage() {
       api
         .findingStats()
         .then((s) => {
-          if (alive) setStats(s);
+          if (alive) {
+            setStats(s);
+            setStatsLoaded(true);
+          }
         })
         .catch(() => {
           // Keep the previous aggregate snapshot until the next poll.
@@ -380,6 +430,18 @@ export default function FindingsPage() {
       clearInterval(t);
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!statsLoaded) return;
+    if (vulnclass !== "all" && !stats.vulnclasses.includes(vulnclass)) setVulnclass("all");
+    if (
+      task !== "all" &&
+      task !== UNASSIGNED_TASK &&
+      !(stats.tasks ?? []).some((option) => String(option.id) === task)
+    ) {
+      setTask("all");
+    }
+  }, [stats, statsLoaded, task, vulnclass]);
 
   // updateStatus optimistically flips one finding's triage state, reverting on error.
   const updateStatus = React.useCallback(
@@ -566,6 +628,19 @@ export default function FindingsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <InputGroup className="w-full sm:w-72">
+            <InputGroupInput
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="检索漏洞内容"
+              aria-label="检索漏洞内容"
+            />
+            <InputGroupAddon>
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
+
           <ToggleGroup
             type="single"
             value={severity}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -145,6 +146,22 @@ func TestTaskDTOUsesEmptyArrays(t *testing.T) {
 		if !ok || len(value) != 0 {
 			t.Fatalf("%s must serialize as [], payload=%s", field, raw)
 		}
+	}
+}
+
+func TestApplyTaskArchiveBlocker(t *testing.T) {
+	t.Parallel()
+	dto := taskDTO(&Task{ID: "7"}, "paused")
+	applyTaskArchiveBlocker(&dto, map[int64]int64{7: 11})
+	if dto.ArchiveBlockedBy != "11" {
+		t.Fatalf("archive blocker=%q, want 11", dto.ArchiveBlockedBy)
+	}
+	raw, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"archive_blocked_by_task_id":"11"`) {
+		t.Fatalf("archive blocker missing from payload: %s", raw)
 	}
 }
 

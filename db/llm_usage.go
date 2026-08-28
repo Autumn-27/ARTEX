@@ -1,6 +1,10 @@
 package db
 
-import "strconv"
+import (
+	"sort"
+	"strconv"
+	"time"
+)
 
 // LLMUsage is one lightweight LLM-call metering row — the always-on usage ledger,
 // distinct from llm_records (which stores full request/response bodies and is a
@@ -129,7 +133,43 @@ ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC`)
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]ProfileUsage, len(out))
+	for _, current := range out {
+		byName[current.ProfileName] = current
+	}
+	for _, aggregate := range archived {
+		for _, cold := range aggregate.TokenProfiles {
+			current := byName[cold.ProfileName]
+			current.ProfileName = cold.ProfileName
+			current.Calls += cold.Calls
+			current.Tasks += cold.Tasks
+			current.InputTokens += cold.InputTokens
+			current.OutputTokens += cold.OutputTokens
+			current.CacheReadTokens += cold.CacheReadTokens
+			current.CacheWriteTokens += cold.CacheWriteTokens
+			byName[cold.ProfileName] = current
+		}
+	}
+	out = out[:0]
+	for _, current := range byName {
+		out = append(out, current)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := out[i].InputTokens + out[i].OutputTokens
+		right := out[j].InputTokens + out[j].OutputTokens
+		if left != right {
+			return left > right
+		}
+		return out[i].ProfileName < out[j].ProfileName
+	})
+	return out, nil
 }
 
 // ProfileDayUsage is one (profile, UTC calendar day) token bucket for the daily
@@ -169,7 +209,44 @@ ORDER BY day`, days)
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
+	byKey := make(map[string]ProfileDayUsage, len(out))
+	for _, current := range out {
+		byKey[current.ProfileName+"\x00"+current.Date] = current
+	}
+	for _, aggregate := range archived {
+		for _, cold := range aggregate.TokenDaily {
+			if cold.Date < cutoff {
+				continue
+			}
+			key := cold.ProfileName + "\x00" + cold.Date
+			current := byKey[key]
+			current.ProfileName = cold.ProfileName
+			current.Date = cold.Date
+			current.InputTokens += cold.InputTokens
+			current.OutputTokens += cold.OutputTokens
+			current.CacheReadTokens += cold.CacheReadTokens
+			byKey[key] = current
+		}
+	}
+	out = out[:0]
+	for _, current := range byKey {
+		out = append(out, current)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		return out[i].ProfileName < out[j].ProfileName
+	})
+	return out, nil
 }
 
 // ParseExpID turns the exploration-id segment parsed from a session string into an
