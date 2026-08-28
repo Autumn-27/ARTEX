@@ -323,10 +323,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 
 // saveLLMConfig persists the LLM config as the active "default" profile in PG.
 func (s *Server) saveLLMConfig(cfg agent.Config) error {
+	// cfg.Provider() already returns one of the three valid format strings
+	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
-	if format != "anthropic" {
-		format = "openai"
-	}
 	var id int64
 	// agent.Config carries no failover fields, so carry the stored ones forward —
 	// otherwise this legacy endpoint would silently reset the profile's priority,

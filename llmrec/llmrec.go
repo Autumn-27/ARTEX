@@ -110,9 +110,15 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 
 	// Serialize the request only when storing bodies (this is the expensive part).
+	// Alongside it, attach a Capture so the HTTP transport can hand back the
+	// untouched wire bodies — the normalized view below cannot reconstruct them
+	// (tool schemas are dropped, tool_use blocks never reach this layer, and the
+	// SSE framing is already decoded). See capture.go.
 	reqBody := ""
+	var capt *Capture
 	if recordBodies {
 		reqBody = r.serializeRequest(req)
+		ctx, capt = NewCapture(ctx)
 	}
 
 	return func(yield func(llm.StreamEvent, error) bool) {
@@ -133,7 +139,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
 			// Heavy trace row — only when body recording is on.
 			if recordBodies {
-				r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
+				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
 			}
 		}
 
@@ -180,7 +186,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 }
 
 // Complete implements the atomic completion path while preserving the same
-// usage metering and optional body recording semantics as Stream.
+// usage metering, normalized body recording and raw wire capture as Stream.
 func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	recordBodies := r.enabled == nil || r.enabled()
 	start := time.Now()
@@ -193,8 +199,10 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 
 	reqBody := ""
+	var capt *Capture
 	if recordBodies {
 		reqBody = r.serializeRequest(req)
+		ctx, capt = NewCapture(ctx)
 	}
 
 	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
@@ -204,18 +212,19 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
 	if recordBodies {
-		var textBuf, thinkingBuf strings.Builder
-		for _, block := range msg.Content {
-			switch block.Type {
-			case llm.BlockText:
-				textBuf.WriteString(block.Text)
-			case llm.BlockThinking:
-				thinkingBuf.WriteString(block.Thinking)
-			}
-		}
-		r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
+		r.record(req, session, taskID, worker, reqBody, capt, start, msg.Text(), thinkingText(msg), usage, stopReason, err)
 	}
 	return msg, stopReason, usage, err
+}
+
+func thinkingText(msg llm.Message) string {
+	var b strings.Builder
+	for _, block := range msg.Content {
+		if block.Type == llm.BlockThinking && block.Thinking != "" {
+			b.WriteString(block.Thinking)
+		}
+	}
+	return b.String()
 }
 
 // recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips
@@ -249,7 +258,7 @@ func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage 
 // record persists one LLM call to PostgreSQL before the provider stream returns.
 // Keeping the write inside the owning task operation means task deletion can
 // drain calls and then remove records without a late async insert recreating one.
-func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, reqBody string, start time.Time, text, thinking string, usage llm.Usage, stopReason string, streamErr error) {
+func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, reqBody string, capt *Capture, start time.Time, text, thinking string, usage llm.Usage, stopReason string, streamErr error) {
 	latency := int(time.Since(start).Milliseconds())
 	status := "ok"
 	errMsg := ""
@@ -295,6 +304,11 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 		Error:        errMsg,
 		RequestBody:  reqBody,
 		ResponseBody: string(respBody),
+		// Raw wire bodies; empty when the transport did not fill the Capture
+		// (e.g. a provider dialing through a client without the capture hook, or
+		// a call that failed before any HTTP request went out).
+		RawRequest:  capt.RawRequest(),
+		RawResponse: capt.RawResponse(),
 	}
 
 	if err := r.pg.InsertLLMRecord(rec); err != nil {

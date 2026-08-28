@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
@@ -131,6 +132,12 @@ func FromEnv() (Config, bool) {
 		if c.Model == "" {
 			c.Model = "gpt-4o"
 		}
+	case "openai-responses":
+		c.Format = llm.FormatOpenAIResponses
+		c.APIKey = oaiKey
+		if c.Model == "" {
+			c.Model = "gpt-5"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		c.APIKey = anthKey
@@ -164,6 +171,13 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		if c.Model == "" {
 			c.Model = "gpt-4o"
 		}
+	case "openai-responses":
+		c.Format = llm.FormatOpenAIResponses
+		// provider appends "/responses"; tolerate a full endpoint URL.
+		c.BaseURL = strings.TrimRight(strings.TrimSuffix(c.BaseURL, "/responses"), "/")
+		if c.Model == "" {
+			c.Model = "gpt-5"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		// provider appends "/v1/messages".
@@ -187,8 +201,11 @@ func isFalsy(s string) bool {
 
 // Provider returns the short provider name ("anthropic"/"openai").
 func (c Config) Provider() string {
-	if c.Format == llm.FormatOpenAI {
+	switch c.Format {
+	case llm.FormatOpenAI:
 		return "openai"
+	case llm.FormatOpenAIResponses:
+		return "openai-responses"
 	}
 	return "anthropic"
 }
@@ -265,9 +282,24 @@ func IsQuotaExhaustedMessage(message string) bool {
 type quotaAwareTransport struct{ base http.RoundTripper }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// When LLM recording is on, the Recorder puts a Capture on the context so the
+	// raw wire bodies can be persisted. This is the only layer that still sees
+	// them: norma builds the request body internally and decodes the SSE response
+	// before either reaches the recorder.
+	capt := llmrec.CaptureFrom(req.Context())
+	capt.SetRequest(requestBodySnapshot(req))
+
 	resp, err := t.base.RoundTrip(req)
-	if err != nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+	if err != nil || resp == nil {
 		return resp, err
+	}
+	// Tee rather than read: a 200 is an SSE stream that must keep streaming. The
+	// 429 branch below reads through this wrapper, so its body lands in the
+	// capture before being replaced.
+	resp.Body = capt.TeeResponse(resp.StatusCode, resp.Body)
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		return resp, nil
 	}
 	body, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
@@ -281,6 +313,25 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 		resp.Status = "402 Payment Required"
 	}
 	return resp, nil
+}
+
+// requestBodySnapshot copies an outgoing request body without consuming it.
+// norma builds every model request from a *bytes.Reader, so net/http populates
+// GetBody and the copy has no effect on what gets sent.
+func requestBodySnapshot(req *http.Request) string {
+	if req.GetBody == nil {
+		return ""
+	}
+	rc, err := req.GetBody()
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func quotaAwareHTTPClient(proxy string) (*http.Client, error) {

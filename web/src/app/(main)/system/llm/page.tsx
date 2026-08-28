@@ -296,7 +296,7 @@ function ProfileSheet({
 }) {
   const isNew = !profile;
   const [name, setName] = React.useState("");
-  const [format, setFormat] = React.useState<"anthropic" | "openai">("anthropic");
+  const [format, setFormat] = React.useState<"anthropic" | "openai" | "openai-responses">("anthropic");
   const [model, setModel] = React.useState("");
   const [baseUrl, setBaseUrl] = React.useState("");
   const [proxy, setProxy] = React.useState("");
@@ -321,7 +321,9 @@ function ProfileSheet({
   React.useEffect(() => {
     if (!open) return;
     setName(profile?.name ?? "");
-    setFormat(profile?.format === "openai" ? "openai" : "anthropic");
+    setFormat(
+      profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic",
+    );
     setModel(profile?.model ?? "");
     setBaseUrl(profile?.base_url ?? "");
     setProxy(profile?.proxy ?? "");
@@ -462,13 +464,14 @@ function ProfileSheet({
             </div>
             <div className="grid gap-2">
               <Label>格式</Label>
-              <Select value={format} onValueChange={(v) => setFormat(v as "anthropic" | "openai")}>
+              <Select value={format} onValueChange={(v) => setFormat(v as "anthropic" | "openai" | "openai-responses")}>
                 <SelectTrigger>
                   <SelectValue placeholder="选择格式" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="anthropic">Anthropic</SelectItem>
-                  <SelectItem value="openai">OpenAI</SelectItem>
+                  <SelectItem value="openai">OpenAI (Chat Completions)</SelectItem>
+                  <SelectItem value="openai-responses">OpenAI (Responses API)</SelectItem>
                 </SelectContent>
               </Select>
             </div>

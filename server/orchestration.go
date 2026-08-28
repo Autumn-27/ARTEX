@@ -573,6 +573,66 @@ func (s *Server) reseedMainAgentPrompt() {
 	log.Printf("[prompts] mainagent 提示词已追加新默认版本(加入目标达成后反问建目标,一次性)")
 }
 
+// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文重写了「0 意图」的正当理由
+// (从笼统"最常见"改为"仅在已覆盖/等待在跑 work 依赖时才 0 意图")、并新增「量化验收核对」(覆盖度等
+// 可量化目标未达标禁止 prove_goal)。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
+// 【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍保留在历史里,用户若自定义过可从版本记录
+// 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
+// reseedGoalsPrompt 完全同构。
+func (s *Server) reseedPlannerPrompt() {
+	const flag = "planner_prompt_zerointent_acceptance_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("planner")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["planner"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] planner 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] planner 提示词已追加新默认版本(重写0意图理由+加量化验收核对,一次性)")
+}
+
+// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文强化了「否定结论的证据门槛」
+// (未穷尽手段/证据弱一律标 inferred,别用轻率 observed 否定焊死路线)。SeedPromptIfEmpty 首插入only,
+// 旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。settings flag
+// 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
+func (s *Server) reseedWorkerPrompt() {
+	const flag = "worker_prompt_negfact_threshold_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("worker")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["worker"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] worker 提示词已追加新默认版本(加否定结论证据门槛,一次性)")
+}
+
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：
 // 绑定 update_finding_report + 任务查询工具，并挂一个「report_finding 被调用即触发」的
 // 触发器 —— 每登记一个漏洞就唤起它写详细报告。一次性(settings flag 守卫)：用户删掉后不再重建。

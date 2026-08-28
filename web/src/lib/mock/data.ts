@@ -3766,5 +3766,41 @@ export function llmRecordDetail(id: number, records = llmRecords) {
       null,
       2,
     ),
+    // HTTP 原文：请求含被归一化视图丢弃的完整工具 schema，响应为原始 SSE 帧。
+    raw_request: JSON.stringify({
+      model: item.model,
+      max_tokens: 8192,
+      stream: true,
+      system: [{ type: "text", text: "你是一个授权渗透测试系统的「执行者」…（省略）", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "开始执行 system 提示里的这条意图：只做它、只产生事实、做完即停。" }],
+      tools: [
+        {
+          name: "bash",
+          description: "在目标环境中执行一条 shell 命令并返回其输出。",
+          input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+        },
+      ],
+      thinking: { type: "enabled" },
+    }),
+    raw_response: [
+      `event: message_start`,
+      `data: {"type":"message_start","message":{"id":"msg_01mock","model":"${item.model}","usage":{"input_tokens":${item.input_tokens},"output_tokens":1}}}`,
+      ``,
+      `event: content_block_delta`,
+      `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"对 search?q= 做注入探测。"}}`,
+      ``,
+      `event: content_block_start`,
+      `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01mock","name":"bash"}}`,
+      ``,
+      `event: content_block_delta`,
+      `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\":\\"curl -s 'https://www.acme.com/search?q=1%27'\\"}"}}`,
+      ``,
+      `event: message_delta`,
+      `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":${item.output_tokens}}}`,
+      ``,
+      `event: message_stop`,
+      `data: {"type":"message_stop"}`,
+      ``,
+    ].join("\n"),
   };
 }
