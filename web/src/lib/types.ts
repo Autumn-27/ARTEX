@@ -869,6 +869,8 @@ export interface LLMProfile {
   priority?: number;
   // true = 不作为故障转移目标（仍可被 agent/任务显式绑定使用）。
   pool_exclude?: boolean;
+  // true（默认）= 流式(SSE) | false = 真·非流式(stream:false，一次性返回)。
+  streaming?: boolean;
 }
 
 // ---- LLM 轮询（故障转移）----
@@ -1131,6 +1133,13 @@ export interface CommandRecord {
   output: string;
   is_error: boolean;
   created_at: string;
+}
+
+// 单个工具的调用统计（/commands/stats）；errors 为其中失败的次数。
+export interface ToolStat {
+  tool: string;
+  total: number;
+  errors: number;
 }
 
 // ---- LLM recording ----

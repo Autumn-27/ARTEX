@@ -108,6 +108,53 @@ func (s *ExplorationStore) ListByKindWithSources(kind string, limit int) ([]*Nod
 	return out, nil
 }
 
+// ListByKindPageWithSources is the paginated, keyword-filterable sibling of
+// ListByKindWithSources: it returns one newest-first page (id < before, before<=0
+// = newest) spanning this exploration and its direct sources, plus hasMore and the
+// filtered total across all of them. Node ids are globally unique, so merging each
+// store's own page and re-sorting by id DESC yields the true global page; fetching
+// limit+1 per store guarantees the merged top-`limit` is complete.
+func (s *ExplorationStore) ListByKindPageWithSources(kind string, before int64, limit int, q string) (nodes []*Node, hasMore bool, total int, err error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	own, err := s.listByKindPageFiltered(kind, before, limit, q)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	merged := own
+	total, err = s.countByKindFiltered(kind, q)
+	if err != nil {
+		return nil, false, 0, err
+	}
+
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, false, 0, err
+	}
+	for _, source := range sources {
+		page, err := source.Store.listByKindPageFiltered(kind, before, limit, q)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		for _, n := range page {
+			merged = append(merged, markInheritedNode(n, source.Task.TaskID))
+		}
+		cnt, err := source.Store.countByKindFiltered(kind, q)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		total += cnt
+	}
+
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
+	hasMore = len(merged) > limit
+	if hasMore {
+		merged = merged[:limit]
+	}
+	return merged, hasMore, total, nil
+}
+
 // GetNodeWithSources reads a node only when it belongs to this exploration or
 // one of its direct sources. Inherited nodes are tagged so tool callers can keep
 // them read-only and show their provenance.

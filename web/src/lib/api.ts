@@ -74,6 +74,7 @@ import type {
   TokenTotal,
   TokenUsage,
   Tool,
+  ToolStat,
   TrafficDetail,
   TrafficHost,
   TrafficResp,
@@ -677,8 +678,10 @@ export const api = {
     thinking_type = "",
     reasoning_effort = "",
     profile_id?: number,
+    streaming = true, // 用该配置真实的收发模式来测，别让"流式能通、非流式不通"漏到会话里
   ) =>
-    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string }>("/llm/test", {
+    // reply = 模型实际回复(已截断);一个字都不回的配置后端直接判失败
+    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
       provider,
       model,
       base_url,
@@ -687,6 +690,7 @@ export const api = {
       thinking_type,
       reasoning_effort,
       profile_id,
+      streaming,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
@@ -704,6 +708,7 @@ export const api = {
     reasoning_effort?: string; // ""(不发送)|"low"|"medium"|"high"|"xhigh"|"max"
     priority?: number; // 轮询顺位，越大越先用
     pool_exclude?: boolean; // true=不作为故障转移目标
+    streaming?: boolean; // true(默认)=流式 | false=非流式
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
@@ -971,6 +976,13 @@ export const api = {
     sp.set("page", String(params?.page ?? 0));
     sp.set("size", String(params?.size ?? 50));
     return get<{ commands: CommandRecord[]; total: number }>(`/commands?${sp}`);
+  },
+  // 各工具调用次数；沿用列表的 task/q 筛选，统计的是整个结果集而非当前页。
+  commandStats: (params?: { task?: string; q?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.task) sp.set("task", params.task);
+    if (params?.q) sp.set("q", params.q);
+    return get<{ stats: ToolStat[] }>(`/commands/stats?${sp}`);
   },
 
   // ---- LLM records ----

@@ -450,9 +450,9 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()  // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
 	s.reseedMainAgentPrompt() // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.seedReporterAgent() // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.seedReporterAgent()     // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -464,7 +464,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v6_insert_assets_related"
+	const flag = "tool_schema_refresh_v7_list_facts_paging"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -480,7 +480,9 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
 	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
-	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true}
+	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
+	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true, "list_facts": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if !refreshBuiltin[sd.Key] {
 			continue

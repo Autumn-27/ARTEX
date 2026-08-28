@@ -309,6 +309,7 @@ function ProfileSheet({
   const [effort, setEffort] = React.useState(NONE);
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
   const [poolExclude, setPoolExclude] = React.useState(false);
+  const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -331,6 +332,7 @@ function ProfileSheet({
     setEffort(fromStore(profile?.reasoning_effort));
     setPriority(String(profile?.priority ?? 0));
     setPoolExclude(profile?.pool_exclude ?? false);
+    setStreaming(profile?.streaming ?? true);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -365,8 +367,22 @@ function ProfileSheet({
     try {
       // 用配置实际会跑的思考参数来测，这样不支持该字段的模型在这里就失败，
       // 而不是等到跑任务时才炸。传 profile id：Key 输入框留空时用已存的 Key。
-      const r = await api.testLLM(format, model, baseUrl, apiKey, proxy, toStore(thinkingType), toStore(effort), profileId);
-      if (r.ok) toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`);
+      const r = await api.testLLM(
+        format,
+        model,
+        baseUrl,
+        apiKey,
+        proxy,
+        toStore(thinkingType),
+        toStore(effort),
+        profileId,
+        streaming,
+      );
+      // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
+      if (r.ok)
+        toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`, {
+          description: r.reply ? `回复：${r.reply}` : undefined,
+        });
       else toast.error(`连接失败：${r.error ?? "未知"}`);
     } catch (e) {
       toast.error(`测试出错：${(e as Error).message}`);
@@ -398,6 +414,7 @@ function ProfileSheet({
         reasoning_effort: toStore(effort),
         priority: Number(priority) || 0,
         pool_exclude: poolExclude,
+        streaming,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -525,7 +542,8 @@ function ProfileSheet({
               onChange={(e) => setProxy(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">
-              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如 socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
+              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如
+              socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
             </p>
           </div>
 
@@ -595,6 +613,17 @@ function ProfileSheet({
               </div>
               <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
             </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">流式输出 · streaming</Label>
+                <p className="text-muted-foreground text-xs">
+                  开启（默认）走流式 SSE，有运行中实时进度与实时 token 计数。 关闭则走真·非流式（stream:false，
+                  一次性返回完整响应）——可绕开部分网关糟糕的 SSE 实现（空帧 / 思考字段丢帧），
+                  代价是失去运行中的实时进度。
+                </p>
+              </div>
+              <Switch checked={streaming} onCheckedChange={setStreaming} aria-label="流式输出" />
+            </div>
           </div>
 
           <div className="grid gap-3 rounded-lg border p-3">
@@ -602,8 +631,8 @@ function ProfileSheet({
               <div className="grid gap-0.5">
                 <Label className="text-sm">思考开关 · thinking.type</Label>
                 <p className="text-muted-foreground text-xs">
-                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持
-                  的模型）；关闭=发 disabled；开启=发 enabled。与下面的强度互相独立。
+                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持 的模型）；关闭=发
+                  disabled；开启=发 enabled。与下面的强度互相独立。
                 </p>
               </div>
               <Select value={thinkingType} onValueChange={setThinkingType}>
@@ -623,8 +652,8 @@ function ProfileSheet({
               <div className="grid gap-0.5">
                 <Label className="text-sm">思考强度 · reasoning_effort</Label>
                 <p className="text-muted-foreground text-xs">
-                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。
-                  有些接口没有 thinking 字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
+                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。 有些接口没有 thinking
+                  字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
                 </p>
               </div>
               <Select value={effort} onValueChange={setEffort}>

@@ -39,10 +39,10 @@ func TaskIDFrom(ctx context.Context) string {
 
 // Recorder wraps an llm.Provider and records every completion call.
 type Recorder struct {
-	inner   llm.Provider
-	pg      *db.DB
-	model   string // model name (from config, not in CompletionRequest)
-	prof    string // LLM profile name (from llm_profiles)
+	inner llm.Provider
+	pg    *db.DB
+	model string // model name (from config, not in CompletionRequest)
+	prof  string // LLM profile name (from llm_profiles)
 	// thinkingType / reasoningEffort 是配置级思考参数(思考开关 / 思考强度)。它们在
 	// norma 的 buildBody() 里从 provider 配置注入真正的 HTTP body,不出现在
 	// CompletionRequest 上,故 Recorder 需在此单独带一份,序列化时写进录制。
@@ -177,6 +177,45 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 		// Stream completed normally.
 		finish(streamErr)
 	}
+}
+
+// Complete implements the atomic completion path while preserving the same
+// usage metering and optional body recording semantics as Stream.
+func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	recordBodies := r.enabled == nil || r.enabled()
+	start := time.Now()
+	session := transcript.SessionIDFrom(ctx)
+	parsedID, worker := parseSession(session)
+	expID := db.ParseExpID(parsedID)
+	taskID := TaskIDFrom(ctx)
+	if taskID == "" {
+		taskID = parsedID
+	}
+
+	reqBody := ""
+	if recordBodies {
+		reqBody = r.serializeRequest(req)
+	}
+
+	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+	if recordBodies {
+		var textBuf, thinkingBuf strings.Builder
+		for _, block := range msg.Content {
+			switch block.Type {
+			case llm.BlockText:
+				textBuf.WriteString(block.Text)
+			case llm.BlockThinking:
+				thinkingBuf.WriteString(block.Thinking)
+			}
+		}
+		r.record(req, session, taskID, worker, reqBody, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
+	}
+	return msg, stopReason, usage, err
 }
 
 // recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips

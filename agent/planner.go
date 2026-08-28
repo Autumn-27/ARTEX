@@ -20,19 +20,20 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
-	prov        llm.Provider
-	model       string
-	tx          *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window      int                                    // context window in tokens (for compaction)
-	windowFn    func() int                             // optional dynamic task-chain minimum
-	maxTurns    int                                    // max agent turns per run (0 = unlimited)
-	killWork    func(intentID int64) error             // engine callback to terminate a running work (nil = off)
-	steerWork   func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr   string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch   WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir     string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool                      // resolver: inject task operation constraints into system prompt? (nil = yes)
+	prov              llm.Provider
+	model             string
+	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window            int                                    // context window in tokens (for compaction)
+	windowFn          func() int                             // optional dynamic task-chain minimum
+	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -47,6 +48,12 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default).
+func (p *Planner) SetNonStreaming(fn func() bool) { p.nonStreamingFn = fn }
+
+func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonStreamingFn() }
 
 func (p *Planner) compactionWindow() int {
 	if p.windowFn != nil {
@@ -238,7 +245,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 ⚠️ 最重要的原则：**这一轮生成 0 个意图是完全正常、而且是最常见的结果。** 你不是"每次都要产出意图"的机器。绝大多数唤醒，frontier 里已有的意图已经覆盖了所有已知方向，你应当什么都不加、直接结束。重复/换措辞地生成已经存在的意图是严重错误。
 
 决策流程（每次唤醒）：
-1. **完整态势已直接附在本提示下方（就是 graph_overview 的返回，无需再调它）**：task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}，含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图）。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。需要更深的细节时才按需调：list_facts 列全部事实、list_findings 列全部漏洞、**node_detail(id)** 取某条的完整证据/详情（列表/recent_facts 只给摘要）。
+1. **完整态势已直接附在本提示下方（就是 graph_overview 的返回，无需再调它）**：task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}，含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图）。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。需要更深的细节时才按需调：list_facts 分页列事实（最新在前，默认 20 条，可传 q 关键词过滤、before 翻页，返回带 total/has_more）、list_findings 列全部漏洞、**node_detail(id)** 取某条的完整证据/详情（列表/recent_facts 只给摘要）。
    - open_intents / running_intents / recent_done_intents——"哪些方向已经有意图在覆盖/已尝试"。每个意图还带 **parents（上游：它派生自哪些事实/意图）和 yields（下游：它产生了哪些事实/发现）**——这就是探索图的**血缘关系**，据此理解"哪些事实来自哪个方向、能否综合成新方向"。recent_facts 里每个事实带 **from_intent**（由哪个意图产生）。
    - sites_without_endpoints / findings——"哪些方向【可能】需要探索"。
    - 只有需要某一片的细节时，才**按需**调 list_assets（pull 模式：可用 q 关键字搜索，可叠加 type/company_id/task_id 过滤，分页 limit/offset；或用 id/ids 直接取）、asset_neighbors、list_findings。资产图全局共享，别默认拉全量。资产中可能包含非本次任务涉及到的资产，所以需要主要出现非本次任务相关的资产时忽略这些资产。
@@ -353,7 +360,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、
 		// 能证的 prove_goal、串行链记 TodoWrite),而非停止规划——planner 之后仍会被反复唤醒。
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
-		Settlement: settle,
+		Settlement:   settle,
+		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

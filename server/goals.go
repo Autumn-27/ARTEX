@@ -383,7 +383,8 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, s.agentsForTask(t).runtime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, emit)
+	goalRuntime := s.agentsForTask(t).runtime
+	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), emit)
 	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {

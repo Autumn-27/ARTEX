@@ -51,6 +51,11 @@ type Config struct {
 	//   "" = 不发送(默认); "low"/"medium"/"high"/"xhigh"/"max" = 对应强度.
 	//   OpenAI 映射为顶层 reasoning_effort;Anthropic 映射为 output_config.effort.
 	ReasoningEffort string
+	// Stream 控制该 profile 是否使用流式(SSE)接口。true(默认)= 流式;false = 真·
+	// 非流式(发 stream:false,一次性拿完整 JSON,走 Provider.Complete)。非流式可绕开
+	// 某些网关糟糕的 SSE 实现(空帧、思考字段丢帧),代价是失去运行中的实时进度/实时
+	// token 计数。映射为 agentcore.Options.NonStreaming = !Stream。
+	Stream bool
 }
 
 // compaction window resolution bounds (in K tokens). Below the floor the
@@ -116,6 +121,8 @@ func FromEnv() (Config, bool) {
 		BaseURL: os.Getenv("ARTEX_LLM_BASE_URL"),
 		Model:   os.Getenv("ARTEX_LLM_MODEL"),
 		Proxy:   strings.TrimSpace(os.Getenv("ARTEX_LLM_PROXY")),
+		// 默认流式;ARTEX_LLM_STREAM=false/0/off 显式关闭走非流式。
+		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
 	}
 	switch prov {
 	case "openai":
@@ -147,6 +154,7 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:  strings.TrimSpace(apiKey),
 		Proxy:   strings.TrimSpace(proxy),
+		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
 	case "openai":
@@ -165,6 +173,16 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		}
 	}
 	return c
+}
+
+// isFalsy reports whether an env-var string explicitly requests "off". Empty or
+// unrecognized → false (so an unset var keeps the streaming default).
+func isFalsy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "0", "false", "off", "no":
+		return true
+	}
+	return false
 }
 
 // Provider returns the short provider name ("anthropic"/"openai").
@@ -288,11 +306,12 @@ func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
 }
 
 // TestConnection makes a minimal real completion to verify the provider/model/
-// endpoint/key actually work. Returns the round-trip latency.
-func TestConnection(ctx context.Context, c Config) (time.Duration, error) {
+// endpoint/key actually work. Returns the round-trip latency and the model's
+// reply text.
+func TestConnection(ctx context.Context, c Config) (time.Duration, string, error) {
 	prov, err := c.NewProvider()
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -302,12 +321,24 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, error) {
 	// 就撞到输出上限(finish=length)、被截断,连接测试虽仍算通(err=nil)但显示成
 	// "已中断/length/resume" 一团糟。给足预算让它把 OK 干净吐完(finish=stop)。
 	// EscalateMaxTokens 保持 false:不因截断而抬额重试,避免 resume 循环空烧。
-	_, err = agentcore.Run(ctx, agentcore.Options{
+	reply, err := agentcore.Run(ctx, agentcore.Options{
 		Provider:       prov,
 		SystemPrompt:   []string{"你是连接测试。直接输出两个字符 OK 即可，不要思考、不要解释、不要别的。"},
 		PermissionMode: acperm.ModeBypass,
 		MaxTurns:       1,
 		MaxTokens:      8192,
+		NonStreaming:   !c.Stream, // 用该 profile 的真实收发模式做连接测试
 	}, "ping")
-	return time.Since(start), err
+	lat := time.Since(start)
+	if err != nil {
+		return lat, "", err
+	}
+	// err==nil 还不够：请求通了但模型一个字都不吐的情况真实存在(思考把预算烧光、
+	// 正文被安全策略吞掉、兼容层把 content 丢了)。这种配置在会话里就是"不回话",
+	// 测试却报成功——正是本项要消除的落差。没有可见正文一律判失败。
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return lat, "", fmt.Errorf("模型无回复内容（请求已通，但未返回任何文本）")
+	}
+	return lat, reply, nil
 }
