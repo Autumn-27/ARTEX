@@ -188,6 +188,7 @@ export const api = {
   // ---- tasks ----
   tasks: () =>
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
+  task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     name?: string;
     categoryId?: number;
@@ -283,7 +284,8 @@ export const api = {
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----
   // 本任务全部目标（text/vulnclass/state）。
-  taskGoals: (id: string) => get<{ goals: TaskGoal[] }>(`/tasks/${id}/goals`),
+  taskGoals: (id: string) =>
+    get<{ goals: TaskGoal[] | null }>(`/tasks/${id}/goals`).then((response) => ({ goals: arr(response.goals) })),
   // 人工新增目标：写入图谱并通知 planner、复活任务。
   addGoal: (id: string, text: string, vulnclass?: string) =>
     post<TaskGoal>(`/tasks/${id}/goals`, { text, vulnclass: vulnclass ?? "" }),
@@ -295,7 +297,10 @@ export const api = {
 
   // ---- 操作约束管理（总览）----
   // 本任务全部操作约束（allow/deny）。
-  taskConstraints: (id: string) => get<{ constraints: TaskConstraint[] }>(`/tasks/${id}/constraints`),
+  taskConstraints: (id: string) =>
+    get<{ constraints: TaskConstraint[] | null }>(`/tasks/${id}/constraints`).then((response) => ({
+      constraints: arr(response.constraints),
+    })),
   // 新增约束（不通知 planner，下一轮规划自然读到）。
   addConstraint: (id: string, text: string, kind: TaskConstraint["kind"]) =>
     post<TaskConstraint>(`/tasks/${id}/constraints`, { text, kind }),

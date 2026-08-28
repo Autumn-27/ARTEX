@@ -377,10 +377,8 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 		return nil, err
 	}
 	rows.Close()
-	for _, task := range out {
-		if err := d.hydrateTaskContext(task); err != nil {
-			return nil, err
-		}
+	if err := d.hydrateTasksContext(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -1,22 +1,16 @@
 "use client";
 
 import * as React from "react";
+
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { toast } from "sonner";
-import {
-  ArrowLeftIcon,
-  PauseIcon,
-  PlayIcon,
-  BrainIcon,
-  CheckIcon,
-  CircleAlertIcon,
-} from "lucide-react";
 
+import { ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { toast } from "sonner";
+
+import { StatusBadge } from "@/components/status-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -26,30 +20,31 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { SessionsTab } from "./_tabs/sessions-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
-import { GraphTab } from "./_tabs/graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
-import { ReportTab } from "./_tabs/report-tab";
-import { InterceptTab } from "./_tabs/intercept-tab";
 import { AssetsTab } from "./_tabs/assets-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
+import { FindingsTab } from "./_tabs/findings-tab";
+import { GraphTab } from "./_tabs/graph-tab";
+import { InterceptTab } from "./_tabs/intercept-tab";
+import { OverviewTab } from "./_tabs/overview-tab";
+import { ReportTab } from "./_tabs/report-tab";
+import { SessionsTab } from "./_tabs/sessions-tab";
 
 const TABS = [
-  { value: "sessions",  label: "会话" },
-  { value: "overview",  label: "总览" },
-  { value: "graph",     label: "探索链路" },
-  { value: "findings",  label: "发现" },
-  { value: "assets",    label: "测试资产" },
-  { value: "coverage",  label: "资产覆盖图" },
+  { value: "sessions", label: "会话" },
+  { value: "overview", label: "总览" },
+  { value: "graph", label: "探索链路" },
+  { value: "findings", label: "发现" },
+  { value: "assets", label: "测试资产" },
+  { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
-  { value: "report",    label: "报告" },
+  { value: "report", label: "报告" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -81,7 +76,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   const activeProfile = profiles.find((profile) => profile.id === activeID);
   const currentLabel = exhausted
     ? "配置链已耗尽"
-    : activeProfile?.name ?? (activeID ? `配置 #${activeID}` : "跟随默认配置");
+    : (activeProfile?.name ?? (activeID ? `配置 #${activeID}` : "跟随默认配置"));
   const activeIndex = chain.indexOf(activeID);
   const backupCount = activeIndex >= 0 ? Math.max(0, chain.length - activeIndex - 1) : 0;
   const currentTitle = [currentLabel, activeProfile?.model, backupCount > 0 ? `${backupCount} 个备用` : ""]
@@ -151,11 +146,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           {backupCount > 0 && <span className="hidden text-muted-foreground xl:inline">+{backupCount}</span>}
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        ref={popoverContentRef}
-        align="start"
-        className="w-[min(28rem,calc(100vw-2rem))] gap-4 p-4"
-      >
+      <PopoverContent ref={popoverContentRef} align="start" className="w-[min(28rem,calc(100vw-2rem))] gap-4 p-4">
         <PopoverHeader>
           <PopoverTitle>任务 LLM 配置链</PopoverTitle>
           <PopoverDescription>{editorDescription}</PopoverDescription>
@@ -234,12 +225,16 @@ function TaskDetailInner() {
     };
   }, [id]);
 
+  const taskLoadInFlight = React.useRef<string | null>(null);
   const load = React.useCallback(() => {
-    Promise.all([api.tasks(), api.stats(id).catch(() => null)])
-      .then(([r, s]) => {
-        const base = r.tasks.find((t) => t.id === id) ?? null;
+    if (taskLoadInFlight.current === id) return;
+    taskLoadInFlight.current = id;
+    Promise.all([api.task(id), api.stats(id).catch(() => null)])
+      .then(([task, s]) => {
+        if (taskLoadInFlight.current !== id) return;
+        const base = { ...task };
         const at = s?.active_task;
-        if (base && at) {
+        if (at) {
           base.in_flight = at.in_flight;
           base.goals_total = at.goals_total;
           base.goals_met = at.goals_met;
@@ -247,12 +242,17 @@ function TaskDetailInner() {
           base.paused = at.paused;
         }
         setTask(base);
-        setPaused(at?.paused ?? base?.paused ?? false);
+        setPaused(at?.paused ?? base.paused ?? false);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
       })
-      .finally(() => setLoaded(true));
+      .finally(() => {
+        if (taskLoadInFlight.current === id) {
+          taskLoadInFlight.current = null;
+          setLoaded(true);
+        }
+      });
   }, [id]);
   React.useEffect(() => {
     load();

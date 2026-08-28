@@ -148,13 +148,46 @@ export default function DashboardPage() {
   const [tools, setTools] = React.useState<Tool[]>([]);
   const [llmProfiles, setLLMProfiles] = React.useState<LLMProfile[]>([]);
 
-  // fast poll: tasks, findings, stats, pending, activity (every 5s)
+  // The task list is the most expensive dashboard source. Poll it independently
+  // so a large history cannot hold back every other dashboard panel.
   React.useEffect(() => {
     let alive = true;
+    let loading = false;
+    let signature = "";
     const load = async () => {
+      if (loading) return;
+      loading = true;
       try {
-        const [tr, fr, sr, sets, pr, act, tok, ctok] = await Promise.all([
-          api.tasks(),
+        const tr = await api.tasks();
+        if (!alive) return;
+        const nextSignature = JSON.stringify(tr.tasks);
+        if (nextSignature !== signature) {
+          signature = nextSignature;
+          setTasks(tr.tasks);
+        }
+      } catch {
+        /* transient errors — next poll retries */
+      } finally {
+        loading = false;
+      }
+    };
+    void load();
+    const t = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  // The remaining fast sources stay batched so one poll causes a single render.
+  React.useEffect(() => {
+    let alive = true;
+    let loading = false;
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
           api.findings(),
           api.stats(),
           api.settings(),
@@ -164,23 +197,24 @@ export default function DashboardPage() {
           api.conversationTokens(),
         ]);
         if (!alive) return;
-        setTasks(tr.tasks);
-        setFindings(fr);
-        setStats(sr);
-        setSettings(sets);
-        setPending(pr);
-        setActivity(act.items);
-        setTokens(tok.total ?? null);
-        setConvTokens(ctok);
+        setFindings(findings);
+        setStats(stats);
+        setSettings(settings);
+        setPending(pending);
+        setActivity(activity.items);
+        setTokens(tokens.total ?? null);
+        setConvTokens(conversationTokens);
       } catch {
-        /* transient errors — next poll retries */
+        // Preserve stale data and retry on the next interval.
+      } finally {
+        loading = false;
       }
     };
     void load();
-    const t = setInterval(load, 5000);
+    const timer = setInterval(load, 5000);
     return () => {
       alive = false;
-      clearInterval(t);
+      clearInterval(timer);
     };
   }, []);
 

@@ -995,22 +995,20 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		active = t.ID
 	}
 	list := s.m.List()
-	toks, _ := s.m.PG().TokenTotalsAll()      // whole-task token totals, one query for all tasks
-	lastAct, _ := s.m.PG().LastActivityAll()  // persisted last-activity per task, one query
-	goalCounts, _ := s.m.PG().GoalCountsAll() // goal progress per exploration, one query
+	metrics, _ := s.m.PG().TaskListMetricsAll()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
-		dto.Tokens = tokenTotalDTO(toks[t.ExpID])
+		metric := metrics[t.ExpID]
+		dto.Tokens = tokenTotalDTO(metric.Tokens)
 		// prefer the live in-memory heartbeat (fresher) and fall back to the
 		// persisted max activity time (survives restarts) for run-duration display.
-		dto.LastActivity = lastAct[t.ExpID]
+		dto.LastActivity = metric.LastActivity
 		if live := s.engine.LastActivity(t.ID); live > dto.LastActivity {
 			dto.LastActivity = live
 		}
-		gc := goalCounts[t.ExpID]
-		dto.GoalsTotal = gc.Total
-		dto.GoalsMet = gc.Met
+		dto.GoalsTotal = metric.Goals.Total
+		dto.GoalsMet = metric.Goals.Met
 		dtos = append(dtos, dto)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})

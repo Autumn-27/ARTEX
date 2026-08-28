@@ -271,6 +271,13 @@ CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
 -- can't distinguish them); this covers reverse pagination of those sessions.
 CREATE INDEX IF NOT EXISTS idx_act_worker ON activity(exploration_id, worker, id);
+-- Task-list polls aggregate result usage and find the latest event repeatedly.
+-- Cover the token columns for index-only aggregation and the timestamp order for
+-- per-exploration latest-activity lookups.
+CREATE INDEX IF NOT EXISTS idx_act_result_usage ON activity(exploration_id)
+    INCLUDE (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+    WHERE kind='result';
+CREATE INDEX IF NOT EXISTS idx_act_latest ON activity(exploration_id, created_at DESC);
 
 -- =====================================================================
 -- C. LLM profiles
