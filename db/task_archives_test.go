@@ -8,6 +8,38 @@ import (
 	"time"
 )
 
+func TestQueryArchiveRowsStreamsJSON(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	payload := strings.Repeat("large request/response payload ", 64*1024)
+	raw, count, err := queryArchiveRows(d, `SELECT * FROM (VALUES
+($1::bigint,$2::text),($3::bigint,$4::text)) archived_row(id,body) ORDER BY id`,
+		int64(1), payload, int64(2), "quoted: \"value\"\nline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("row count=%d, want 2", count)
+	}
+	var rows []struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("decoded row count=%d, want 2", len(rows))
+	}
+	if rows[0].ID != 1 || rows[0].Body != payload || rows[1].ID != 2 || rows[1].Body != "quoted: \"value\"\nline" {
+		t.Fatal("streamed rows were reordered or truncated")
+	}
+}
+
 func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

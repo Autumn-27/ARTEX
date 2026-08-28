@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -423,11 +424,37 @@ func (d *DB) FailTaskArchiveJob(id int64, activeState string, cause error) error
 }
 
 func queryArchiveRows(q interface {
-	QueryRow(query string, args ...any) *sql.Row
-}, inner string, args ...any) (json.RawMessage, error) {
-	var raw []byte
-	err := q.QueryRow(`SELECT COALESCE(jsonb_agg(to_jsonb(row_data)), '[]'::jsonb) FROM (`+inner+`) row_data`, args...).Scan(&raw)
-	return json.RawMessage(raw), err
+	Query(query string, args ...any) (*sql.Rows, error)
+}, inner string, args ...any) (json.RawMessage, int64, error) {
+	// Do not aggregate the result in PostgreSQL. A jsonb array has a hard limit
+	// of 256 MiB for its elements, which large LLM request/response histories can
+	// exceed even though every individual record is valid. Reading row JSON in
+	// order also avoids building a second copy of the full table in PostgreSQL.
+	rows, err := q.Query(`SELECT row_to_json(row_data)::text FROM (`+inner+`) row_data`, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var output bytes.Buffer
+	output.WriteByte('[')
+	var count int64
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, 0, err
+		}
+		if count > 0 {
+			output.WriteByte(',')
+		}
+		output.Write(raw)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	output.WriteByte(']')
+	return json.RawMessage(output.Bytes()), count, nil
 }
 
 func rawRowCount(raw json.RawMessage) int64 {
@@ -492,12 +519,12 @@ func (d *DB) SnapshotTaskArchive(taskID int64) (*TaskArchiveSnapshot, error) {
 	}
 	counts := make(map[string]int64, len(queries))
 	for _, query := range queries {
-		raw, err := queryArchiveRows(tx, query.query, query.args...)
+		raw, count, err := queryArchiveRows(tx, query.query, query.args...)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", query.name, err)
 		}
 		tables[query.name] = raw
-		counts[query.name] = rawRowCount(raw)
+		counts[query.name] = count
 	}
 
 	assetIDs, exclusiveAssetIDs, hosts, exclusiveHosts, err := archiveAssetMetadata(tx, taskID, expID, tables["assets"])
