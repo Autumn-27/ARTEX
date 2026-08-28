@@ -1,13 +1,128 @@
 package db
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
 
+<<<<<<< Updated upstream
+=======
+type archiveJSONTestRows struct {
+	values [][]byte
+	next   int
+}
+
+func (r *archiveJSONTestRows) Next() bool {
+	if r.next >= len(r.values) {
+		return false
+	}
+	r.next++
+	return true
+}
+
+func (r *archiveJSONTestRows) Scan(dest ...any) error {
+	if len(dest) != 1 || r.next == 0 || r.next > len(r.values) {
+		return fmt.Errorf("invalid archive test row scan")
+	}
+	target, ok := dest[0].(*[]byte)
+	if !ok {
+		return fmt.Errorf("archive test row destination is %T", dest[0])
+	}
+	*target = append((*target)[:0], r.values[r.next-1]...)
+	return nil
+}
+
+func (r *archiveJSONTestRows) Err() error { return nil }
+
+func TestQueryArchiveRowsStreamsJSON(t *testing.T) {
+	payload := strings.Repeat("large request/response payload ", 64*1024)
+	values := make([][]byte, 2)
+	var err error
+	values[0], err = json.Marshal(map[string]any{"id": int64(1), "body": payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values[1], err = json.Marshal(map[string]any{"id": int64(2), "body": "quoted: \"value\"\nline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, count, err := encodeArchiveRows(&archiveJSONTestRows{values: values})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("row count=%d, want 2", count)
+	}
+	var rows []struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("decoded row count=%d, want 2", len(rows))
+	}
+	if rows[0].ID != 1 || rows[0].Body != payload || rows[1].ID != 2 || rows[1].Body != "quoted: \"value\"\nline" {
+		t.Fatal("streamed rows were reordered or truncated")
+	}
+}
+
+func TestWriteArchiveRowsProducesJSONSequence(t *testing.T) {
+	values := [][]byte{
+		json.RawMessage(`{"id":1,"body":"first"}`),
+		json.RawMessage(`{"id":2,"body":"second\\nline"}`),
+	}
+	var output bytes.Buffer
+	count, err := writeArchiveRows(&archiveJSONTestRows{values: values}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("streamed row count=%d, want 2", count)
+	}
+	decoder := json.NewDecoder(&output)
+	for wantID := int64(1); wantID <= 2; wantID++ {
+		var row struct {
+			ID int64 `json:"id"`
+		}
+		if err := decoder.Decode(&row); err != nil {
+			t.Fatal(err)
+		}
+		if row.ID != wantID {
+			t.Fatalf("streamed row id=%d, want %d", row.ID, wantID)
+		}
+	}
+}
+
+func TestTaskArchiveFormatCompatibility(t *testing.T) {
+	for _, version := range []int{TaskArchiveLegacyFormatVersion, TaskArchiveFormatVersion} {
+		if !IsTaskArchiveFormatSupported(version) {
+			t.Fatalf("archive format %d should be supported", version)
+		}
+	}
+	for _, version := range []int{0, TaskArchiveFormatVersion + 1} {
+		if IsTaskArchiveFormatSupported(version) {
+			t.Fatalf("archive format %d should be rejected", version)
+		}
+	}
+	invalidSnapshots := []*TaskArchiveSnapshot{
+		{FormatVersion: TaskArchiveLegacyFormatVersion, StreamedTables: map[string]string{"llm_records": TaskArchiveLLMRecordsPath}},
+		{FormatVersion: TaskArchiveFormatVersion, StreamedTables: map[string]string{"unknown": "database/unknown.ndjson"}},
+	}
+	for _, snapshot := range invalidSnapshots {
+		if _, err := (&DB{}).RestoreTaskArchive(1, snapshot, 0); !errors.Is(err, ErrTaskArchiveFormatMismatch) {
+			t.Fatalf("invalid streamed table metadata returned %v", err)
+		}
+	}
+}
+
+>>>>>>> Stashed changes
 func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
@@ -79,6 +194,12 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err := d.InsertToolUsage(&ToolUsage{ToolKey: toolName, AgentKey: "worker", TaskID: task.ID, ExplorationID: task.ExplorationID}); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.InsertLLMRecord(&LLMRecord{
+		TaskID: fmt.Sprint(task.ID), Model: "archive-model", SessionID: "archive-session",
+		Status: "ok", RawRequest: strings.Repeat("request", 1024), RawResponse: strings.Repeat("response", 1024),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID}); err != nil {
 		t.Fatal(err)
 	}
@@ -90,9 +211,16 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil || claimed == nil || claimed.ID != archive.ID || claimed.State != Archiving {
 		t.Fatalf("claim = %+v, %v", claimed, err)
 	}
-	snapshot, err := d.SnapshotTaskArchive(task.ID)
+	var llmRecords bytes.Buffer
+	snapshot, err := d.SnapshotTaskArchiveWithLLMRecords(task.ID, &llmRecords)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snapshot.StreamedTables["llm_records"] != TaskArchiveLLMRecordsPath || snapshot.DataCounts["llm_records"] != 1 {
+		t.Fatalf("unexpected streamed LLM metadata: paths=%v counts=%v", snapshot.StreamedTables, snapshot.DataCounts)
+	}
+	if rawRowCount(snapshot.Tables["llm_records"]) != 0 {
+		t.Fatal("streamed LLM records were also retained in manifest memory")
 	}
 	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
@@ -138,7 +266,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil || claimed == nil || claimed.State != Restoring {
 		t.Fatalf("restore claim = %+v, %v", claimed, err)
 	}
-	warnings, err := d.RestoreTaskArchive(archive.ID, snapshot, int64((10 * time.Minute).Seconds()))
+	warnings, err := d.RestoreTaskArchiveWithLLMRecords(
+		archive.ID, snapshot, int64((10 * time.Minute).Seconds()), bytes.NewReader(llmRecords.Bytes()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,6 +299,14 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if nodes < 2 || assets != 1 || usage != 1 {
 		t.Fatalf("restore incomplete nodes=%d assets=%d usage=%d", nodes, assets, usage)
+	}
+	var restoredRawRequest, restoredRawResponse string
+	if err := d.QueryRow(`SELECT COALESCE(raw_request,''),COALESCE(raw_response,'') FROM llm_records WHERE task_id=$1`, fmt.Sprint(task.ID)).
+		Scan(&restoredRawRequest, &restoredRawResponse); err != nil {
+		t.Fatal(err)
+	}
+	if restoredRawRequest != strings.Repeat("request", 1024) || restoredRawResponse != strings.Repeat("response", 1024) {
+		t.Fatal("restored streamed LLM record body was truncated")
 	}
 	var restoredCompanyID *int64
 	var restoredStatus, restoredError string
@@ -239,6 +377,42 @@ func TestTaskArchiveBlockersIgnoreQueuedDependents(t *testing.T) {
 	}
 	if blocker := blockers[source.ID]; blocker != 0 {
 		t.Fatalf("queued dependent must not block source, got %d", blocker)
+	}
+}
+
+func TestRecoverInterruptedArchiveRequiresManualRetry(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	task, err := d.CreateTaskWithOptions("interrupted archive", "must not restart automatically", TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = d.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID)
+		_ = d.DeleteTask(task.ID)
+	}()
+	if err := d.SetPaused(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := d.QueueTaskArchive(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE task_archives SET state=$2,phase='snapshot_database',progress=10 WHERE id=$1`, queued.ID, Archiving); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecoverTaskArchiveJobs(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := d.GetTaskArchive(queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered == nil || recovered.State != ArchiveFailed || recovered.Phase != "interrupted" || recovered.Error == "" {
+		t.Fatalf("recovered archive=%+v, want explicit-retry failure", recovered)
 	}
 }
 

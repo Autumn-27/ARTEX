@@ -133,11 +133,21 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS profile_name TEXT;
 
 // EnsureLLMRecordsTable creates the llm_records table if it does not exist.
 func (d *DB) EnsureLLMRecordsTable() error {
-	if _, err := d.Exec(llmRecordsSchema); err != nil {
+	tx, err := d.Begin()
+	if err != nil {
 		return err
 	}
-	_, err := d.Exec(llmRecordsMigrate)
-	return err
+	defer tx.Rollback() //nolint:errcheck
+	if err := coordinateWithSchemaMigration(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(llmRecordsSchema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(llmRecordsMigrate); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InsertLLMRecord stores one LLM call record.

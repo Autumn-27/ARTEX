@@ -47,7 +47,18 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	}
 
 	archivePath := taskArchivePath(dataDir, 1, taskID)
-	snapshot := &pgdb.TaskArchiveSnapshot{FormatVersion: pgdb.TaskArchiveFormatVersion, TaskID: 42, ExplorationID: explorationID}
+	streamPath := filepath.Join(stage.payload, filepath.FromSlash(pgdb.TaskArchiveLLMRecordsPath))
+	if err := os.MkdirAll(filepath.Dir(streamPath), archiveDirMode); err != nil {
+		t.Fatal(err)
+	}
+	streamBody := []byte("{\"id\":1,\"raw_request\":\"large\"}\n")
+	if err := os.WriteFile(streamPath, streamBody, archiveFileMode); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &pgdb.TaskArchiveSnapshot{
+		FormatVersion: pgdb.TaskArchiveFormatVersion, TaskID: 42, ExplorationID: explorationID,
+		StreamedTables: map[string]string{"llm_records": pgdb.TaskArchiveLLMRecordsPath},
+	}
 	original, compressed, checksum, err := writeTaskArchivePackage(archivePath, stage.payload, snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +72,9 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	extracted := filepath.Join(dataDir, "restore")
 	if err := extractTaskArchivePackage(archivePath, checksum, extracted); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(extracted, filepath.FromSlash(pgdb.TaskArchiveLLMRecordsPath))); err != nil || !bytes.Equal(got, streamBody) {
+		t.Fatalf("streamed LLM archive payload=%q err=%v", got, err)
 	}
 	installed, err := installTaskArchiveFiles(dataDir, extracted, taskID, 1)
 	if err != nil {

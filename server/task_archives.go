@@ -131,13 +131,15 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if err := s.waitTaskQuiescent(drainCtx, taskID); err != nil {
 		return errors.New("任务仍有运行中的 Agent，请先暂停后重试归档")
 	}
-	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "snapshot_database", 10)
-	snapshot, err := s.m.pg.SnapshotTaskArchive(job.TaskID)
+	task, err := s.m.pg.GetTask(job.TaskID)
 	if err != nil {
 		return err
 	}
-	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stage_files", 25)
-	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, snapshot.ExplorationID)
+	if task == nil {
+		return pgdb.ErrTaskArchiveNotFound
+	}
+	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stage_files", 10)
+	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, task.ExplorationID)
 	if err != nil {
 		return err
 	}
@@ -146,6 +148,27 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 			runErr = errors.Join(runErr, fileStage.rollback())
 		}
 	}()
+	streamPath := filepath.Join(fileStage.payload, filepath.FromSlash(pgdb.TaskArchiveLLMRecordsPath))
+	if err := os.MkdirAll(filepath.Dir(streamPath), archiveDirMode); err != nil {
+		return err
+	}
+	streamFile, err := os.OpenFile(streamPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, archiveFileMode)
+	if err != nil {
+		return err
+	}
+	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "snapshot_database", 20)
+	snapshot, snapshotErr := s.m.pg.SnapshotTaskArchiveWithLLMRecords(job.TaskID, streamFile)
+	var syncErr error
+	if snapshotErr == nil {
+		syncErr = streamFile.Sync()
+	}
+	closeErr := streamFile.Close()
+	if err := errors.Join(snapshotErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	if snapshot.ExplorationID != task.ExplorationID {
+		return errors.New("任务探索记录在归档快照期间发生变化")
+	}
 	if s.m.traffic != nil && len(snapshot.Hosts) > 0 {
 		_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "snapshot_traffic", 38)
 		trafficCount, err := s.m.traffic.ExportHosts(snapshot.Hosts, filepath.Join(fileStage.payload, "traffic"))
@@ -244,8 +267,26 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	if err := json.Unmarshal(manifestRaw, &snapshot); err != nil {
 		return err
 	}
-	if snapshot.TaskID != job.TaskID || snapshot.FormatVersion != pgdb.TaskArchiveFormatVersion {
+	if snapshot.TaskID != job.TaskID || !pgdb.IsTaskArchiveFormatSupported(snapshot.FormatVersion) {
 		return pgdb.ErrTaskArchiveFormatMismatch
+	}
+	var llmRecordsFile *os.File
+	relative, hasStreamedLLMRecords := snapshot.StreamedTables["llm_records"]
+	if len(snapshot.StreamedTables) > 0 &&
+		(snapshot.FormatVersion < 2 || !hasStreamedLLMRecords || len(snapshot.StreamedTables) != 1 ||
+			relative != pgdb.TaskArchiveLLMRecordsPath) {
+		return pgdb.ErrTaskArchiveFormatMismatch
+	}
+	if hasStreamedLLMRecords {
+		llmRecordsFile, err = os.Open(filepath.Join(extracted, filepath.FromSlash(relative)))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if llmRecordsFile != nil {
+				_ = llmRecordsFile.Close()
+			}
+		}()
 	}
 	if s.m.traffic != nil {
 		_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "restore_traffic", 35)
@@ -265,7 +306,17 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 		}
 	}()
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "restore_database", 70)
-	warnings, err := s.m.pg.RestoreTaskArchive(job.ID, &snapshot, job.RemainingTimeoutSeconds)
+	var warnings []string
+	if llmRecordsFile != nil {
+		warnings, err = s.m.pg.RestoreTaskArchiveWithLLMRecords(
+			job.ID, &snapshot, job.RemainingTimeoutSeconds, llmRecordsFile,
+		)
+		closeErr := llmRecordsFile.Close()
+		llmRecordsFile = nil
+		err = errors.Join(err, closeErr)
+	} else {
+		warnings, err = s.m.pg.RestoreTaskArchive(job.ID, &snapshot, job.RemainingTimeoutSeconds)
+	}
 	if err != nil {
 		return err
 	}

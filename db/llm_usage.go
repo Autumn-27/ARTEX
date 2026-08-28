@@ -49,8 +49,18 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
 
 // EnsureLLMUsageTable creates the llm_usage metering table if it does not exist.
 func (d *DB) EnsureLLMUsageTable() error {
-	_, err := d.Exec(llmUsageSchema)
-	return err
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := coordinateWithSchemaMigration(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(llmUsageSchema); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InsertLLMUsage appends one metering row. Best-effort: callers log and continue on

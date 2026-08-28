@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ func (d *DB) CompleteTaskArchive(
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := coordinateWithSchemaMigration(tx); err != nil {
+		return err
+	}
 	var taskID, expID int64
 	var state string
 	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
@@ -120,10 +124,11 @@ WHERE id=$1`, taskID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE task_archives SET
- state=$2,phase='ready',progress=100,error='',archive_path=$3,sha256=$4,
- original_size=$5,compressed_size=$6,data_counts=$7,aggregate_stats=$8,
- archived_at=now(),warnings='[]'
-WHERE id=$1`, archiveID, ArchiveReady, archivePath, sha256, originalSize, compressedSize, string(countsRaw), string(statsRaw)); err != nil {
+	 state=$2,phase='ready',progress=100,error='',archive_path=$3,sha256=$4,
+	 original_size=$5,compressed_size=$6,data_counts=$7,aggregate_stats=$8,
+	 format_version=$9,archived_at=now(),warnings='[]'
+WHERE id=$1`, archiveID, ArchiveReady, archivePath, sha256, originalSize, compressedSize,
+		string(countsRaw), string(statsRaw), snapshot.FormatVersion); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -133,14 +138,49 @@ WHERE id=$1`, archiveID, ArchiveReady, archivePath, sha256, originalSize, compre
 // idempotent for accounting/traffic retry scenarios and returns non-fatal
 // warnings for global objects that intentionally are not recreated.
 func (d *DB) RestoreTaskArchive(archiveID int64, snapshot *TaskArchiveSnapshot, remainingTimeoutSeconds int64) ([]string, error) {
-	if snapshot == nil || snapshot.FormatVersion != TaskArchiveFormatVersion {
+	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, nil)
+}
+
+// RestoreTaskArchiveWithLLMRecords restores a v2 package whose heavyweight LLM
+// record history is stored as a sequence of JSON objects outside manifest.json.
+func (d *DB) RestoreTaskArchiveWithLLMRecords(
+	archiveID int64,
+	snapshot *TaskArchiveSnapshot,
+	remainingTimeoutSeconds int64,
+	llmRecords io.Reader,
+) ([]string, error) {
+	if llmRecords == nil {
+		return nil, errors.New("nil streamed LLM record reader")
+	}
+	return d.restoreTaskArchive(archiveID, snapshot, remainingTimeoutSeconds, llmRecords)
+}
+
+func (d *DB) restoreTaskArchive(
+	archiveID int64,
+	snapshot *TaskArchiveSnapshot,
+	remainingTimeoutSeconds int64,
+	llmRecords io.Reader,
+) ([]string, error) {
+	if snapshot == nil || !IsTaskArchiveFormatSupported(snapshot.FormatVersion) {
 		return nil, ErrTaskArchiveFormatMismatch
+	}
+	streamedLLMRecords := snapshot.StreamedTables["llm_records"]
+	if (len(snapshot.StreamedTables) > 0 && snapshot.FormatVersion < 2) ||
+		len(snapshot.StreamedTables) > 1 ||
+		(len(snapshot.StreamedTables) == 1 && streamedLLMRecords != TaskArchiveLLMRecordsPath) {
+		return nil, fmt.Errorf("%w: unsupported streamed table metadata", ErrTaskArchiveFormatMismatch)
+	}
+	if streamedLLMRecords != "" && llmRecords == nil {
+		return nil, fmt.Errorf("%w: streamed LLM records are missing", ErrTaskArchiveFormatMismatch)
 	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := coordinateWithSchemaMigration(tx); err != nil {
+		return nil, err
+	}
 	var taskID, expID int64
 	var state string
 	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
@@ -215,7 +255,23 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_links", "findings", "llm_records", "llm_usage", "skill_usage", "tool_usage"} {
+	for _, table := range []string{"task_asset_links", "findings"} {
+		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
+	}
+	if streamedLLMRecords != "" {
+		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
+		if err != nil {
+			return nil, fmt.Errorf("restore llm_records: %w", err)
+		}
+		if expected := snapshot.DataCounts["llm_records"]; count != expected {
+			return nil, fmt.Errorf("restore llm_records: row count %d does not match manifest %d", count, expected)
+		}
+	} else if err := insertArchiveRows(tx, "llm_records", remappedTables["llm_records"]); err != nil {
+		return nil, fmt.Errorf("restore llm_records: %w", err)
+	}
+	for _, table := range []string{"llm_usage", "skill_usage", "tool_usage"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -304,6 +360,36 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	}
 	_, err := tx.Exec(`INSERT INTO `+table+` SELECT * FROM json_populate_recordset(NULL::`+table+`,$1::json)`, string(raw))
 	return err
+}
+
+func insertArchiveJSONSequenceRows(tx *sql.Tx, table string, reader io.Reader) (int64, error) {
+	if table != "llm_records" {
+		return 0, fmt.Errorf("archive streamed restore table %q is not allowed", table)
+	}
+	statement, err := tx.Prepare(`INSERT INTO llm_records SELECT * FROM json_populate_record(NULL::llm_records,$1::json)`)
+	if err != nil {
+		return 0, err
+	}
+	defer statement.Close()
+	decoder := json.NewDecoder(reader)
+	var count int64
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return 0, err
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return 0, errors.New("streamed archive row must be a JSON object")
+		}
+		if _, err := statement.Exec(string(trimmed)); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	return count, nil
 }
 
 func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[int64]int64, []string, error) {
@@ -598,6 +684,9 @@ func (d *DB) DeleteTaskArchiveStub(archiveID int64) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := coordinateWithSchemaMigration(tx); err != nil {
+		return err
+	}
 	var taskID, expID int64
 	var state string
 	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state

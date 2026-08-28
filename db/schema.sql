@@ -448,7 +448,7 @@ CREATE TABLE IF NOT EXISTS task_archives (
     progress                   INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
     error                      TEXT NOT NULL DEFAULT '',
     warnings                   JSONB NOT NULL DEFAULT '[]',
-    format_version             INTEGER NOT NULL DEFAULT 1,
+    format_version             INTEGER NOT NULL DEFAULT 2,
     archive_path               TEXT NOT NULL DEFAULT '',
     sha256                     TEXT NOT NULL DEFAULT '',
     original_size              BIGINT NOT NULL DEFAULT 0,
@@ -468,6 +468,7 @@ CREATE TABLE IF NOT EXISTS task_archives (
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE task_archives ALTER COLUMN format_version SET DEFAULT 2;
 CREATE INDEX IF NOT EXISTS idx_task_archives_state ON task_archives(state, requested_at, id);
 CREATE INDEX IF NOT EXISTS idx_task_archives_archived ON task_archives(archived_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_task_archives_sources ON task_archives USING GIN(source_task_ids);

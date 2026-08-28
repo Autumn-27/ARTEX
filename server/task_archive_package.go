@@ -480,11 +480,20 @@ func writeTaskArchivePackage(path, payloadDir string, snapshot *pgdb.TaskArchive
 	if err = os.MkdirAll(filepath.Dir(path), archiveDirMode); err != nil {
 		return 0, 0, "", err
 	}
-	manifest, err := json.Marshal(snapshot)
+	manifestFile, err := os.OpenFile(
+		filepath.Join(payloadDir, "manifest.json"),
+		os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+		archiveFileMode,
+	)
 	if err != nil {
 		return 0, 0, "", err
 	}
-	if err = os.WriteFile(filepath.Join(payloadDir, "manifest.json"), manifest, archiveFileMode); err != nil {
+	encodeErr := json.NewEncoder(manifestFile).Encode(snapshot)
+	var syncErr error
+	if encodeErr == nil {
+		syncErr = manifestFile.Sync()
+	}
+	if err := errors.Join(encodeErr, syncErr, manifestFile.Close()); err != nil {
 		return 0, 0, "", err
 	}
 	temporary := path + ".partial"
