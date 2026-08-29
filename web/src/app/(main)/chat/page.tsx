@@ -81,6 +81,7 @@ function fmtDuration(ms: number): string {
 // then one more page each time the user scrolls to the top. Kept modest so a long
 // thread stays snappy (only ~a page of rows is in the DOM until you scroll up).
 const HISTORY_PAGE = 200;
+const CONVERSATION_LIST_PAGE = 100;
 
 function conversationIsPinned(conversation: Conversation): boolean {
   return conversation.pinned ?? Boolean(conversation.pinned_at);
@@ -750,7 +751,7 @@ function ChatView({
 
 // ConversationItem is one row in the left rail: title, agent subtitle, inline
 // rename, pin marker, and a compact action menu.
-function ConversationItem({
+const ConversationItem = React.memo(function ConversationItem({
   conv,
   agent,
   active,
@@ -772,16 +773,16 @@ function ConversationItem({
   active: boolean;
   renaming: boolean;
   renameText: string;
-  onSelect: () => void;
-  onStartRename: () => void;
+  onSelect: (id: number) => void;
+  onStartRename: (conversation: Conversation) => void;
   onRenameText: (v: string) => void;
-  onCommitRename: () => void;
+  onCommitRename: (id: number, title: string) => void;
   onCancelRename: () => void;
-  onTogglePinned: () => void;
-  onDelete: () => void;
+  onTogglePinned: (conversation: Conversation) => void;
+  onDelete: (id: number) => void;
   selectionMode: boolean;
   selectedForDelete: boolean;
-  onSelectedForDeleteChange: (checked: boolean) => void;
+  onSelectedForDeleteChange: (id: number, checked: boolean) => void;
 }) {
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const renameInputRef = React.useRef<HTMLInputElement>(null);
@@ -805,7 +806,7 @@ function ConversationItem({
       {selectionMode && (
         <Checkbox
           checked={selectedForDelete}
-          onCheckedChange={(checked) => onSelectedForDeleteChange(checked === true)}
+          onCheckedChange={(checked) => onSelectedForDeleteChange(conv.id, checked === true)}
           aria-label={`选择对话「${conv.title || "新对话"}」`}
           className="ml-1 shrink-0"
         />
@@ -816,10 +817,10 @@ function ConversationItem({
           value={renameText}
           onChange={(e) => onRenameText(e.target.value)}
           onBlur={() => {
-            if (!cancelRenameRef.current) onCommitRename();
+            if (!cancelRenameRef.current) onCommitRename(conv.id, renameText);
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter") onCommitRename();
+            if (e.key === "Enter") onCommitRename(conv.id, renameText);
             if (e.key === "Escape") {
               e.preventDefault();
               cancelRenameRef.current = true;
@@ -831,8 +832,8 @@ function ConversationItem({
       ) : (
         <button
           type="button"
-          onClick={onSelect}
-          onDoubleClick={onStartRename}
+          onClick={() => onSelect(conv.id)}
+          onDoubleClick={() => onStartRename(conv)}
           title="双击重命名"
           className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
         >
@@ -869,11 +870,11 @@ function ConversationItem({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuGroup>
-            <DropdownMenuItem onSelect={onStartRename}>
+            <DropdownMenuItem onSelect={() => onStartRename(conv)}>
               <PencilIcon />
               重命名
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onTogglePinned}>
+            <DropdownMenuItem onSelect={() => onTogglePinned(conv)}>
               {pinned ? <PinOffIcon /> : <PinIcon />}
               {pinned ? "取消置顶" : "置顶"}
             </DropdownMenuItem>
@@ -895,13 +896,13 @@ function ConversationItem({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={onDelete}>删除</AlertDialogAction>
+            <AlertDialogAction onClick={() => onDelete(conv.id)}>删除</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </div>
   );
-}
+});
 
 export default function ChatPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
@@ -917,6 +918,7 @@ export default function ChatPage() {
   const [selectionMode, setSelectionMode] = React.useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
+  const [visibleConversationCount, setVisibleConversationCount] = React.useState(CONVERSATION_LIST_PAGE);
   // Pending text + uploaded attachments handed off from a draft that created a
   // conversation via the paperclip, keyed by the new conversation id (consumed once
   // by ChatView on mount; ids never repeat, so leftover entries are harmless).
@@ -974,11 +976,16 @@ export default function ChatPage() {
     window.history.replaceState(null, "", url);
   }, [selectedId]);
 
-  const selected = convs.find((c) => c.id === selectedId) ?? null;
+  const selected = React.useMemo(() => convs.find((c) => c.id === selectedId) ?? null, [convs, selectedId]);
+  const agentByKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
+  const visibleConversations = React.useMemo(
+    () => convs.slice(0, visibleConversationCount),
+    [convs, visibleConversationCount],
+  );
   // conversation agents: custom agents + conversational built-ins (role=assistant,
   // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
   // are task-specific and stay hidden from the chat page.
-  const chatAgents = agents.filter((a) => !a.builtin || a.role === "assistant");
+  const chatAgents = React.useMemo(() => agents.filter((a) => !a.builtin || a.role === "assistant"), [agents]);
 
   const selectedConversationCount = selectedConversationIds.size;
   const allConversationsSelected = convs.length > 0 && selectedConversationCount === convs.length;
@@ -987,14 +994,14 @@ export default function ChatPage() {
   if (allConversationsSelected) conversationHeaderChecked = true;
   else if (someConversationsSelected) conversationHeaderChecked = "indeterminate";
 
-  function toggleConversationSelected(id: number, checked: boolean) {
+  const toggleConversationSelected = React.useCallback((id: number, checked: boolean) => {
     setSelectedConversationIds((current) => {
       const next = new Set(current);
       if (checked) next.add(id);
       else next.delete(id);
       return next;
     });
-  }
+  }, []);
 
   function toggleAllConversations(checked: boolean) {
     setSelectedConversationIds(checked ? new Set(convs.map((conversation) => conversation.id)) : new Set());
@@ -1005,21 +1012,24 @@ export default function ChatPage() {
     setSelectedConversationIds(new Set());
   }
 
-  async function del(id: number) {
-    try {
-      await api.deleteConversation(id);
-      if (selectedId === id) setSelectedId(null);
-      setSelectedConversationIds((current) => {
-        if (!current.has(id)) return current;
-        const next = new Set(current);
-        next.delete(id);
-        return next;
-      });
-      reloadConvs();
-    } catch (e) {
-      toast.error("删除失败：" + (e as Error).message);
-    }
-  }
+  const del = React.useCallback(
+    async (id: number) => {
+      try {
+        await api.deleteConversation(id);
+        setSelectedId((current) => (current === id ? null : current));
+        setSelectedConversationIds((current) => {
+          if (!current.has(id)) return current;
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        });
+        reloadConvs();
+      } catch (e) {
+        toast.error("删除失败：" + (e as Error).message);
+      }
+    },
+    [reloadConvs],
+  );
 
   async function deleteSelectedConversations() {
     const ids = [...selectedConversationIds];
@@ -1062,32 +1072,38 @@ export default function ChatPage() {
     }
   }
 
-  async function togglePinned(conversation: Conversation) {
-    const pinned = conversationIsPinned(conversation);
-    try {
-      await api.pinConversation(conversation.id, !pinned);
-      reloadConvs();
-    } catch (e) {
-      toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(e as Error).message}`);
-    }
-  }
+  const togglePinned = React.useCallback(
+    async (conversation: Conversation) => {
+      const pinned = conversationIsPinned(conversation);
+      try {
+        await api.pinConversation(conversation.id, !pinned);
+        reloadConvs();
+      } catch (e) {
+        toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(e as Error).message}`);
+      }
+    },
+    [reloadConvs],
+  );
 
-  function startRename(c: Conversation) {
+  const startRename = React.useCallback((c: Conversation) => {
     setRenamingId(c.id);
     setRenameText(c.title || "");
-  }
-  async function commitRename() {
-    const id = renamingId;
-    const title = renameText.trim();
-    setRenamingId(null);
-    if (!id || !title) return;
-    try {
-      await api.renameConversation(id, title);
-      reloadConvs();
-    } catch (e) {
-      toast.error("重命名失败：" + (e as Error).message);
-    }
-  }
+  }, []);
+  const commitRename = React.useCallback(
+    async (id: number, value: string) => {
+      const title = value.trim();
+      setRenamingId(null);
+      if (!title) return;
+      try {
+        await api.renameConversation(id, title);
+        reloadConvs();
+      } catch (e) {
+        toast.error("重命名失败：" + (e as Error).message);
+      }
+    },
+    [reloadConvs],
+  );
+  const cancelRename = React.useCallback(() => setRenamingId(null), []);
 
   return (
     <div
@@ -1147,26 +1163,37 @@ export default function ChatPage() {
           <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
               {convs.length === 0 && <p className="text-muted-foreground px-2 py-6 text-center text-xs">暂无对话</p>}
-              {convs.map((c) => (
+              {visibleConversations.map((c) => (
                 <ConversationItem
                   key={c.id}
                   conv={c}
-                  agent={agents.find((a) => a.key === c.agent_key)}
+                  agent={agentByKey.get(c.agent_key)}
                   active={selectedId === c.id}
                   renaming={renamingId === c.id}
-                  renameText={renameText}
-                  onSelect={() => setSelectedId(c.id)}
-                  onStartRename={() => startRename(c)}
+                  renameText={renamingId === c.id ? renameText : ""}
+                  onSelect={setSelectedId}
+                  onStartRename={startRename}
                   onRenameText={setRenameText}
                   onCommitRename={commitRename}
-                  onCancelRename={() => setRenamingId(null)}
-                  onTogglePinned={() => void togglePinned(c)}
-                  onDelete={() => del(c.id)}
+                  onCancelRename={cancelRename}
+                  onTogglePinned={togglePinned}
+                  onDelete={del}
                   selectionMode={selectionMode}
                   selectedForDelete={selectedConversationIds.has(c.id)}
-                  onSelectedForDeleteChange={(checked) => toggleConversationSelected(c.id, checked)}
+                  onSelectedForDeleteChange={toggleConversationSelected}
                 />
               ))}
+              {visibleConversationCount < convs.length && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mt-1 w-full"
+                  onClick={() => setVisibleConversationCount((count) => count + CONVERSATION_LIST_PAGE)}
+                >
+                  加载更多
+                </Button>
+              )}
             </div>
           </ScrollArea>
         </div>

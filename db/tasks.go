@@ -89,9 +89,11 @@ const MinPlanHeartbeatSeconds = 600
 const MaxTaskSourceCount = 8
 
 // MaxTaskCompanyCount bounds the number of company asset scopes attached to a
-// task. Company scopes are prompt context, so an unbounded list would inflate
-// every planner and worker call.
+// task. Company scopes are prompt context, and their currently attributed
+// assets are snapshotted into the task at creation time.
 const MaxTaskCompanyCount = 32
+
+const taskCompanyAssetSource = "company"
 
 var (
 	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
@@ -248,6 +250,11 @@ func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {
 	if len(companyIDs) == 0 {
 		return nil
 	}
+	// Company scope edits rebuild assets.company_id. Serialize the creation-time
+	// snapshot with those edits so the task sees one committed attribution state.
+	if err := lockCompanyScopeMutation(tx); err != nil {
+		return err
+	}
 	var inserted int
 	err := tx.QueryRow(`
 WITH requested(company_id, position) AS (
@@ -267,6 +274,32 @@ SELECT count(*) FROM inserted`, taskID, companyIDs).Scan(&inserted)
 	}
 	if inserted != len(companyIDs) {
 		return fmt.Errorf("%w: one or more companies do not exist", ErrTaskCompanyNotFound)
+	}
+
+	// Updating task_ids fires sync_task_asset_links, which first creates generic
+	// source rows. The provenance upsert must therefore run afterwards so the
+	// company name and creation-time reason remain visible to operators.
+	if _, err := tx.Exec(`
+UPDATE assets
+SET task_ids=CASE
+    WHEN $1=ANY(task_ids) THEN task_ids
+    ELSE array_append(task_ids, $1)
+END
+WHERE company_id=ANY($2::bigint[])`, taskID, companyIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+SELECT $1, asset.id, $3, '任务创建时关联企业：' || company.name
+FROM assets asset
+JOIN companies company ON company.id=asset.company_id
+WHERE asset.company_id=ANY($2::bigint[])
+  AND $1=ANY(asset.task_ids)
+ON CONFLICT (task_id, asset_id) DO UPDATE
+SET source=EXCLUDED.source,
+    source_summary=EXCLUDED.source_summary,
+    source_node_id=NULL`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
+		return err
 	}
 	return nil
 }
@@ -344,10 +377,8 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 		return nil, err
 	}
 	rows.Close()
-	for _, task := range out {
-		if err := d.hydrateTaskContext(task); err != nil {
-			return nil, err
-		}
+	if err := d.hydrateTasksContext(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

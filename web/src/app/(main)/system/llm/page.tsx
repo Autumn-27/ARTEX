@@ -545,7 +545,8 @@ function ProfileSheet({
               onChange={(e) => setProxy(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">
-              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如 socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
+              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如
+              socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
             </p>
           </div>
 
@@ -620,7 +621,8 @@ function ProfileSheet({
                 <Label className="text-sm">流式输出 · streaming</Label>
                 <p className="text-muted-foreground text-xs">
                   开启（默认）走流式 SSE，有运行中实时进度与实时 token 计数。 关闭则走真·非流式（stream:false，
-                  一次性返回完整响应）——可绕开部分网关糟糕的 SSE 实现（空帧 / 思考字段丢帧）， 代价是失去运行中的实时进度。
+                  一次性返回完整响应）——可绕开部分网关糟糕的 SSE 实现（空帧 / 思考字段丢帧），
+                  代价是失去运行中的实时进度。
                 </p>
               </div>
               <Switch checked={streaming} onCheckedChange={setStreaming} aria-label="流式输出" />
@@ -632,8 +634,8 @@ function ProfileSheet({
               <div className="grid gap-0.5">
                 <Label className="text-sm">思考开关 · thinking.type</Label>
                 <p className="text-muted-foreground text-xs">
-                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持
-                  的模型）；关闭=发 disabled；开启=发 enabled。与下面的强度互相独立。
+                  控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持 的模型）；关闭=发
+                  disabled；开启=发 enabled。与下面的强度互相独立。
                 </p>
               </div>
               <Select value={thinkingType} onValueChange={setThinkingType}>
@@ -653,8 +655,8 @@ function ProfileSheet({
               <div className="grid gap-0.5">
                 <Label className="text-sm">思考强度 · reasoning_effort</Label>
                 <p className="text-muted-foreground text-xs">
-                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。
-                  有些接口没有 thinking 字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
+                  独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。 有些接口没有 thinking
+                  字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
                 </p>
               </div>
               <Select value={effort} onValueChange={setEffort}>

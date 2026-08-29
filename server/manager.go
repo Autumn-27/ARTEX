@@ -358,6 +358,25 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if err != nil {
 			log.Printf("[traffic] disabled: %v", err)
 		} else {
+			err = tr.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
+				if taskID <= 0 {
+					return false, errors.New("归档流量暂存日志缺少任务 ID")
+				}
+				task, taskErr := pg.GetTask(taskID)
+				if taskErr != nil {
+					return false, taskErr
+				}
+				// Archived/permanently deleted tasks are hidden from GetTask. A
+				// restored task is visible and needs the staged traffic put back.
+				return task == nil, nil
+			})
+			if err != nil {
+				_ = tr.Close()
+				_ = pg.Close()
+				return nil, fmt.Errorf("recover traffic delete staging: %w", err)
+			}
+		}
+		if tr != nil {
 			m.traffic = tr
 			go func() {
 				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA)", proxyAddr, tr.ProxyAddr())

@@ -35,7 +35,8 @@ export interface Task {
   llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
   llm_failover_reason?: string;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
-  company_ids?: number[]; // associated company asset scopes available as task context
+  archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
+  company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
 
@@ -73,6 +74,74 @@ export interface DeleteTaskResult {
   findings_deleted: number;
   llm_records_deleted: number;
   cleanup_warning?: string;
+}
+
+export type TaskArchiveState =
+  | "archive_queued"
+  | "archiving"
+  | "archive_failed"
+  | "ready"
+  | "restore_queued"
+  | "restoring"
+  | "restore_failed"
+  | "delete_queued"
+  | "deleting"
+  | "delete_failed";
+
+export interface TaskArchiveTokenStats {
+  calls?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+}
+
+export interface TaskArchive {
+  id: number;
+  task_id: number;
+  state: TaskArchiveState;
+  phase: string;
+  progress: number;
+  error?: string;
+  warnings?: string[];
+  format_version: number;
+  sha256?: string;
+  original_size: number;
+  compressed_size: number;
+  task_name: string;
+  task_description: string;
+  task_goal: string;
+  original_status: TaskStatus;
+  category_id?: number;
+  category_name?: string;
+  source_task_ids: number[];
+  remaining_timeout_seconds: number;
+  data_counts: Record<string, number>;
+  aggregate_stats: {
+    tokens?: TaskArchiveTokenStats;
+    skills?: Record<string, number>;
+    tools?: Record<string, number>;
+    findings?: Record<string, number>;
+  };
+  archived_at?: string;
+  requested_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskArchivePage {
+  items: TaskArchive[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface ArchiveBatchItem {
+  id: string;
+  archive_id?: number;
+  ok: boolean;
+  queued: boolean;
+  error?: string;
 }
 
 // ---- Asset graph (global, shared across tasks) ----
@@ -477,6 +546,7 @@ export interface FindingQuery {
   status?: "all" | FindingStatus;
   vulnclass?: string;
   task?: string; // 任务 id;"all"/空 = 不按任务筛选
+  query?: string;
   sort?: "severity" | "time";
 }
 

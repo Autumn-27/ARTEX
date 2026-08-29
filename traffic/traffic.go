@@ -205,7 +205,7 @@ func (t *Traffic) Close() error {
 	t.reaping.Wait()
 	return t.db.Close()
 }
-func (t *Traffic) DB() *sql.DB  { return t.db }
+func (t *Traffic) DB() *sql.DB { return t.db }
 
 // sink is the go-mitmproxy addon that records completed exchanges.
 type sink struct {
@@ -870,6 +870,21 @@ type stagedTrafficPath struct {
 	staged string
 }
 
+type hostDeleteStageJournal struct {
+	Version   int                   `json:"version"`
+	ArchiveID int64                 `json:"archive_id,omitempty"`
+	TaskID    int64                 `json:"task_id,omitempty"`
+	Hosts     []string              `json:"hosts,omitempty"`
+	Moves     []hostDeleteStageMove `json:"moves"`
+}
+
+type hostDeleteStageMove struct {
+	Source string `json:"source"`
+	Staged string `json:"staged"`
+}
+
+const hostDeleteStageJournalName = "journal.json"
+
 // stageTrees moves host directories aside onto the same filesystem. The rename is
 // atomic and instant, which buys two things the unlink cannot: the deletion stays
 // reversible until the transaction commits, and the tree stops being visible to
@@ -877,7 +892,12 @@ type stagedTrafficPath struct {
 // directories, so anything under _delete_staging is already out of the live set).
 // An empty stageDir is returned when there was nothing to stage.
 func (t *Traffic) stageTrees(dirs []string) (stageDir string, moves []stagedTrafficPath, err error) {
+	return t.stageTreesForArchive(dirs, nil, 0, 0)
+}
+
+func (t *Traffic) stageTreesForArchive(dirs, hosts []string, archiveID, taskID int64) (stageDir string, moves []stagedTrafficPath, err error) {
 	seen := make(map[string]struct{}, len(dirs))
+	planned := make([]stagedTrafficPath, 0, len(dirs))
 	for _, source := range dirs {
 		if _, dup := seen[source]; dup {
 			continue
@@ -889,22 +909,60 @@ func (t *Traffic) stageTrees(dirs []string) (stageDir string, moves []stagedTraf
 			}
 			return stageDir, moves, fmt.Errorf("检查历史流量目录 %s: %w", source, err)
 		}
-		if stageDir == "" {
-			parent := filepath.Join(t.dir, "_delete_staging")
-			if err := os.MkdirAll(parent, 0o700); err != nil {
-				return stageDir, moves, fmt.Errorf("创建流量暂存目录: %w", err)
-			}
-			if stageDir, err = os.MkdirTemp(parent, "hosts-"); err != nil {
-				return stageDir, moves, fmt.Errorf("创建流量暂存目录: %w", err)
-			}
-		}
-		staged := filepath.Join(stageDir, fmt.Sprintf("%d-%s", len(moves), filepath.Base(source)))
+		planned = append(planned, stagedTrafficPath{source: source})
+	}
+	// 归档路径即使一个历史 host 目录都没有(新装机的流量只落在 SQLite + _blobs)
+	// 也必须留下 journal：崩溃点若落在 PostgreSQL 提交与 SQLite 提交之间，重启后
+	// SQLite 事务被回滚，只有这份 journal 能让恢复流程补做 host 行的删除。少了它，
+	// 已转冷任务的独占流量会永久留在热库里。
+	uniqueHosts := uniqueArchiveHosts(hosts)
+	if len(planned) == 0 && len(uniqueHosts) == 0 {
+		return "", nil, nil
+	}
+	parent := filepath.Join(t.dir, "_delete_staging")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", nil, fmt.Errorf("创建流量暂存目录: %w", err)
+	}
+	if stageDir, err = os.MkdirTemp(parent, "hosts-"); err != nil {
+		return "", nil, fmt.Errorf("创建流量暂存目录: %w", err)
+	}
+	journal := hostDeleteStageJournal{Version: 1, ArchiveID: archiveID, TaskID: taskID, Hosts: uniqueHosts}
+	for i := range planned {
+		planned[i].staged = filepath.Join(stageDir, fmt.Sprintf("%d-%s", i, filepath.Base(planned[i].source)))
+		journal.Moves = append(journal.Moves, hostDeleteStageMove{Source: planned[i].source, Staged: planned[i].staged})
+	}
+	if err := writeHostDeleteStageJournal(filepath.Join(stageDir, hostDeleteStageJournalName), journal); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", nil, err
+	}
+	for _, move := range planned {
+		source, staged := move.source, move.staged
 		if err := os.Rename(source, staged); err != nil {
 			return stageDir, moves, fmt.Errorf("移出历史流量目录 %s: %w", source, err)
 		}
 		moves = append(moves, stagedTrafficPath{source: source, staged: staged})
 	}
 	return stageDir, moves, nil
+}
+
+func writeHostDeleteStageJournal(path string, journal hostDeleteStageJournal) error {
+	raw, err := json.Marshal(journal)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // restoreTrees puts staged directories back where they came from, newest move
@@ -992,6 +1050,20 @@ func (s *HostDeleteStage) Deleted() int64 {
 // StageDeleteHostsExact prepares a reversible exact-host deletion. Callers must
 // finish every successful stage with Commit or Rollback.
 func (t *Traffic) StageDeleteHostsExact(hosts []string) (*HostDeleteStage, error) {
+	return t.stageDeleteHostsExact(hosts, 0, 0)
+}
+
+// StageDeleteHostsExactForArchive ties the reversible traffic deletion to a
+// persistent task archive. Startup recovery uses archiveCommitted to decide
+// whether an interrupted stage must be completed or rolled back.
+func (t *Traffic) StageDeleteHostsExactForArchive(hosts []string, archiveID, taskID int64) (*HostDeleteStage, error) {
+	if archiveID <= 0 || taskID <= 0 {
+		return nil, errors.New("archive and task ids must be positive")
+	}
+	return t.stageDeleteHostsExact(hosts, archiveID, taskID)
+}
+
+func (t *Traffic) stageDeleteHostsExact(hosts []string, archiveID, taskID int64) (*HostDeleteStage, error) {
 	t.wmu.Lock()
 	stage := &HostDeleteStage{traffic: t}
 	fail := func(cause error) (*HostDeleteStage, error) {
@@ -1037,11 +1109,154 @@ func (t *Traffic) StageDeleteHostsExact(hosts []string) (*HostDeleteStage, error
 		stage.deleted += n
 	}
 
-	stage.stageDir, stage.moves, err = t.stageTrees(legacy)
+	stage.stageDir, stage.moves, err = t.stageTreesForArchive(legacy, unique, archiveID, taskID)
 	if err != nil {
 		return fail(err)
 	}
 	return stage, nil
+}
+
+// RecoverHostDeleteStages resolves filesystem moves left by a process exit.
+// SQLite rolls open transactions back on restart, while the supplied callback
+// identifies task archives whose PostgreSQL compaction already committed.
+func (t *Traffic) RecoverHostDeleteStages(archiveCommitted func(int64, int64) (bool, error)) error {
+	if t == nil {
+		return nil
+	}
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	parent := filepath.Join(t.dir, "_delete_staging")
+	entries, err := os.ReadDir(parent)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	needsGC := false
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		stageDir := filepath.Join(parent, entry.Name())
+		raw, err := os.ReadFile(filepath.Join(stageDir, hostDeleteStageJournalName))
+		if os.IsNotExist(err) {
+			// Older versions did not persist enough information for lossless
+			// recovery. Keep the directory for manual inspection.
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		var journal hostDeleteStageJournal
+		if err := json.Unmarshal(raw, &journal); err != nil {
+			errs = append(errs, fmt.Errorf("读取流量暂存日志 %s: %w", stageDir, err))
+			continue
+		}
+		if journal.Version != 1 {
+			errs = append(errs, fmt.Errorf("流量暂存日志 %s 的版本 %d 不受支持", stageDir, journal.Version))
+			continue
+		}
+		moves := make([]stagedTrafficPath, 0, len(journal.Moves))
+		for _, move := range journal.Moves {
+			if !pathWithin(t.dir, move.Source) || !pathWithin(stageDir, move.Staged) {
+				errs = append(errs, fmt.Errorf("流量暂存日志包含越界路径: %s", stageDir))
+				moves = nil
+				break
+			}
+			if _, err := os.Lstat(move.Staged); err == nil {
+				moves = append(moves, stagedTrafficPath{source: move.Source, staged: move.Staged})
+			} else if !os.IsNotExist(err) {
+				errs = append(errs, err)
+				moves = nil
+				break
+			}
+		}
+		if moves == nil {
+			continue
+		}
+		committed := false
+		if journal.ArchiveID > 0 {
+			if archiveCommitted == nil {
+				errs = append(errs, fmt.Errorf("流量归档 %d 无状态解析器", journal.ArchiveID))
+				continue
+			}
+			committed, err = archiveCommitted(journal.ArchiveID, journal.TaskID)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		} else if len(journal.Hosts) > 0 {
+			committed, err = t.hostsHaveNoExchanges(journal.Hosts)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		if !committed {
+			if err := restoreTrees(stageDir, moves); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if err := t.deleteArchivedHosts(journal.Hosts); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.RemoveAll(stageDir); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		needsGC = true
+	}
+	if needsGC {
+		if err := t.gcBlobs(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (t *Traffic) hostsHaveNoExchanges(hosts []string) (bool, error) {
+	for _, host := range hosts {
+		var count int
+		if err := t.db.QueryRow(`SELECT count(*) FROM exchanges WHERE host=?`, host).Scan(&count); err != nil {
+			return false, err
+		}
+		if count > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (t *Traffic) deleteArchivedHosts(hosts []string) error {
+	tx, err := t.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, host := range hosts {
+		if _, err := t.deleteWhere(tx, `host=?`, host); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func pathWithin(root, candidate string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootAbs, candidateAbs)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // Rollback discards the staged deletion, leaving the traffic store untouched.

@@ -271,6 +271,13 @@ CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
 -- can't distinguish them); this covers reverse pagination of those sessions.
 CREATE INDEX IF NOT EXISTS idx_act_worker ON activity(exploration_id, worker, id);
+-- Task-list polls aggregate result usage and find the latest event repeatedly.
+-- Cover the token columns for index-only aggregation and the timestamp order for
+-- per-exploration latest-activity lookups.
+CREATE INDEX IF NOT EXISTS idx_act_result_usage ON activity(exploration_id)
+    INCLUDE (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+    WHERE kind='result';
+CREATE INDEX IF NOT EXISTS idx_act_latest ON activity(exploration_id, created_at DESC);
 
 -- =====================================================================
 -- C. LLM profiles
@@ -397,6 +404,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     pinned_at      TIMESTAMPTZ,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
+    archived_at    TIMESTAMPTZ,
     deleted_at     TIMESTAMPTZ,
     completed_at   TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -426,10 +434,56 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES task_ca
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
     WHERE deleted_at IS NULL AND pinned_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived_at DESC)
+    WHERE archived_at IS NOT NULL;
+
+-- Cold task archives retain only compact metadata in PostgreSQL. The complete
+-- task payload lives in a versioned .tar.zst package under data/archives/tasks.
+-- task_id stays unique so an operation can be retried safely after a restart.
+CREATE TABLE IF NOT EXISTS task_archives (
+    id                         BIGSERIAL PRIMARY KEY,
+    task_id                    BIGINT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    state                      TEXT NOT NULL DEFAULT 'archive_queued' CHECK (state IN (
+                                   'archive_queued','archiving','archive_failed','ready',
+                                   'restore_queued','restoring','restore_failed',
+                                   'delete_queued','deleting','delete_failed'
+                               )),
+    phase                      TEXT NOT NULL DEFAULT 'queued',
+    progress                   INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+    error                      TEXT NOT NULL DEFAULT '',
+    warnings                   JSONB NOT NULL DEFAULT '[]',
+    format_version             INTEGER NOT NULL DEFAULT 2,
+    archive_path               TEXT NOT NULL DEFAULT '',
+    sha256                     TEXT NOT NULL DEFAULT '',
+    original_size              BIGINT NOT NULL DEFAULT 0,
+    compressed_size            BIGINT NOT NULL DEFAULT 0,
+    task_name                  TEXT NOT NULL DEFAULT '',
+    task_description           TEXT NOT NULL DEFAULT '',
+    task_goal                  TEXT NOT NULL DEFAULT '',
+    original_status            TEXT NOT NULL DEFAULT '',
+    category_id_snapshot       BIGINT,
+    category_name_snapshot     TEXT NOT NULL DEFAULT '',
+    source_task_ids            BIGINT[] NOT NULL DEFAULT '{}',
+    remaining_timeout_seconds  BIGINT NOT NULL DEFAULT 0,
+    data_counts                JSONB NOT NULL DEFAULT '{}',
+    aggregate_stats            JSONB NOT NULL DEFAULT '{}',
+    archived_at                TIMESTAMPTZ,
+    requested_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE task_archives ALTER COLUMN format_version SET DEFAULT 2;
+CREATE INDEX IF NOT EXISTS idx_task_archives_state ON task_archives(state, requested_at, id);
+CREATE INDEX IF NOT EXISTS idx_task_archives_archived ON task_archives(archived_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_task_archives_sources ON task_archives USING GIN(source_task_ids);
+DROP TRIGGER IF EXISTS trg_task_archives_upd ON task_archives;
+CREATE TRIGGER trg_task_archives_upd BEFORE UPDATE ON task_archives
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- Reusable task description/goal presets. nkey is the normalized, case-insensitive
 -- identity used to reject visually equivalent duplicate names.

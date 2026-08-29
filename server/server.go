@@ -116,6 +116,11 @@ type Server struct {
 	// the persisted current profile at every new LLM call.
 	taskAgentMu sync.Mutex
 	taskAgents  map[string]*taskAgentBundle
+
+	// Cold task archives run through one persistent FIFO worker. The buffered wake
+	// channel coalesces enqueue bursts; the database remains the source of truth.
+	archiveWake chan struct{}
+	archiveWG   sync.WaitGroup
 }
 
 // profBundle is a planner/worker pair built from one LLM profile.
@@ -151,7 +156,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}}
+		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	// Every task uses a stable task router. An empty explicit chain is resolved by
 	// that router through Agent bindings and then the global provider, so adding a
 	// first chain to a running task takes effect on its very next LLM call.
@@ -264,6 +269,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		}
 	}
 	go s.reconcileConcurrency()
+	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
 	return s
 }
@@ -705,6 +711,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.updateTaskMetadata)
 	mux.HandleFunc("PATCH /api/tasks/{id}/category", s.updateTaskCategory)
 	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
+	mux.HandleFunc("GET /api/task-archives", s.listTaskArchives)
+	mux.HandleFunc("GET /api/task-archives/{id}", s.getTaskArchive)
+	mux.HandleFunc("POST /api/tasks/{id}/archive", s.queueTaskArchive)
+	mux.HandleFunc("POST /api/tasks/archive/batch", s.queueTaskArchivesBatch)
+	mux.HandleFunc("POST /api/task-archives/{id}/restore", s.queueTaskArchiveRestore)
+	mux.HandleFunc("POST /api/task-archives/restore/batch", s.restoreTaskArchivesBatch)
+	mux.HandleFunc("DELETE /api/task-archives/{id}", s.queueTaskArchiveDelete)
+	mux.HandleFunc("POST /api/task-archives/delete/batch", s.deleteTaskArchivesBatch)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
@@ -1011,22 +1025,22 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		active = t.ID
 	}
 	list := s.m.List()
-	toks, _ := s.m.PG().TokenTotalsAll()      // whole-task token totals, one query for all tasks
-	lastAct, _ := s.m.PG().LastActivityAll()  // persisted last-activity per task, one query
-	goalCounts, _ := s.m.PG().GoalCountsAll() // goal progress per exploration, one query
+	metrics, _ := s.m.PG().TaskListMetricsAll()
+	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
-		dto.Tokens = tokenTotalDTO(toks[t.ExpID])
+		applyTaskArchiveBlocker(&dto, archiveBlockers)
+		metric := metrics[t.ExpID]
+		dto.Tokens = tokenTotalDTO(metric.Tokens)
 		// prefer the live in-memory heartbeat (fresher) and fall back to the
 		// persisted max activity time (survives restarts) for run-duration display.
-		dto.LastActivity = lastAct[t.ExpID]
+		dto.LastActivity = metric.LastActivity
 		if live := s.engine.LastActivity(t.ID); live > dto.LastActivity {
 			dto.LastActivity = live
 		}
-		gc := goalCounts[t.ExpID]
-		dto.GoalsTotal = gc.Total
-		dto.GoalsMet = gc.Met
+		dto.GoalsTotal = metric.Goals.Total
+		dto.GoalsMet = metric.Goals.Met
 		dtos = append(dtos, dto)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
@@ -1400,7 +1414,7 @@ type createTaskReq struct {
 	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
 	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
 	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业资产范围;不复制资产或强制生成意图
+	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
 	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
@@ -1679,7 +1693,10 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	writeJSON(w, 200, taskDTO(t, s.resolvedTaskStatus(t)))
+	dto := taskDTO(t, s.resolvedTaskStatus(t))
+	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
+	applyTaskArchiveBlocker(&dto, archiveBlockers)
+	writeJSON(w, 200, dto)
 }
 
 // taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).
@@ -1881,6 +1898,7 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 			VulnClass: normFilter(q.Get("vulnclass")),
 			// task_id(独立于会切到「按任务节点」分支的 task 参数):全局表按任务筛选。
 			TaskID: normFilter(q.Get("task_id")),
+			Query:  q.Get("q"),
 			Sort:   q.Get("sort"),
 		}
 		fs, total, err := s.m.pg.ListFindingsPage(filter, page, limit)
@@ -2050,7 +2068,7 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 //	format  = md-single（整合一份 .md）| md-zip（一漏洞一 .md,打包 zip）
 //	          | csv | json
 //	ids     = 逗号分隔的 finding id（scope=selected 时必填）
-//	筛选参数 severity/status/vulnclass/task_id/sort 与列表接口一致（scope=filtered 用）。
+//	筛选参数 severity/status/vulnclass/task_id/q/sort 与列表接口一致（scope=filtered 用）。
 func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := q.Get("scope")
@@ -2084,6 +2102,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 			Status:    normFilter(q.Get("status")),
 			VulnClass: normFilter(q.Get("vulnclass")),
 			TaskID:    normFilter(q.Get("task_id")),
+			Query:     q.Get("q"),
 			Sort:      q.Get("sort"),
 		}
 	default:

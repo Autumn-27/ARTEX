@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -145,6 +146,7 @@ type FindingFilter struct {
 	Status    string // pending | false_positive | ignored | resolved
 	VulnClass string
 	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
+	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort      string // "severity" | "time"
 }
 
@@ -154,7 +156,8 @@ type FindingFilter struct {
 const FindingUnassignedTask = "__unassigned__"
 
 // where builds the WHERE clause (shared by the page and count queries) plus its
-// positional args. Only equality filters, all parameterized.
+// positional args. All values are parameterized; Query also escapes ILIKE
+// wildcards so user input is always matched literally.
 func (f FindingFilter) where() (string, []any) {
 	var conds []string
 	var args []any
@@ -174,6 +177,18 @@ func (f FindingFilter) where() (string, []any) {
 	} else if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
 		args = append(args, tid)
 		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
+	}
+	if query := strings.TrimSpace(f.Query); query != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
+		args = append(args, "%"+escaped+"%")
+		placeholder := fmt.Sprintf("$%d", len(args))
+		conds = append(conds, fmt.Sprintf(`(
+			COALESCE(f.name, '') ILIKE %s ESCAPE '\' OR
+			f.vulnclass ILIKE %s ESCAPE '\' OR
+			f.summary ILIKE %s ESCAPE '\' OR
+			f.evidence ILIKE %s ESCAPE '\' OR
+			COALESCE(f.report, '') ILIKE %s ESCAPE '\'
+		)`, placeholder, placeholder, placeholder, placeholder, placeholder))
 	}
 	if len(conds) == 0 {
 		return "", args
@@ -532,7 +547,37 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		}
 		st.Tasks = append(st.Tasks, opt)
 	}
-	return st, trows.Err()
+	if err := trows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	vulnclasses := make(map[string]bool, len(st.VulnClasses))
+	for _, vulnclass := range st.VulnClasses {
+		vulnclasses[vulnclass] = true
+	}
+	for _, aggregate := range archived {
+		cold := aggregate.FindingStats
+		st.Total += cold.Total
+		st.Pending += cold.Pending
+		st.Critical += cold.Critical
+		st.High += cold.High
+		st.Medium += cold.Medium
+		st.Low += cold.Low
+		for _, vulnclass := range cold.VulnClasses {
+			if vulnclass != "" {
+				vulnclasses[vulnclass] = true
+			}
+		}
+	}
+	st.VulnClasses = st.VulnClasses[:0]
+	for vulnclass := range vulnclasses {
+		st.VulnClasses = append(st.VulnClasses, vulnclass)
+	}
+	sort.Strings(st.VulnClasses)
+	return st, nil
 }
 
 // GetFinding returns a single finding row (with task_description joined and the

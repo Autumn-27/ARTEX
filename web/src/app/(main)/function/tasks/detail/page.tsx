@@ -1,22 +1,27 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { toast } from "sonner";
-import {
-  ArrowLeftIcon,
-  PauseIcon,
-  PlayIcon,
-  BrainIcon,
-  CheckIcon,
-  CircleAlertIcon,
-} from "lucide-react";
 
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+
+import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { toast } from "sonner";
+
+import { StatusBadge } from "@/components/status-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -26,30 +31,32 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { StatusBadge } from "@/components/status-badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { SessionsTab } from "./_tabs/sessions-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
-import { GraphTab } from "./_tabs/graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
-import { ReportTab } from "./_tabs/report-tab";
-import { InterceptTab } from "./_tabs/intercept-tab";
 import { AssetsTab } from "./_tabs/assets-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
+import { FindingsTab } from "./_tabs/findings-tab";
+import { GraphTab } from "./_tabs/graph-tab";
+import { InterceptTab } from "./_tabs/intercept-tab";
+import { OverviewTab } from "./_tabs/overview-tab";
+import { ReportTab } from "./_tabs/report-tab";
+import { SessionsTab } from "./_tabs/sessions-tab";
 
 const TABS = [
-  { value: "sessions",  label: "会话" },
-  { value: "overview",  label: "总览" },
-  { value: "graph",     label: "探索链路" },
-  { value: "findings",  label: "发现" },
-  { value: "assets",    label: "测试资产" },
-  { value: "coverage",  label: "资产覆盖图" },
+  { value: "sessions", label: "会话" },
+  { value: "overview", label: "总览" },
+  { value: "graph", label: "探索链路" },
+  { value: "findings", label: "发现" },
+  { value: "assets", label: "测试资产" },
+  { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
-  { value: "report",    label: "报告" },
+  { value: "report", label: "报告" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -81,7 +88,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   const activeProfile = profiles.find((profile) => profile.id === activeID);
   const currentLabel = exhausted
     ? "配置链已耗尽"
-    : activeProfile?.name ?? (activeID ? `配置 #${activeID}` : "跟随默认配置");
+    : (activeProfile?.name ?? (activeID ? `配置 #${activeID}` : "跟随默认配置"));
   const activeIndex = chain.indexOf(activeID);
   const backupCount = activeIndex >= 0 ? Math.max(0, chain.length - activeIndex - 1) : 0;
   const currentTitle = [currentLabel, activeProfile?.model, backupCount > 0 ? `${backupCount} 个备用` : ""]
@@ -151,11 +158,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           {backupCount > 0 && <span className="hidden text-muted-foreground xl:inline">+{backupCount}</span>}
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        ref={popoverContentRef}
-        align="start"
-        className="w-[min(28rem,calc(100vw-2rem))] gap-4 p-4"
-      >
+      <PopoverContent ref={popoverContentRef} align="start" className="w-[min(28rem,calc(100vw-2rem))] gap-4 p-4">
         <PopoverHeader>
           <PopoverTitle>任务 LLM 配置链</PopoverTitle>
           <PopoverDescription>{editorDescription}</PopoverDescription>
@@ -199,6 +202,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
 }
 
 function TaskDetailInner() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
   const [task, setTask] = React.useState<Task | null>(null);
@@ -207,6 +211,7 @@ function TaskDetailInner() {
   const [tab, setTab] = React.useState("sessions");
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [archiving, setArchiving] = React.useState(false);
 
   React.useEffect(() => {
     api
@@ -234,12 +239,16 @@ function TaskDetailInner() {
     };
   }, [id]);
 
+  const taskLoadInFlight = React.useRef<string | null>(null);
   const load = React.useCallback(() => {
-    Promise.all([api.tasks(), api.stats(id).catch(() => null)])
-      .then(([r, s]) => {
-        const base = r.tasks.find((t) => t.id === id) ?? null;
+    if (taskLoadInFlight.current === id) return;
+    taskLoadInFlight.current = id;
+    Promise.all([api.task(id), api.stats(id).catch(() => null)])
+      .then(([task, s]) => {
+        if (taskLoadInFlight.current !== id) return;
+        const base = { ...task };
         const at = s?.active_task;
-        if (base && at) {
+        if (at) {
           base.in_flight = at.in_flight;
           base.goals_total = at.goals_total;
           base.goals_met = at.goals_met;
@@ -247,12 +256,17 @@ function TaskDetailInner() {
           base.paused = at.paused;
         }
         setTask(base);
-        setPaused(at?.paused ?? base?.paused ?? false);
+        setPaused(at?.paused ?? base.paused ?? false);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
       })
-      .finally(() => setLoaded(true));
+      .finally(() => {
+        if (taskLoadInFlight.current === id) {
+          taskLoadInFlight.current = null;
+          setLoaded(true);
+        }
+      });
   }, [id]);
   React.useEffect(() => {
     load();
@@ -269,6 +283,19 @@ function TaskDetailInner() {
       toast.success(next ? "已暂停探索" : "已恢复探索");
     } catch (e) {
       toast.error("操作失败：" + (e as Error).message);
+    }
+  }
+
+  async function archiveTask() {
+    if (!task || archiving) return;
+    setArchiving(true);
+    try {
+      await api.archiveTask(task.id);
+      toast.success("任务已加入归档队列");
+      router.push("/function/tasks");
+    } catch (error) {
+      toast.error(`归档失败：${(error as Error).message}`);
+      setArchiving(false);
     }
   }
 
@@ -289,6 +316,12 @@ function TaskDetailInner() {
 
   const completed = task.status === "done";
   const terminal = ["done", "failed", "timeout"].includes(task.status);
+  const archiveLifecycleEligible = terminal || paused || task.status === "paused";
+  const canArchive = archiveLifecycleEligible && !task.archive_blocked_by_task_id;
+  let archiveDisabledReason = task.queued ? "排队中的任务必须先暂停" : "运行中的任务必须先暂停";
+  if (archiveLifecycleEligible && task.archive_blocked_by_task_id) {
+    archiveDisabledReason = `任务被未归档任务 #${task.archive_blocked_by_task_id} 直接继承，请先归档依赖任务`;
+  }
   const engineMode = paused ? "paused" : (task.engine_mode ?? "idle");
   let controlVariant: "default" | "secondary" | "outline" = "outline";
   let controlIcon = <PauseIcon data-icon="inline-start" />;
@@ -302,6 +335,16 @@ function TaskDetailInner() {
     controlIcon = <PlayIcon data-icon="inline-start" />;
     controlLabel = "恢复";
   }
+  const archiveTrigger = (
+    <Button
+      size="icon-sm"
+      variant="ghost"
+      disabled={!canArchive || archiving}
+      aria-label={canArchive ? "归档任务" : archiveDisabledReason}
+    >
+      {archiving ? <Spinner /> : <ArchiveIcon />}
+    </Button>
+  );
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
@@ -323,6 +366,31 @@ function TaskDetailInner() {
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
+          {canArchive ? (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>{archiveTrigger}</AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>归档任务 #{task.id}？</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    任务图谱、关联记录、独占资产与流量、工作文件和 LLM
+                    历史将压缩到冷存储。归档完成后可在任务列表的“已归档”页还原。
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>取消</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => void archiveTask()}>确认归档</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">{archiveTrigger}</span>
+              </TooltipTrigger>
+              <TooltipContent>{archiveDisabledReason}</TooltipContent>
+            </Tooltip>
+          )}
           <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal}>
             {controlIcon}
             {controlLabel}

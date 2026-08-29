@@ -90,7 +90,14 @@ ORDER BY COUNT(*) DESC, skill`)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	return mergeArchivedSkillStats(out, archived, false), nil
 }
 
 // MissingSkillStats returns the skill names agents asked for that do not exist,
@@ -107,8 +114,7 @@ SELECT skill, COUNT(*) AS calls,
 FROM skill_usage
 WHERE NOT found
 GROUP BY skill
-ORDER BY COUNT(*) DESC, skill
-LIMIT $1`, limit)
+ORDER BY COUNT(*) DESC, skill`)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +137,18 @@ LIMIT $1`, limit)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	out = mergeArchivedSkillStats(out, archived, true)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // SkillCall is one row of a skill's recent-call list (detail panel).

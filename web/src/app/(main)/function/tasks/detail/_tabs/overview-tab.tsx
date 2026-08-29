@@ -56,7 +56,7 @@ function scopeValue(row: TaskScopeRow): string {
   if (row.value) return row.value;
   if (row.domain) return row.domain;
   if (row.net) return row.net;
-  if (row.company_id) return row.company_name || `企业 #${row.company_id}`;
+  if (row.company_id) return row.company_name?.trim() ? row.company_name : `企业 #${row.company_id}`;
   return "—";
 }
 
@@ -346,17 +346,32 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   React.useEffect(() => {
     let cancelled = false;
+    let loading = false;
 
     const load = async () => {
+      if (loading) return;
+      loading = true;
       try {
-        const [tasksResp, statsResp, intentsResp, findingsResp] = await Promise.all([
-          api.tasks(),
+        const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
+          api.task(taskId),
           api.stats(taskId),
           api.intents(taskId),
           api.findings(taskId),
         ]);
         if (cancelled) return;
-        setTask(tasksResp.tasks.find((t) => t.id === taskId) ?? null);
+        const activeTask = statsResp.active_task;
+        setTask(
+          activeTask
+            ? {
+                ...taskResp,
+                in_flight: activeTask.in_flight,
+                goals_total: activeTask.goals_total,
+                goals_met: activeTask.goals_met,
+                engine_mode: statsResp.engine_mode ?? activeTask.engine_mode,
+                paused: activeTask.paused,
+              }
+            : taskResp,
+        );
         setStats(statsResp);
         setIntents(intentsResp);
         setFindings(findingsResp);
@@ -372,10 +387,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           });
       } catch {
         // transient errors are ignored; the next poll will retry
+      } finally {
+        loading = false;
       }
     };
 
-    load();
+    void load();
     void loadScope();
     void loadTokens();
     void loadGoals();

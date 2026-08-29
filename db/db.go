@@ -3,18 +3,83 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/config"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver ("pgx")
 )
 
 //go:embed schema.sql
 var schemaSQL string
+
+const schemaMigrationLockKey int64 = 7337741001
+
+var schemaDeadlockRetryDelays = [...]time.Duration{
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	time.Second,
+}
+
+type schemaExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func isPostgresDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
+
+func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(time.Duration)) error {
+	for attempt := 0; ; attempt++ {
+		if _, err := execer.ExecContext(ctx, schemaSQL); err != nil {
+			if !isPostgresDeadlock(err) || attempt >= len(schemaDeadlockRetryDelays) {
+				return err
+			}
+			sleep(schemaDeadlockRetryDelays[attempt])
+			continue
+		}
+		return nil
+	}
+}
+
+// withSchemaMigrationLock pins the session-level lock to one checked-out
+// connection. Running pg_advisory_lock through *sql.DB is incorrect because a
+// later schema or unlock call may use a different pooled PostgreSQL session.
+func withSchemaMigrationLock(ctx context.Context, sqlDB *sql.DB, action func(*sql.Conn) error) (err error) {
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaMigrationLockKey); err != nil {
+		return fmt.Errorf("advisory lock: %w", err)
+	}
+	defer func() {
+		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, schemaMigrationLockKey); unlockErr != nil && err == nil {
+			err = fmt.Errorf("advisory unlock: %w", unlockErr)
+		}
+	}()
+	return action(conn)
+}
+
+// coordinateWithSchemaMigration makes long, multi-table archive transactions
+// mutually exclusive with startup DDL while allowing ordinary runtime queries
+// to continue normally.
+func coordinateWithSchemaMigration(tx *sql.Tx) error {
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, schemaMigrationLockKey); err != nil {
+		return fmt.Errorf("coordinate with schema migration: %w", err)
+	}
+	return nil
+}
 
 // DSN resolves the PostgreSQL connection string and reports where it came from.
 // Precedence: env ARTEX_PG_DSN > config file (config.json). There is no
@@ -72,28 +137,22 @@ func Open(dsn string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)
 	}
-	// Serialize schema migration + seeding across concurrent openers (e.g. parallel
-	// test packages) using a session-level advisory lock. The lock is released
-	// automatically when the connection is returned to the pool or closed.
-	if _, err := sqlDB.Exec(`SELECT pg_advisory_lock(7337741001)`); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("advisory lock: %w", err)
-	}
-	// pgx runs multi-statement Exec via the simple protocol when there are no args.
-	if _, err := sqlDB.Exec(schemaSQL); err != nil {
-		sqlDB.Exec(`SELECT pg_advisory_unlock(7337741001)`) //nolint:errcheck
-		sqlDB.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
-	}
 	d := &DB{sqlDB}
-	if err := d.seedBuiltins(); err != nil {
-		sqlDB.Exec(`SELECT pg_advisory_unlock(7337741001)`) //nolint:errcheck
+	// pgx runs multi-statement Exec via the simple protocol when there are no args.
+	// Keep the dedicated lock connection checked out until both DDL and seeding
+	// finish so concurrent application instances cannot initialize out of order.
+	err = withSchemaMigrationLock(context.Background(), sqlDB, func(conn *sql.Conn) error {
+		if err := applySchemaWithRetry(context.Background(), conn, time.Sleep); err != nil {
+			return fmt.Errorf("apply schema: %w", err)
+		}
+		if err := d.seedBuiltins(); err != nil {
+			return fmt.Errorf("seed builtins: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("seed builtins: %w", err)
-	}
-	if _, err := sqlDB.Exec(`SELECT pg_advisory_unlock(7337741001)`); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("advisory unlock: %w", err)
+		return nil, err
 	}
 	return d, nil
 }
@@ -375,30 +434,30 @@ func (d *DB) seedDefaultInterceptRules() error {
 		//   2. Python HTTP 客户端 .delete() 方法
 		//   3. JS/通用脚本里的 method: 'DELETE' / method="DELETE"
 		{
-			name:    "[内置] curl / wget 发送 DELETE 请求",
-			target:  "tool_input",
-			typ:     "regex",
-			pattern: `(?i)\bcurl\b[^|\n&;"]{0,300}(?:-X\s*DELETE|--request\s+DELETE|-XDELETE)|\bwget\b[^|\n&;"]{0,300}--method[=\s]+DELETE`,
-			action:  "deny",
-			message: "禁止通过 curl/wget 发送 HTTP DELETE 请求，可能删除目标系统数据",
+			name:     "[内置] curl / wget 发送 DELETE 请求",
+			target:   "tool_input",
+			typ:      "regex",
+			pattern:  `(?i)\bcurl\b[^|\n&;"]{0,300}(?:-X\s*DELETE|--request\s+DELETE|-XDELETE)|\bwget\b[^|\n&;"]{0,300}--method[=\s]+DELETE`,
+			action:   "deny",
+			message:  "禁止通过 curl/wget 发送 HTTP DELETE 请求，可能删除目标系统数据",
 			priority: 80,
 		},
 		{
-			name:    "[内置] Python HTTP 客户端 DELETE（requests/httpx/aiohttp）",
-			target:  "tool_input",
-			typ:     "regex",
-			pattern: `(?i)\b(?:requests|httpx|aiohttp|urllib\.request)\.delete\s*\(|session\.delete\s*\(|client\.delete\s*\(`,
-			action:  "deny",
-			message: "禁止使用 Python HTTP 客户端发送 DELETE 请求",
+			name:     "[内置] Python HTTP 客户端 DELETE（requests/httpx/aiohttp）",
+			target:   "tool_input",
+			typ:      "regex",
+			pattern:  `(?i)\b(?:requests|httpx|aiohttp|urllib\.request)\.delete\s*\(|session\.delete\s*\(|client\.delete\s*\(`,
+			action:   "deny",
+			message:  "禁止使用 Python HTTP 客户端发送 DELETE 请求",
 			priority: 80,
 		},
 		{
-			name:    "[内置] 脚本中声明 HTTP DELETE 方法（JS/通用）",
-			target:  "tool_input",
-			typ:     "regex",
-			pattern: `(?i)axios\.delete\s*\(|method\s*[:=]\s*['"]DELETE['"]`,
-			action:  "deny",
-			message: "禁止在脚本中声明并发送 HTTP DELETE 请求",
+			name:     "[内置] 脚本中声明 HTTP DELETE 方法（JS/通用）",
+			target:   "tool_input",
+			typ:      "regex",
+			pattern:  `(?i)axios\.delete\s*\(|method\s*[:=]\s*['"]DELETE['"]`,
+			action:   "deny",
+			message:  "禁止在脚本中声明并发送 HTTP DELETE 请求",
 			priority: 80,
 		},
 		{

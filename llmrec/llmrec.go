@@ -185,12 +185,8 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 }
 
-// Complete implements llm.Provider for non-streaming calls, recording the same
-// metering + body trace as Stream. Metering (token usage) is always written;
-// the heavy request/response body trace is gated by the llm_record setting. The
-// raw wire bodies are captured by the shared HTTP transport (via NewCapture on
-// ctx), identical to the streaming path — a non-streaming response is a single
-// JSON body the transport tees just the same.
+// Complete implements the atomic completion path while preserving the same
+// usage metering, normalized body recording and raw wire capture as Stream.
 func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	recordBodies := r.enabled == nil || r.enabled()
 	start := time.Now()
@@ -210,28 +206,22 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 
 	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
-
 	status := "ok"
 	if err != nil {
 		status = "error"
 	}
-	// Lightweight metering row — always written.
 	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
-	// Heavy trace row — only when body recording is on.
 	if recordBodies {
-		text, thinking := msg.Text(), thinkingText(msg)
-		r.record(req, session, taskID, worker, reqBody, capt, start, text, thinking, usage, stopReason, err)
+		r.record(req, session, taskID, worker, reqBody, capt, start, msg.Text(), thinkingText(msg), usage, stopReason, err)
 	}
 	return msg, stopReason, usage, err
 }
 
-// thinkingText concatenates the thinking blocks of a message (the non-streaming
-// counterpart of the streaming path's accumulated thinkingBuf).
 func thinkingText(msg llm.Message) string {
 	var b strings.Builder
-	for _, bl := range msg.Content {
-		if bl.Type == llm.BlockThinking && bl.Thinking != "" {
-			b.WriteString(bl.Thinking)
+	for _, block := range msg.Content {
+		if block.Type == llm.BlockThinking && block.Thinking != "" {
+			b.WriteString(block.Thinking)
 		}
 	}
 	return b.String()

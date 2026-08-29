@@ -42,5 +42,17 @@ GROUP BY tool_key`)
 		}
 		out[key] = calls
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := d.archivedTaskAggregates()
+	if err != nil {
+		return nil, err
+	}
+	for _, aggregate := range archived {
+		for key, calls := range aggregate.Tools {
+			out[key] += calls
+		}
+	}
+	return out, nil
 }

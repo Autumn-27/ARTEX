@@ -52,9 +52,6 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 	if err != nil {
 		return err
 	}
-	t.LLMProfileID = legacyProfileID
-	t.ActiveLLMProfileID = activeProfileID
-	t.LLMChainRevision = revision
 	sources, err := d.TaskSourceIDs(t.ID)
 	if err != nil {
 		return err
@@ -65,8 +62,22 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 		return err
 	}
 	t.CompanyIDs = companies
+	applyTaskLLMContext(t, legacyProfileID, activeProfileID, revision, chain)
+	return nil
+}
+
+func applyTaskLLMContext(
+	t *Task,
+	legacyProfileID, activeProfileID *int64,
+	revision int64,
+	chain []TaskLLMProfile,
+) {
+	t.LLMProfileID = legacyProfileID
+	t.ActiveLLMProfileID = activeProfileID
+	t.LLMChainRevision = revision
 	t.LLMProfileIDs = make([]int64, 0, len(chain))
 	t.LLMFailoverState = "default"
+	t.LLMFailoverReason = ""
 	var latest *TaskLLMProfile
 	activeReady := false
 	for i := range chain {
@@ -89,6 +100,155 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 	}
 	if latest != nil {
 		t.LLMFailoverReason = latest.LastError
+	}
+}
+
+type taskBatchContext struct {
+	legacyProfileID *int64
+	activeProfileID *int64
+	revision        int64
+	chain           []TaskLLMProfile
+	sourceIDs       []int64
+	companyIDs      []int64
+}
+
+// hydrateTasksContext loads every task's LLM chain, source tasks, and company
+// scopes with three bulk queries. ListTasks used to issue these queries once per
+// task, making startup and task-list hydration grow as 3N+1 database round trips.
+func (d *DB) hydrateTasksContext(tasks []*Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	ids := make([]int64, 0, len(tasks))
+	contexts := make(map[int64]*taskBatchContext, len(tasks))
+	byID := make(map[int64]*Task, len(tasks))
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		ids = append(ids, task.ID)
+		contexts[task.ID] = &taskBatchContext{}
+		byID[task.ID] = task
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := d.Query(`
+SELECT t.id, t.llm_profile_id, t.active_llm_profile_id, t.llm_chain_revision,
+       p.profile_id, p.position, p.status, COALESCE(p.last_error,''), p.exhausted_at
+FROM tasks t
+LEFT JOIN task_llm_profiles p ON p.task_id=t.id
+WHERE t.id=ANY($1::bigint[])
+ORDER BY t.id, p.position NULLS LAST`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var taskID, revision int64
+		var legacy, active, profileID, position sql.NullInt64
+		var status, lastError sql.NullString
+		var exhaustedAt sql.NullTime
+		if err := rows.Scan(
+			&taskID, &legacy, &active, &revision,
+			&profileID, &position, &status, &lastError, &exhaustedAt,
+		); err != nil {
+			rows.Close()
+			return err
+		}
+		context := contexts[taskID]
+		if context == nil {
+			continue
+		}
+		context.revision = revision
+		if legacy.Valid {
+			id := legacy.Int64
+			context.legacyProfileID = &id
+		}
+		if active.Valid {
+			id := active.Int64
+			context.activeProfileID = &id
+		}
+		if profileID.Valid {
+			entry := TaskLLMProfile{
+				ProfileID: profileID.Int64,
+				Position:  int(position.Int64),
+				Status:    status.String,
+				LastError: lastError.String,
+			}
+			if exhaustedAt.Valid {
+				ts := exhaustedAt.Time
+				entry.ExhaustedAt = &ts
+			}
+			context.chain = append(context.chain, entry)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = d.Query(`
+SELECT task_id, source_task_id
+FROM task_relations
+WHERE task_id=ANY($1::bigint[])
+ORDER BY task_id, created_at, source_task_id`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var taskID, sourceID int64
+		if err := rows.Scan(&taskID, &sourceID); err != nil {
+			rows.Close()
+			return err
+		}
+		if context := contexts[taskID]; context != nil {
+			context.sourceIDs = append(context.sourceIDs, sourceID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = d.Query(`
+SELECT task_id, company_id
+FROM task_scope
+WHERE task_id=ANY($1::bigint[]) AND kind='company' AND company_id IS NOT NULL
+ORDER BY task_id, id`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var taskID, companyID int64
+		if err := rows.Scan(&taskID, &companyID); err != nil {
+			rows.Close()
+			return err
+		}
+		if context := contexts[taskID]; context != nil {
+			context.companyIDs = append(context.companyIDs, companyID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for id, context := range contexts {
+		task := byID[id]
+		task.SourceTaskIDs = context.sourceIDs
+		task.CompanyIDs = context.companyIDs
+		applyTaskLLMContext(
+			task,
+			context.legacyProfileID,
+			context.activeProfileID,
+			context.revision,
+			context.chain,
+		)
 	}
 	return nil
 }

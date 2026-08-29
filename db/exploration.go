@@ -1025,6 +1025,74 @@ func (d *DB) LastActivityAll() (map[int64]int64, error) {
 // GoalCounts is the goal summary for one exploration.
 type GoalCounts struct{ Total, Met int }
 
+// TaskListMetrics contains the aggregates rendered in task lists.
+type TaskListMetrics struct {
+	Tokens       TokenUsage
+	LastActivity int64
+	Goals        GoalCounts
+}
+
+// TaskListMetricsAll returns list aggregates for every live task in one query.
+// The lateral lookups use the per-exploration indexes instead of grouping the
+// complete activity history on every poll.
+func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
+	rows, err := d.Query(`
+		SELECT task.exploration_id,
+		       COALESCE(token_metrics.input_tokens,0),
+		       COALESCE(token_metrics.output_tokens,0),
+		       COALESCE(token_metrics.cache_read_tokens,0),
+		       COALESCE(token_metrics.cache_write_tokens,0),
+		       COALESCE(latest_activity.created_at,0),
+		       COALESCE(goal_metrics.total,0),
+		       COALESCE(goal_metrics.met,0)
+		FROM tasks task
+		LEFT JOIN LATERAL (
+			SELECT SUM(input_tokens) AS input_tokens,
+			       SUM(output_tokens) AS output_tokens,
+			       SUM(cache_read_tokens) AS cache_read_tokens,
+			       SUM(cache_write_tokens) AS cache_write_tokens
+			FROM activity
+			WHERE exploration_id=task.exploration_id AND kind='result'
+		) token_metrics ON true
+		LEFT JOIN LATERAL (
+			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
+			FROM activity
+			WHERE exploration_id=task.exploration_id
+			ORDER BY created_at DESC
+			LIMIT 1
+		) latest_activity ON true
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS total,
+			       COUNT(*) FILTER (WHERE state='met') AS met
+			FROM exploration_nodes
+			WHERE exploration_id=task.exploration_id AND kind='goal'
+		) goal_metrics ON true
+		WHERE task.deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]TaskListMetrics{}
+	for rows.Next() {
+		var explorationID int64
+		var metrics TaskListMetrics
+		if err := rows.Scan(
+			&explorationID,
+			&metrics.Tokens.InputTokens,
+			&metrics.Tokens.OutputTokens,
+			&metrics.Tokens.CacheReadTokens,
+			&metrics.Tokens.CacheWriteTokens,
+			&metrics.LastActivity,
+			&metrics.Goals.Total,
+			&metrics.Goals.Met,
+		); err != nil {
+			return nil, err
+		}
+		out[explorationID] = metrics
+	}
+	return out, rows.Err()
+}
+
 // GoalCountsAll returns goal totals (total / met) per exploration id, one query
 // for all tasks — used by listTasks so the task list shows progress for every task.
 func (d *DB) GoalCountsAll() (map[int64]GoalCounts, error) {

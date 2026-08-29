@@ -2,8 +2,27 @@ package llmrec
 
 import (
 	"context"
+	"iter"
 	"testing"
+
+	"github.com/Autumn-27/norma/llm"
 )
+
+type completeProvider struct{}
+
+func (completeProvider) Stream(context.Context, llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	return func(func(llm.StreamEvent, error) bool) {}
+}
+
+func (completeProvider) Complete(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	return llm.Message{
+		Role: llm.RoleAssistant,
+		Content: []llm.ContentBlock{
+			{Type: llm.BlockThinking, Thinking: "reasoning"},
+			llm.TextBlock("answer"),
+		},
+	}, "stop", llm.Usage{InputTokens: 7, OutputTokens: 3}, nil
+}
 
 func TestTaskIDContextUsesExplicitRegistryID(t *testing.T) {
 	ctx := WithTaskID(context.Background(), " 42 ")
@@ -25,5 +44,22 @@ func TestParseSessionFallbackIsExplorationScoped(t *testing.T) {
 	}
 	if taskID, worker := parseSession("not-a-task"); taskID != "" || worker != "" {
 		t.Fatalf("unexpected non-session parse: (%q,%q)", taskID, worker)
+	}
+}
+
+func TestCompleteForwardsAtomicResponse(t *testing.T) {
+	recorder := Wrap(completeProvider{}, nil, "model", "profile", "", "", func() bool { return false })
+	msg, stopReason, usage, err := recorder.Complete(context.Background(), llm.CompletionRequest{})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	if got := msg.Text(); got != "answer" {
+		t.Fatalf("Complete() text=%q want answer", got)
+	}
+	if stopReason != "stop" {
+		t.Fatalf("Complete() stop reason=%q want stop", stopReason)
+	}
+	if usage.InputTokens != 7 || usage.OutputTokens != 3 {
+		t.Fatalf("Complete() usage=%+v", usage)
 	}
 }
