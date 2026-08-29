@@ -284,6 +284,14 @@ export const api = {
       state: "paused" | "open" | "stopped";
       deleted?: { intents: number; facts: number; findings: number; activities: number };
     }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "" }),
+  sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>
+    post<{
+      id: number;
+      state: "open" | "running" | "paused";
+      accepted: true;
+      activity_seq: number;
+      request_id: string;
+    }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId }),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

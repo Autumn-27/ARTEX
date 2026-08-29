@@ -63,6 +63,7 @@ type Task struct {
 	Store                *pgdb.ExplorationStore `json:"-"`
 	Guard                *guard.Guard           `json:"-"`
 	notify               chan struct{}
+	workerWake           chan struct{}
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
 
@@ -737,7 +738,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
-		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
+		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1), workerWake: make(chan struct{}, 64),
 	}
 }
 
@@ -1636,6 +1637,42 @@ func (t *Task) Notify() {
 	case t.notify <- struct{}{}:
 	default:
 	}
+}
+
+// NotifyWorker wakes one idle execution slot without itself scheduling a Planner
+// round. Worker-message acceptance separately records a persistent planning event
+// and calls NotifyWorkerMessage; keeping execution wake-up independent prevents
+// Planner debounce from delaying the directed Worker claim.
+func (t *Task) NotifyWorker() {
+	if t == nil || t.workerWake == nil {
+		return
+	}
+	select {
+	case t.workerWake <- struct{}{}:
+	default:
+	}
+}
+
+// NotifyWorkerMessage immediately schedules a Planner round for an accepted,
+// persistent Worker direction. ActivityID identifies the durable kind=user row
+// and prevents retries in the same debounce window from duplicating the prompt.
+func (t *Task) NotifyWorkerMessage(intentID, activityID int64, message string) {
+	message = strings.TrimSpace(message)
+	if intentID <= 0 || activityID <= 0 || message == "" {
+		return
+	}
+	t.trigMu.Lock()
+	for _, event := range t.pendingTriggers {
+		if event.Kind == agent.TriggerWorkerMessage && event.ActivityID == activityID {
+			t.trigMu.Unlock()
+			return
+		}
+	}
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{
+		Kind: agent.TriggerWorkerMessage, ActivityID: activityID, IntentID: intentID, Detail: message,
+	})
+	t.trigMu.Unlock()
+	t.Notify()
 }
 
 // NotifyDone is Notify plus a hint: a worker just finished intentID and that is

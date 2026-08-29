@@ -10,6 +10,7 @@ import {
   normalizeCompanyScopeValue,
 } from "../company-scope";
 import type {
+  Activity,
   ArchiveBatchItem,
   Asset,
   BatchControlItem,
@@ -42,6 +43,7 @@ const mockConversations = structuredClone(D.conversations);
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
+const mockActivity = structuredClone(D.activity);
 type MockTaskArchiveSnapshot = {
   task: Task;
   numericTaskID: number;
@@ -420,6 +422,15 @@ function bodyIDs(value: unknown): string[] {
 }
 
 type MockIntentControlResult = { ok: boolean; state?: string; error?: string };
+type MockWorkerMessage = {
+  intentId: string;
+  message: string;
+  state: "open" | "running";
+  activitySeq: number;
+};
+
+const mockWorkerMessages = new Map<string, MockWorkerMessage>();
+let nextMockWorkerMessageActivitySeq = mockActivity.reduce((maximum, item) => Math.max(maximum, item.seq), 0) + 1;
 
 function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentControlResult {
   const intent = mockIntents.find((item) => item.id === id);
@@ -430,6 +441,71 @@ function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentCo
   }
   intent.state = action === "pause" ? "paused" : "open";
   return { ok: true, state: intent.state };
+}
+
+function sendMockWorkerMessage(
+  id: string,
+  message: string,
+  requestId: string,
+): MockIntentControlResult & { activitySeq?: number; requestId?: string } {
+  const normalizedMessage = message.trim();
+  const normalizedRequestId = requestId.trim();
+  if (!normalizedRequestId) return { ok: false, error: "request_id 不能为空" };
+  const previous = mockWorkerMessages.get(normalizedRequestId);
+  if (previous) {
+    if (previous.intentId !== id || previous.message !== normalizedMessage) {
+      return { ok: false, error: "request_id 已用于其他 Worker 消息" };
+    }
+    return {
+      ok: true,
+      state: previous.state,
+      activitySeq: previous.activitySeq,
+      requestId: normalizedRequestId,
+    };
+  }
+  const intent = mockIntents.find((item) => item.id === id);
+  if (!intent) return { ok: false, error: "意图不存在" };
+  if (intent.inherited || (intent.state !== "running" && intent.state !== "paused")) {
+    return { ok: false, state: intent.state, error: "Worker 状态已变化" };
+  }
+  if (!normalizedMessage) return { ok: false, state: intent.state, error: "消息不能为空" };
+  if (Array.from(normalizedMessage).length > 4000) {
+    return { ok: false, state: intent.state, error: "消息不能超过 4000 个字符" };
+  }
+
+  // The real endpoint stops the active turn, persists a normal user message,
+  // and immediately reopens the same intent. Keep the mock's transition in sync,
+  // then emulate a Worker reclaiming it shortly afterward.
+  intent.state = "open";
+  const activitySeq = nextMockWorkerMessageActivitySeq++;
+  const workerMessage: MockWorkerMessage = {
+    intentId: id,
+    message: normalizedMessage,
+    state: "open",
+    activitySeq,
+  };
+  mockWorkerMessages.set(normalizedRequestId, workerMessage);
+  mockActivity.push({
+    seq: activitySeq,
+    intent_id: id,
+    worker: "user",
+    ts: new Date().toISOString(),
+    kind: "user",
+    summary: normalizedMessage,
+    detail: normalizedMessage,
+  } satisfies Activity);
+  setTimeout(() => {
+    if (intent.state === "open") {
+      intent.state = "running";
+      workerMessage.state = "running";
+    }
+  }, 250);
+  return {
+    ok: true,
+    state: workerMessage.state,
+    activitySeq: workerMessage.activitySeq,
+    requestId: normalizedRequestId,
+  };
 }
 
 function controlMockTask(id: string, action: "pause" | "resume"): BatchControlItem {
@@ -917,7 +993,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           intents: 1,
           facts: 1,
           findings: 1,
-          activities: D.activity.filter((item) => item.intent_id === id).length,
+          activities: mockActivity.filter((item) => item.intent_id === id).length,
         },
       };
     }
@@ -925,6 +1001,18 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const result = controlMockIntent(id, action);
     if (!result.ok) throw new Error(result.error ?? "Worker 状态已变化");
     return { id: Number(id.replace(/\D/g, "")) || 0, state: result.state };
+  }
+  if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "messages" && m === "POST") {
+    const id = seg[3];
+    const result = sendMockWorkerMessage(id, String(b.message ?? ""), String(b.request_id ?? ""));
+    if (!result.ok) throw new Error(result.error ?? "Worker 状态已变化");
+    return {
+      id: Number(id.replace(/\D/g, "")) || 0,
+      state: result.state ?? "open",
+      accepted: true,
+      activity_seq: result.activitySeq ?? 0,
+      request_id: result.requestId ?? "",
+    };
   }
   if (seg[0] === "tasks" && seg.length === 3 && seg[2] === "control" && m === "POST") {
     const action = b.action === "resume" ? "resume" : "pause";
@@ -1464,13 +1552,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
     const limit = Math.max(1, Number(q.get("limit") ?? 300));
-    const items = D.activityForTask()
-      .filter((item) => item.seq > since)
-      .slice(0, limit);
+    const items = mockActivity.filter((item) => item.seq > since).slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
   if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
-    const a = D.activity.find((x) => x.seq === Number(seg[2]));
+    const a = mockActivity.find((x) => x.seq === Number(seg[2]));
     return { detail: a?.detail ?? a?.summary ?? "" };
   }
   if (path === "/tokens/daily") return D.dailyTokens;
