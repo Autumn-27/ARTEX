@@ -48,38 +48,6 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 	return out
 }
 
-const workerDirectionOverviewLimit = 300
-const workerDirectionMessageRunes = 1200
-
-// compactWorkerDirections keeps the latest durable human direction for each
-// intent small enough for every Planner/Main Agent turn. The full message stays
-// available in the Worker activity trace when an unusually long direction is
-// truncated here.
-func compactWorkerDirections(items []db.WorkerDirection) []map[string]any {
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		message := item.Message
-		truncated := false
-		if runes := []rune(message); len(runes) > workerDirectionMessageRunes {
-			message = string(runes[:workerDirectionMessageRunes]) + "…"
-			truncated = true
-		}
-		row := map[string]any{
-			"activity_id":    item.ActivityID,
-			"intent_id":      item.IntentID,
-			"intent_state":   item.IntentState,
-			"intent_summary": item.IntentSummary,
-			"message":        message,
-			"updated_at":     item.CreatedAt,
-		}
-		if truncated {
-			row["truncated"] = true
-		}
-		out = append(out, row)
-	}
-	return out
-}
-
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
@@ -392,14 +360,6 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // an empty context and always needs this first).
 func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
-	// worker_directions is the persistent cross-agent steering channel. It has
-	// one latest accepted human message per local intent, so Planner and Main
-	// Agent do not have to infer a changed direction from the original summary.
-	if directions, err := t.ts.LatestWorkerDirections(workerDirectionOverviewLimit); err == nil {
-		out["worker_directions"] = compactWorkerDirections(directions)
-	} else {
-		out["worker_directions"] = []map[string]any{}
-	}
 	// goals summary folded in so the planner needn't call list_goals each round.
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
 	gsum := make([]map[string]any, 0, len(goals))

@@ -339,7 +339,6 @@ const (
 	IntentInterventionPending  = "pending"
 	IntentInterventionAccepted = "accepted"
 	IntentInterventionRejected = "rejected"
-	PlannerEventWorkerMessage  = "worker_message"
 )
 
 // IntentIntervention is the durable control record for one human interruption.
@@ -354,19 +353,6 @@ type IntentIntervention struct {
 	IntentID    int64
 	IntentState string
 	CreatedAt   time.Time
-}
-
-// WorkerDirection is the latest accepted human direction for one Worker
-// intent. The accepted activity is the durable planning event, so this view
-// survives restarts and is shared by Planner and Main Agent context builders.
-type WorkerDirection struct {
-	ActivityID    int64
-	IntentID      int64
-	RequestID     string
-	Message       string
-	IntentState   string
-	IntentSummary string
-	CreatedAt     time.Time
 }
 
 // lockIntentIntervention serializes request-id reservation/finalization across
@@ -577,7 +563,6 @@ WHERE a.exploration_id=$1 AND a.node_id=$2
 		"intervention_request_id": requestID,
 		"intervention_message":    message,
 		"intervention_status":     IntentInterventionAccepted,
-		"planner_event":           PlannerEventWorkerMessage,
 		"source":                  "user",
 	})
 	if err != nil {
@@ -622,52 +607,6 @@ WHERE a.exploration_id=$1 AND a.node_id=$2
 	activity.Summary, activity.Detail, activity.CreatedAt = message, message, createdAt
 	activity.Metadata = metadata
 	return activity, false, nil
-}
-
-// LatestWorkerDirections returns at most one accepted human direction per
-// local intent, newest directions first. It reads the visible user activity
-// rather than the hidden hand-off row so archive/restore and activity history
-// share one authoritative record.
-func (s *ExplorationStore) LatestWorkerDirections(limit int) ([]WorkerDirection, error) {
-	if limit <= 0 {
-		limit = 300
-	}
-	rows, err := s.db.Query(`
-SELECT activity_id,intent_id,request_id,message,intent_state,intent_summary,created_at
-FROM (
-	SELECT DISTINCT ON (a.node_id)
-		a.id AS activity_id,
-		a.node_id AS intent_id,
-		COALESCE(a.metadata->>'intervention_request_id','') AS request_id,
-		COALESCE(a.metadata->>'intervention_message',a.detail,'') AS message,
-		n.state AS intent_state,
-		COALESCE(n.payload->>'summary','') AS intent_summary,
-		a.created_at
-	FROM activity a
-	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-	WHERE a.exploration_id=$1
-	  AND a.kind='user'
-	  AND n.kind='intent'
-	  AND a.metadata->>'intervention_status'=$2
-	  AND a.metadata->>'planner_event'=$3
-	ORDER BY a.node_id,a.id DESC
-) latest
-ORDER BY activity_id DESC
-LIMIT $4`, s.expID, IntentInterventionAccepted, PlannerEventWorkerMessage, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]WorkerDirection, 0)
-	for rows.Next() {
-		var item WorkerDirection
-		if err := rows.Scan(&item.ActivityID, &item.IntentID, &item.RequestID, &item.Message,
-			&item.IntentState, &item.IntentSummary, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, rows.Err()
 }
 
 // RecoverableIntentInterventions returns control operations that must be

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/Autumn-27/artex/db"
@@ -86,27 +85,6 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 	return body + artifactSpec(workDir)
 }
 
-// mainAgentInput keeps Worker-side human steering visible to the Main Agent on
-// every fresh Chat session. The direction records remain separate from the
-// current user turn so the model does not mistake persisted context for a new
-// instruction that must be sent to the Worker again.
-func mainAgentInput(ts *db.ExplorationStore, message string) string {
-	if ts == nil {
-		return message
-	}
-	directions, err := ts.LatestWorkerDirections(workerDirectionOverviewLimit)
-	if err != nil || len(directions) == 0 {
-		return message
-	}
-	raw, err := json.Marshal(compactWorkerDirections(directions))
-	if err != nil {
-		return message
-	}
-	return "【系统同步的 Worker 最新人工方向】\n" +
-		"以下内容来自持久化的 Worker 对话。回答、观察和调度时必须纳入，但不要把它当作本轮新消息重复下发。\n" +
-		string(raw) + "\n\n【用户本轮消息】\n" + message
-}
-
 // Chat handles one human message and returns the assistant reply. emit, if
 // non-nil, receives each execution step (thinking / tool_use / tool_result /
 // text / result) so the main-agent session shows its work — exactly like the
@@ -175,7 +153,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 	// C2: this session is fresh each turn; re-unlock skill-gated MCPs from prior
 	// Skill() calls in the reloaded history so revealed tools stay callable.
 	seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
-	text, _, err := captureRunSession(ctx, s, mainAgentInput(ts, message), func(r db.Activity) {
+	text, _, err := captureRunSession(ctx, s, message, func(r db.Activity) {
 		if emit != nil {
 			r.Worker = "mainagent"
 			emit(r)
