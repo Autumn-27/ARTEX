@@ -181,6 +181,11 @@ func TestWorkerMessageCancelsBeforeAcceptAndContinuesSameSessionFirst(t *testing
 	if accepted.err != nil || accepted.result.ActivityID <= pending.ActivityID || accepted.result.Duplicate || accepted.result.State != "open" {
 		t.Fatalf("accepted Worker message=%+v control=%+v err=%v", accepted.result, pending, accepted.err)
 	}
+	triggers := f.task.drainTriggers()
+	if len(triggers) != 1 || triggers[0].Kind != agent.TriggerWorkerMessage ||
+		triggers[0].ActivityID != accepted.result.ActivityID || triggers[0].IntentID != f.intentID || triggers[0].Detail != message {
+		t.Fatalf("accepted Worker message triggers=%+v, want one matching persistent event", triggers)
+	}
 	node, err := f.task.Store.GetNode(f.intentID)
 	if err != nil || node == nil || node.State != "open" {
 		t.Fatalf("reopened target=%+v err=%v", node, err)
@@ -248,9 +253,36 @@ func TestWorkerMessageCancelsBeforeAcceptAndContinuesSameSessionFirst(t *testing
 	if _, err := f.engine.InterveneWork(context.Background(), f.task, f.intentID, requestID, "同 request_id 的另一条消息"); !errors.Is(err, errWorkInterventionConflict) {
 		t.Fatalf("same request_id different message error=%v, want conflict", err)
 	}
+	if triggers := f.task.drainTriggers(); len(triggers) != 0 {
+		t.Fatalf("idempotent retries emitted Planner triggers: %+v", triggers)
+	}
 	count, _ = countTranscriptWorkerMessages(t, f.tx, sessionID, requestID)
 	if count != 1 {
 		t.Fatalf("engine retries appended %d Worker messages, want 1", count)
+	}
+}
+
+func TestRecoverAcceptedWorkerMessageReconstructsPlannerTrigger(t *testing.T) {
+	f := newInterventionProtocolFixture(t, 1)
+	const requestID = "worker-message-recovery-1"
+	const message = "恢复后优先验证人工指定的权限边界"
+	if _, err := f.task.Store.ReserveIntentIntervention(f.intentID, requestID, message); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := f.task.Store.CompareAndSetIntentState(f.intentID, "running", "paused"); err != nil || !changed {
+		t.Fatalf("pause before recovery acceptance: changed=%v err=%v", changed, err)
+	}
+	activity, duplicate, err := f.task.Store.AcceptIntentIntervention(f.intentID, requestID, message)
+	if err != nil || duplicate {
+		t.Fatalf("accept before recovery: activity=%+v duplicate=%v err=%v", activity, duplicate, err)
+	}
+	if err := f.engine.RecoverWorkerMessages(context.Background(), f.task); err != nil {
+		t.Fatal(err)
+	}
+	triggers := f.task.drainTriggers()
+	if len(triggers) != 1 || triggers[0].Kind != agent.TriggerWorkerMessage || triggers[0].ActivityID != activity.ID ||
+		triggers[0].IntentID != f.intentID || triggers[0].Detail != message {
+		t.Fatalf("recovered Planner triggers=%+v", triggers)
 	}
 }
 

@@ -360,13 +360,13 @@ type IntentIntervention struct {
 // intent. The accepted activity is the durable planning event, so this view
 // survives restarts and is shared by Planner and Main Agent context builders.
 type WorkerDirection struct {
-	ActivityID   int64
-	IntentID     int64
-	RequestID    string
-	Message      string
-	IntentState  string
+	ActivityID    int64
+	IntentID      int64
+	RequestID     string
+	Message       string
+	IntentState   string
 	IntentSummary string
-	CreatedAt    time.Time
+	CreatedAt     time.Time
 }
 
 // lockIntentIntervention serializes request-id reservation/finalization across
