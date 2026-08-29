@@ -55,6 +55,17 @@ func (f *fakeProv) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 }
 
+func (f *fakeProv) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	acc := llm.NewAccumulator()
+	for ev, err := range f.Stream(ctx, req) {
+		if err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
+		acc.Add(ev)
+	}
+	return acc.Message(), acc.StopReason, acc.Usage, nil
+}
+
 // ok builds a provider that always succeeds with one text delta.
 func okProv(name, text string) *fakeProv {
 	return &fakeProv{name: name, events: [][]llm.StreamEvent{{{Type: llm.SETextDelta, Text: text}}}}

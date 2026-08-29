@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -436,13 +437,6 @@ func (d *DB) FailTaskArchiveJob(id int64, activeState string, cause error) error
 }
 
 func queryArchiveRows(q interface {
-<<<<<<< Updated upstream
-	QueryRow(query string, args ...any) *sql.Row
-}, inner string, args ...any) (json.RawMessage, error) {
-	var raw []byte
-	err := q.QueryRow(`SELECT COALESCE(jsonb_agg(to_jsonb(row_data)), '[]'::jsonb) FROM (`+inner+`) row_data`, args...).Scan(&raw)
-	return json.RawMessage(raw), err
-=======
 	Query(query string, args ...any) (*sql.Rows, error)
 }, inner string, args ...any) (json.RawMessage, int64, error) {
 	// Do not aggregate the result in PostgreSQL. A jsonb array has a hard limit
@@ -481,7 +475,6 @@ func encodeArchiveRows(rows interface {
 	}
 	output.WriteByte(']')
 	return json.RawMessage(output.Bytes()), count, nil
->>>>>>> Stashed changes
 }
 
 func writeArchiveRows(rows interface {
@@ -604,9 +597,6 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 	counts := make(map[string]int64, len(queries))
 	streamedTables := map[string]string{}
 	for _, query := range queries {
-<<<<<<< Updated upstream
-		raw, err := queryArchiveRows(tx, query.query, query.args...)
-=======
 		if query.name == "llm_records" && llmRecords != nil {
 			count, err := streamArchiveRows(tx, llmRecords, query.query, query.args...)
 			if err != nil {
@@ -618,12 +608,11 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 			continue
 		}
 		raw, count, err := queryArchiveRows(tx, query.query, query.args...)
->>>>>>> Stashed changes
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", query.name, err)
 		}
 		tables[query.name] = raw
-		counts[query.name] = rawRowCount(raw)
+		counts[query.name] = count
 	}
 
 	assetIDs, exclusiveAssetIDs, hosts, exclusiveHosts, err := archiveAssetMetadata(tx, taskID, expID, tables["assets"])

@@ -1639,10 +1639,10 @@ func (t *Task) Notify() {
 	}
 }
 
-// NotifyWorker wakes one idle execution slot without itself scheduling a Planner
-// round. Worker-message acceptance separately records a persistent planning event
-// and calls NotifyWorkerMessage; keeping execution wake-up independent prevents
-// Planner debounce from delaying the directed Worker claim.
+// NotifyWorker wakes one idle execution slot without also scheduling a Planner
+// round. The channel is separate from notify because human intervention needs
+// the reopened intent reclaimed immediately, while graph-change notifications
+// are Planner-facing and debounced. A nil channel is tolerated by test fixtures.
 func (t *Task) NotifyWorker() {
 	if t == nil || t.workerWake == nil {
 		return
@@ -1651,28 +1651,6 @@ func (t *Task) NotifyWorker() {
 	case t.workerWake <- struct{}{}:
 	default:
 	}
-}
-
-// NotifyWorkerMessage immediately schedules a Planner round for an accepted,
-// persistent Worker direction. ActivityID identifies the durable kind=user row
-// and prevents retries in the same debounce window from duplicating the prompt.
-func (t *Task) NotifyWorkerMessage(intentID, activityID int64, message string) {
-	message = strings.TrimSpace(message)
-	if intentID <= 0 || activityID <= 0 || message == "" {
-		return
-	}
-	t.trigMu.Lock()
-	for _, event := range t.pendingTriggers {
-		if event.Kind == agent.TriggerWorkerMessage && event.ActivityID == activityID {
-			t.trigMu.Unlock()
-			return
-		}
-	}
-	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{
-		Kind: agent.TriggerWorkerMessage, ActivityID: activityID, IntentID: intentID, Detail: message,
-	})
-	t.trigMu.Unlock()
-	t.Notify()
 }
 
 // NotifyDone is Notify plus a hint: a worker just finished intentID and that is

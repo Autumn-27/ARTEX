@@ -48,38 +48,6 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 	return out
 }
 
-const workerDirectionOverviewLimit = 300
-const workerDirectionMessageRunes = 1200
-
-// compactWorkerDirections keeps the latest durable human direction for each
-// intent small enough for every Planner/Main Agent turn. The full message stays
-// available in the Worker activity trace when an unusually long direction is
-// truncated here.
-func compactWorkerDirections(items []db.WorkerDirection) []map[string]any {
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		message := item.Message
-		truncated := false
-		if runes := []rune(message); len(runes) > workerDirectionMessageRunes {
-			message = string(runes[:workerDirectionMessageRunes]) + "…"
-			truncated = true
-		}
-		row := map[string]any{
-			"activity_id":    item.ActivityID,
-			"intent_id":      item.IntentID,
-			"intent_state":   item.IntentState,
-			"intent_summary": item.IntentSummary,
-			"message":        message,
-			"updated_at":     item.CreatedAt,
-		}
-		if truncated {
-			row["truncated"] = true
-		}
-		out = append(out, row)
-	}
-	return out
-}
-
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
@@ -392,14 +360,6 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // an empty context and always needs this first).
 func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
-	// worker_directions is the persistent cross-agent steering channel. It has
-	// one latest accepted human message per local intent, so Planner and Main
-	// Agent do not have to infer a changed direction from the original summary.
-	if directions, err := t.ts.LatestWorkerDirections(workerDirectionOverviewLimit); err == nil {
-		out["worker_directions"] = compactWorkerDirections(directions)
-	} else {
-		out["worker_directions"] = []map[string]any{}
-	}
 	// goals summary folded in so the planner needn't call list_goals each round.
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
 	gsum := make([]map[string]any, 0, len(goals))
@@ -938,17 +898,62 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 		})
 }
 
+// factsPageSize is the default page size for list_facts. Facts pile up on long
+// tasks; returning all of them at once (the old behaviour) could blow up the
+// context, so default to the newest page and let the agent page/filter for more.
+const factsPageSize = 20
+
 func (t *ToolSet) listFacts() actool.CoreTool {
-	return readTool("list_facts", "列本任务及直接关联任务的【探索事实/结论】(紧凑：id+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。详情用 node_detail(id)，漏洞看 list_findings。",
-		obj(map[string]any{}),
-		func(context.Context, json.RawMessage) (actool.Result, error) {
-			f, _ := t.ts.ListByKindWithSources(db.KindFact, 500)
+	return readTool("list_facts", "分页列本任务及直接关联任务的【探索事实/结论】，最新在前(紧凑：id+摘要+状态，摘要过长会截断，全文用 node_detail(id))。参数均可选：limit(默认 20，上限 100)、before(游标，传上一页返回的 next_before 取更旧的一页；省略/0=最新一页)、q(按摘要关键词过滤)。返回 {facts, total, has_more, next_before}：total 是过滤后的总数，has_more=true 时用 next_before 继续翻页。关联任务条目带 source_task_id/inherited=true 且只读。漏洞看 list_findings。",
+		obj(map[string]any{
+			"limit":  intp("返回条数，默认 20，上限 100"),
+			"before": intp("分页游标：只返回 id 小于该值的更旧事实；省略或 0 = 最新一页"),
+			"q":      str("按事实摘要关键词过滤（不区分大小写）；省略 = 不过滤"),
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Limit  int    `json:"limit"`
+				Before int64  `json:"before"`
+				Q      string `json:"q"`
+			}
+			_ = json.Unmarshal(in, &a)
+			limit := a.Limit
+			if limit <= 0 {
+				limit = factsPageSize
+			}
+			if limit > 100 {
+				limit = 100
+			}
+			f, hasMore, total, err := t.ts.ListByKindPageWithSources(db.KindFact, a.Before, limit, strings.TrimSpace(a.Q))
+			if err != nil {
+				return actool.Result{}, err
+			}
 			out := make([]map[string]any, 0, len(f))
 			for _, n := range f {
-				out = append(out, compactNode(n))
+				out = append(out, compactFact(n))
 			}
-			return jsonResult(out)
+			res := map[string]any{"facts": out, "total": total, "has_more": hasMore}
+			if hasMore && len(f) > 0 {
+				res["next_before"] = f[len(f)-1].ID // 传回它取下一页(更旧的)
+			}
+			return jsonResult(res)
 		})
+}
+
+// factSummaryMax caps a fact summary in list_facts output. Facts carry one-line
+// conclusions, but nothing enforces brevity; a runaway summary must not bloat a
+// whole page. Full text stays available via node_detail(id).
+const factSummaryMax = 160
+
+// compactFact is compactNode with the summary rune-capped for list_facts, so a
+// page of facts stays bounded regardless of how long any single summary grew.
+func compactFact(n *db.Node) map[string]any {
+	m := compactNode(n)
+	if s, ok := m["summary"].(string); ok && len([]rune(s)) > factSummaryMax {
+		m["summary"] = string([]rune(s)[:factSummaryMax]) + "…"
+		m["summary_truncated"] = true
+	}
+	return m
 }
 
 func (t *ToolSet) nodeDetail() actool.CoreTool {

@@ -19,6 +19,17 @@ func (p captureUsageProvider) Stream(ctx context.Context, _ llm.CompletionReques
 	return func(yield func(llm.StreamEvent, error) bool) { p.stream(ctx, yield) }
 }
 
+func (p captureUsageProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	acc := llm.NewAccumulator()
+	for ev, err := range p.Stream(ctx, req) {
+		if err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
+		acc.Add(ev)
+	}
+	return acc.Message(), acc.StopReason, acc.Usage, nil
+}
+
 func TestCaptureRunPersistsUsageOnProviderFailure(t *testing.T) {
 	wantErr := errors.New("provider failed after reporting usage")
 	provider := captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {

@@ -20,19 +20,20 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
-	prov        llm.Provider
-	model       string
-	tx          *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window      int                                    // context window in tokens (for compaction)
-	windowFn    func() int                             // optional dynamic task-chain minimum
-	maxTurns    int                                    // max agent turns per run (0 = unlimited)
-	killWork    func(intentID int64) error             // engine callback to terminate a running work (nil = off)
-	steerWork   func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr   string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch   WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir     string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool                      // resolver: inject task operation constraints into system prompt? (nil = yes)
+	prov              llm.Provider
+	model             string
+	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window            int                                    // context window in tokens (for compaction)
+	windowFn          func() int                             // optional dynamic task-chain minimum
+	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -47,6 +48,12 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default).
+func (p *Planner) SetNonStreaming(fn func() bool) { p.nonStreamingFn = fn }
+
+func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonStreamingFn() }
 
 func (p *Planner) compactionWindow() int {
 	if p.windowFn != nil {
@@ -116,7 +123,6 @@ func renderPlannerTodos(items []actool.Todo) string {
 //
 //	"done"    — a worker finished intent IntentID (its output conclusion is fetched).
 //	"finding" — a worker reported a finding on intent IntentID (Detail = 摘要).
-//	"worker_message" — the human changed one Worker's direction (Detail = 新方向).
 //	"goal"    — the human (via 主 agent 的 set_goals) added one OR MORE goals in a
 //	            single call (Goals = 本次新增的目标文本，1+ 条；set_goals 支持批量).
 //	"goal_deleted" — the human deleted a goal from 总览的目标管理 (Detail = 被删目标文本).
@@ -124,16 +130,13 @@ func renderPlannerTodos(items []actool.Todo) string {
 //	"cancelled" — the human deleted intent IntentID (Detail = 删除原因). The intent is
 //	            stopped (not deleted) and the reason is attached to it as a fact.
 type TriggerEvent struct {
-	Kind       string
-	ActivityID int64  // persistent activity id; worker_message notifications use it for de-duplication
-	IntentID   int64
-	Detail     string
-	Goals      []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
-	OldGoal    string   // Kind=="goal_edited" 专用：修改前的目标文本
-	NewGoal    string   // Kind=="goal_edited" 专用：修改后的目标文本
+	Kind     string
+	IntentID int64
+	Detail   string
+	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
+	OldGoal  string   // Kind=="goal_edited" 专用：修改前的目标文本
+	NewGoal  string   // Kind=="goal_edited" 专用：修改后的目标文本
 }
-
-const TriggerWorkerMessage = db.PlannerEventWorkerMessage
 
 // renderTriggers spells out the change(s) that fired this round: for a finished
 // worker — which intent + its output conclusion; for a finding — which intent +
@@ -159,9 +162,6 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 			b.WriteString(fmt.Sprintf("\n- 人修改了目标，由「%s」变为「%s」—— 请据新目标调整探索方向（原方向若已不适用请停派）。", ev.OldGoal, ev.NewGoal))
 		case "finding":
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
-		case TriggerWorkerMessage:
-			b.WriteString(fmt.Sprintf("\n- 用户向意图 #%d（%s）的 Worker 下发了新的人工方向：%s —— 该方向已优先交给同一 Worker；后续规划必须以它替代或补充原意图描述，避免生成冲突、回退或重复方向。",
-				ev.IntentID, intentSummary(ts, ev.IntentID), truncOutput(ev.Detail, 2000)))
 		case "cancelled":
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已停止（不再执行），其原因已作为事实挂在该意图上；请据此重新规划。", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		default: // "done"
@@ -242,15 +242,18 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 
 任务目标：{{.Goal}}
 
-⚠️ 最重要的原则：**这一轮生成 0 个意图是完全正常、而且是最常见的结果。** 你不是"每次都要产出意图"的机器。绝大多数唤醒，frontier 里已有的意图已经覆盖了所有已知方向，你应当什么都不加、直接结束。重复/换措辞地生成已经存在的意图是严重错误。
+⚠️ **生成 0 个意图是合法、正常的结果，但它有【具体的正当理由】，不是"少派更稳"的默认姿态。** 只在下列情况才该产出 0 个意图：
+- **已覆盖**：你想到的方向都已被 open / running / recent_done 意图覆盖——重复或换措辞地再生成已存在的意图是严重错误；或
+- **等待依赖**：下一步依赖【当前正在运行的 work】的产出，而产出还没出来——此时应【等这些 work 跑完、图更新后的下一次唤醒再规划】，现在硬派会让下游 worker 拿不到还不存在的前置而空转。
+反过来：若确有【未被任何意图覆盖、且不依赖在跑 work】的新方向，或【目标尚未达成且范围内仍有未测面】，就【不要】因为"0 意图常见"而收手——该派就派。别把 0 意图当成偷懒的默认。
 
 决策流程（每次唤醒）：
-1. **完整态势已直接附在本提示下方（就是 graph_overview 的返回，无需再调它）**：task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}，含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图）。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。需要更深的细节时才按需调：list_facts 列全部事实、list_findings 列全部漏洞、**node_detail(id)** 取某条的完整证据/详情（列表/recent_facts 只给摘要）。
+1. **完整态势已直接附在本提示下方（就是 graph_overview 的返回，无需再调它）**：task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}，含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图）。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。需要更深的细节时才按需调：list_facts 分页列事实（最新在前，默认 20 条，可传 q 关键词过滤、before 翻页，返回带 total/has_more）、list_findings 列全部漏洞、**node_detail(id)** 取某条的完整证据/详情（列表/recent_facts 只给摘要）。
    - open_intents / running_intents / recent_done_intents——"哪些方向已经有意图在覆盖/已尝试"。每个意图还带 **parents（上游：它派生自哪些事实/意图）和 yields（下游：它产生了哪些事实/发现）**——这就是探索图的**血缘关系**，据此理解"哪些事实来自哪个方向、能否综合成新方向"。recent_facts 里每个事实带 **from_intent**（由哪个意图产生）。
-   - worker_directions——用户在 Worker 对话里对每个意图最近一次下发的人工方向（持久化、重启后仍存在）。它比该意图最初的 summary 更新；判断在跑方向、补意图和使用 steer/kill 时必须以它为准，禁止重新派发与人工方向冲突的工作。
    - sites_without_endpoints / findings——"哪些方向【可能】需要探索"。
    - 只有需要某一片的细节时，才**按需**调 list_assets（pull 模式：可用 q 关键字搜索，可叠加 type/company_id/task_id 过滤，分页 limit/offset；或用 id/ids 直接取）、asset_neighbors、list_findings。资产图全局共享，别默认拉全量。资产中可能包含非本次任务涉及到的资产，所以需要主要出现非本次任务相关的资产时忽略这些资产。
 2. 判目标（核心职责）：graph_overview 的 goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id,evidence_id,reason) 标记 met。**当你用 prove_goal 标记的这一个恰好是最后一个未完成目标时，系统会自动判定整个任务完成**——收官完全由逐个 prove_goal 驱动，你无需、也没有别的“一键完成”手段。
+   ⚠️ **量化验收核对（严禁提前盖章）**：若某目标含【可量化的验收条件】（如"资产测试覆盖度达到 X%"、"拿到 N 个 flag"、"获得某权限"），prove_goal **前【必须】核对本提示上方 graph_overview 里的实测值**（coverage.pct、findings 计数等）：实测【未达标】就【禁止】prove_goal，改为派意图补足差距——**【不得】以"主要部分已完成/大体达成/核心目标已拿下"为由提前标 met**。例：目标要求覆盖度 100%、而 graph_overview 实测 coverage.pct=40%，则该目标【未达成】，继续派补测意图，不许 prove_goal。
 2.5. **（可选，仅限开局、极轻量）探测理解**：你具备 Bash 等执行能力，它的**唯一正当用途**是——当**图里几乎还没有事实**（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图描述具体时，对目标做**极少量、只读**的探测（如 1–2 次 curl 看首页/指纹），据此产出更精准的**初始意图**。
    ⚠️ **牢记你的身份边界：你是"规划者"，不是"执行者"。你在这里做的一切都只为【生成/说清意图】，绝不是【在 plan 里把活干了】。** 探测的**唯一合法产物是一句更精准的意图描述**——绝不能是漏洞的发现、验证、利用，也不能是端点/目录/参数的枚举结果。任何"我顺手把这个也测了/确认了"的念头都是越界：那是 worker 在 work 阶段该做的事，你只需把它**写成一个意图派下去**。
    **三条硬性边界，务必守住**：
@@ -361,7 +364,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、
 		// 能证的 prove_goal、串行链记 TodoWrite),而非停止规划——planner 之后仍会被反复唤醒。
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
-		Settlement: settle,
+		Settlement:   settle,
+		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

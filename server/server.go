@@ -314,6 +314,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.Stream = p.Streaming
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -325,20 +326,20 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 
 // saveLLMConfig persists the LLM config as the active "default" profile in PG.
 func (s *Server) saveLLMConfig(cfg agent.Config) error {
+	// cfg.Provider() already returns one of the three valid format strings
+	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
-	if format != "anthropic" {
-		format = "openai"
-	}
 	var id int64
 	// agent.Config carries no failover fields, so carry the stored ones forward —
-	// otherwise this legacy endpoint would silently reset the profile's priority
-	// and pool_exclude to zero values on every save.
+	// otherwise this legacy endpoint would silently reset the profile's priority,
+	// pool_exclude, and streaming to zero values on every save.
 	var priority int
 	var poolExclude bool
+	streaming := true // 旧库/新建默认流式
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
-				id, priority, poolExclude = p.ID, p.Priority, p.PoolExclude
+				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
 				break
 			}
 		}
@@ -347,7 +348,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL, Proxy: cfg.Proxy,
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
-		Priority: priority, PoolExclude: poolExclude,
+		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
 	})
 	if err != nil {
 		return err
@@ -397,6 +398,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
+	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
@@ -404,7 +406,16 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
+	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
 	return pl, wk
+}
+
+// nonStreamingResolver returns a resolver capturing a profile's streaming choice.
+// The agents read it per run; a profile change rebuilds the agents (applyLLM),
+// so the captured value is always the one in effect for this build.
+func nonStreamingResolver(cfg agent.Config) func() bool {
+	nonStreaming := !cfg.Stream
+	return func() bool { return nonStreaming }
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -450,12 +461,14 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
+	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -486,6 +499,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.Stream = p.Streaming
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -637,6 +651,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
+	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex
@@ -795,6 +810,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/traffic/exchange", s.getTrafficExchange)
 	mux.HandleFunc("GET /api/traffic/blob", s.getTrafficBlob)
 	mux.HandleFunc("GET /api/commands", s.pgListCommands)
+	mux.HandleFunc("GET /api/commands/stats", s.pgToolStats) // 按工具聚合调用次数
 	mux.HandleFunc("GET /api/llm/records", s.pgListLLMRecords)
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
@@ -1344,6 +1360,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		ThinkingType    string `json:"thinking_type"`
 		ReasoningEffort string `json:"reasoning_effort"`
 		ProfileID       *int64 `json:"profile_id"` // 测已存 profile 时传入：api_key 为空则用它存的 key
+		Streaming       *bool  `json:"streaming"`  // 省略=流式，与保存 profile 时同一套默认
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1354,6 +1371,11 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
+	// 同理，收发模式也照该 profile 的选择来：只支持其中一种通道的端点必须在这里就
+	// 暴露，而不是等会话里才发现"测试通过的配置根本跑不动"。
+	if req.Streaming != nil {
+		cfg.Stream = *req.Streaming
+	}
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
 	if cfg.APIKey == "" && req.ProfileID != nil {
@@ -1370,12 +1392,27 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
 		return
 	}
-	lat, err := agent.TestConnection(r.Context(), cfg)
+	lat, reply, err := agent.TestConnection(r.Context(), cfg)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model})
+	// 回传模型实际回复，让"测试通过"有据可查：看得见它确实说了话，而不只是 HTTP 200。
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model, "reply": truncateReply(reply),
+	})
+}
+
+// truncateReply clips a connection-test reply for display. A model told to answer
+// "OK" can still ramble (or think out loud); the UI only needs enough to show it
+// really said something. Rune-based so multibyte text never splits mid-character.
+func truncateReply(s string) string {
+	const max = 200
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 type createTaskReq struct {

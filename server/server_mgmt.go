@@ -1736,10 +1736,14 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// APIKey has json:"-" on db.LLMProfile so it is never leaked to the UI on
-	// read; accept it here via a sibling field for create/update.
+	// read; accept it here via a sibling field for create/update. Streaming is a
+	// *bool shadowing the embedded json:"streaming": an absent field must default
+	// to streaming (true), which a plain bool zero value (false = non-streaming)
+	// would get wrong — legacy/partial clients that never send it stay streaming.
 	var body struct {
 		db.LLMProfile
-		APIKey string `json:"api_key"`
+		APIKey    string `json:"api_key"`
+		Streaming *bool  `json:"streaming"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1747,6 +1751,7 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
+	p.Streaming = body.Streaming == nil || *body.Streaming
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -1921,11 +1926,13 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 
 	var candidates []candidate
 	switch provider {
-	case "openai":
+	case "openai", "openai-responses":
+		// Responses API shares the OpenAI model list at /v1/models; tolerate a full
+		// endpoint URL of either format.
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		b := strings.TrimRight(strings.TrimSuffix(baseURL, "/chat/completions"), "/")
+		b := strings.TrimRight(strings.TrimSuffix(strings.TrimSuffix(baseURL, "/chat/completions"), "/responses"), "/")
 		candidates = append(candidates, candidate{b + "/models", bearerHdr()})
 	default: // anthropic
 		if baseURL == "" {

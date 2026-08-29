@@ -5,6 +5,7 @@ import * as React from "react";
 import {
   ArrowUpIcon,
   BrainIcon,
+  ChevronDownIcon,
   CircleCheckIcon,
   CircleSlashIcon,
   CircleXIcon,
@@ -457,6 +458,10 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
 
 export function SessionsTab({ taskId }: { taskId: string }) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
+  // 手机端（<lg）会话列表默认折叠：屏幕高度本就紧张，列表若固定占掉 10~15rem，
+  // 下方的会话记录会被挤到只剩标题与输入框。折叠后记录区拿到几乎全部高度，
+  // 点标题栏可展开选会话，选完自动收起。桌面端不受影响（lg 起始终展开）。
+  const [listOpen, setListOpen] = React.useState(false);
   // Per-session lazily-loaded caches, keyed by session_key (main | plan | intent:<id>).
   const [store, setStore] = React.useState<SessionStore>({});
   // Worker sessions derived from exploration intents (paged past the old 300 cap).
@@ -1118,6 +1123,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const isSystem = active.role === "system";
   const activeKey = keyForSession(active);
   const activeState = store[activeKey];
+  // 折叠态（手机端）标题栏要替代整张列表：显示当前会话名 + 其它会话的未读合计，
+  // 否则收起后既不知道自己在看哪个会话，也看不到别处有新消息。
+  const activeDisplayTitle = (active.role === "worker" ? sessionMeta.get(active.id)?.title : "") || active.title;
+  const hiddenUnread = React.useMemo(
+    () => Object.entries(store).reduce((sum, [key, s]) => (key === activeKey ? sum : sum + s.unread), 0),
+    [store, activeKey],
+  );
 
   // Keep the SSE dispatcher's notion of the active session current, and lazily load
   // + clear unread whenever the active session changes.
@@ -1387,12 +1399,44 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="grid h-[calc(100svh-13rem)] min-h-0 grid-cols-1 grid-rows-[minmax(10rem,15rem)_minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_1fr] lg:grid-rows-[minmax(0,1fr)]">
+      {/* 高度预留：页面头部（标题行 + 目标 + Tabs ≈ 7.5rem）+ 内容内边距。手机端 p-4、
+        桌面端 lg:p-6，且桌面还要留出滚动余量，所以两档分别预留 10rem / 13rem —— 手机端
+        沿用 13rem 会白白吃掉 3rem 的记录高度。 */}
+      <div
+        className={cn(
+          "grid h-[calc(100svh-10rem)] min-h-0 grid-cols-1 gap-4",
+          listOpen ? "grid-rows-[minmax(0,40svh)_minmax(0,1fr)]" : "grid-rows-[auto_minmax(0,1fr)]",
+          "lg:h-[calc(100svh-13rem)] lg:grid-cols-[18rem_1fr] lg:grid-rows-[minmax(0,1fr)]",
+        )}
+      >
         {/* Left: session list */}
-        <div className="flex flex-col overflow-hidden rounded-lg border bg-card">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
           <div className="border-b px-3 py-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-medium text-muted-foreground">会话列表</div>
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setListOpen((open) => !open)}
+                aria-expanded={listOpen}
+                aria-controls="session-list-panel"
+                className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground lg:pointer-events-none"
+              >
+                <ChevronDownIcon
+                  className={cn("size-3.5 shrink-0 transition-transform lg:hidden", !listOpen && "-rotate-90")}
+                />
+                <span className="shrink-0">会话列表</span>
+                {!listOpen && (
+                  <>
+                    <span className="min-w-0 truncate text-foreground lg:hidden" title={activeDisplayTitle}>
+                      · {activeDisplayTitle}
+                    </span>
+                    {hiddenUnread > 0 && (
+                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
+                        {hiddenUnread > 99 ? "99+" : hiddenUnread}
+                      </span>
+                    )}
+                  </>
+                )}
+              </button>
               {!MOCK && (
                 <span
                   className={cn(
@@ -1436,7 +1480,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               </Tooltip>
             )}
           </div>
-          <ScrollArea type="auto" className="min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+          <ScrollArea
+            id="session-list-panel"
+            type="auto"
+            className={cn(
+              "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!",
+              !listOpen && "max-lg:hidden",
+            )}
+          >
             <div className="flex w-full flex-col gap-3 p-2">
               {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
                 const items = grouped[role];
@@ -1460,6 +1511,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => {
                             setActiveId(s.id);
+                            setListOpen(false); // 手机端选完即收起，把高度还给会话记录
                             setWorkerMessage("");
                             setWorkerMessageRequestId("");
                           }}
@@ -1498,7 +1550,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
         {/* Right: transcript */}
         <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
-          <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-2 sm:px-4 sm:py-2.5">
             {(() => {
               const isWorker = active.role === "worker";
               const meta = isWorker ? sessionMeta.get(active.id) : undefined;
@@ -1557,8 +1609,24 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
               {tokenTotal.any && (
                 <Tooltip>
+                  {/* 手机端用短标签（入/缓/出）：长标签会把这一行撑成两行，进一步压缩记录区。 */}
                   <TooltipTrigger asChild>
-                    <TokenMetrics input={tokenTotal.i} cache={tokenTotal.cr} output={tokenTotal.o} labels="long" />
+                    <span className="inline-flex min-w-0 items-center">
+                      <TokenMetrics
+                        input={tokenTotal.i}
+                        cache={tokenTotal.cr}
+                        output={tokenTotal.o}
+                        labels="short"
+                        className="sm:hidden"
+                      />
+                      <TokenMetrics
+                        input={tokenTotal.i}
+                        cache={tokenTotal.cr}
+                        output={tokenTotal.o}
+                        labels="long"
+                        className="max-sm:hidden"
+                      />
+                    </span>
                   </TooltipTrigger>
                   <TooltipContent>
                     输入 {activeTokens.input_tokens.toLocaleString()} · 输出{" "}

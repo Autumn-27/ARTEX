@@ -911,7 +911,12 @@ func (t *Traffic) stageTreesForArchive(dirs, hosts []string, archiveID, taskID i
 		}
 		planned = append(planned, stagedTrafficPath{source: source})
 	}
-	if len(planned) == 0 {
+	// 归档路径即使一个历史 host 目录都没有(新装机的流量只落在 SQLite + _blobs)
+	// 也必须留下 journal：崩溃点若落在 PostgreSQL 提交与 SQLite 提交之间，重启后
+	// SQLite 事务被回滚，只有这份 journal 能让恢复流程补做 host 行的删除。少了它，
+	// 已转冷任务的独占流量会永久留在热库里。
+	uniqueHosts := uniqueArchiveHosts(hosts)
+	if len(planned) == 0 && len(uniqueHosts) == 0 {
 		return "", nil, nil
 	}
 	parent := filepath.Join(t.dir, "_delete_staging")
@@ -921,7 +926,7 @@ func (t *Traffic) stageTreesForArchive(dirs, hosts []string, archiveID, taskID i
 	if stageDir, err = os.MkdirTemp(parent, "hosts-"); err != nil {
 		return "", nil, fmt.Errorf("创建流量暂存目录: %w", err)
 	}
-	journal := hostDeleteStageJournal{Version: 1, ArchiveID: archiveID, TaskID: taskID, Hosts: uniqueArchiveHosts(hosts)}
+	journal := hostDeleteStageJournal{Version: 1, ArchiveID: archiveID, TaskID: taskID, Hosts: uniqueHosts}
 	for i := range planned {
 		planned[i].staged = filepath.Join(stageDir, fmt.Sprintf("%d-%s", i, filepath.Base(planned[i].source)))
 		journal.Moves = append(journal.Moves, hostDeleteStageMove{Source: planned[i].source, Staged: planned[i].staged})

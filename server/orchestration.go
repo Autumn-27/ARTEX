@@ -450,9 +450,11 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()  // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
 	s.reseedMainAgentPrompt() // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.seedReporterAgent() // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.reseedPlannerPrompt()   // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
+	s.reseedWorkerPrompt()    // worker 提示词:加否定结论证据门槛(一次性)
+	s.seedReporterAgent()     // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -464,7 +466,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v6_insert_assets_related"
+	const flag = "tool_schema_refresh_v7_list_facts_paging"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -480,7 +482,9 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
 	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
-	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true}
+	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
+	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true, "list_facts": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if !refreshBuiltin[sd.Key] {
 			continue
@@ -569,6 +573,66 @@ func (s *Server) reseedMainAgentPrompt() {
 		return
 	}
 	log.Printf("[prompts] mainagent 提示词已追加新默认版本(加入目标达成后反问建目标,一次性)")
+}
+
+// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文重写了「0 意图」的正当理由
+// (从笼统"最常见"改为"仅在已覆盖/等待在跑 work 依赖时才 0 意图")、并新增「量化验收核对」(覆盖度等
+// 可量化目标未达标禁止 prove_goal)。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
+// 【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍保留在历史里,用户若自定义过可从版本记录
+// 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
+// reseedGoalsPrompt 完全同构。
+func (s *Server) reseedPlannerPrompt() {
+	const flag = "planner_prompt_zerointent_acceptance_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("planner")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["planner"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] planner 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] planner 提示词已追加新默认版本(重写0意图理由+加量化验收核对,一次性)")
+}
+
+// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文强化了「否定结论的证据门槛」
+// (未穷尽手段/证据弱一律标 inferred,别用轻率 observed 否定焊死路线)。SeedPromptIfEmpty 首插入only,
+// 旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。settings flag
+// 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
+func (s *Server) reseedWorkerPrompt() {
+	const flag = "worker_prompt_negfact_threshold_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 无论成功与否只尝试一次
+	a, err := s.m.pg.GetAgentByKey("worker")
+	if err != nil || a == nil {
+		return // 全新库尚未建 agent 行时,seedPrompts 会直接 seed 最新默认,无需此迁移
+	}
+	tmpl := agent.BuiltinPromptSeeds()["worker"]
+	if tmpl == "" {
+		return
+	}
+	// 全新库 seedPrompts 已 seed 最新默认 → 当前版本已等于代码默认,不必再追加重复版本。
+	if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
+		return
+	}
+	log.Printf("[prompts] worker 提示词已追加新默认版本(加否定结论证据门槛,一次性)")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：

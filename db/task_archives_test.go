@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-<<<<<<< Updated upstream
-=======
 type archiveJSONTestRows struct {
 	values [][]byte
 	next   int
@@ -122,7 +120,6 @@ func TestTaskArchiveFormatCompatibility(t *testing.T) {
 	}
 }
 
->>>>>>> Stashed changes
 func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

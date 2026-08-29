@@ -17,18 +17,25 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	prov        llm.Provider
-	model       string
-	tx          *transcript.Store // raw LLM conversation persistence (nil = off)
-	window      int               // context window in tokens (for compaction)
-	windowFn    func() int        // optional dynamic task-chain minimum
-	maxTurns    int               // max agent turns per run (0 = unlimited)
-	proxyAddr   string            // recording proxy for WebFetch (empty = direct)
-	proxyCACert string            // recording proxy's CA cert path (HTTPS verify)
-	webSearch   WebSearchOpts     // web_search tool backend selection (off by default)
-	workDir     string            // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork   func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	prov           llm.Provider
+	model          string
+	tx             *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window         int                                    // context window in tokens (for compaction)
+	windowFn       func() int                             // optional dynamic task-chain minimum
+	maxTurns       int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr      string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert    string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch      WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 }
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default).
+func (m *MainAgent) SetNonStreaming(fn func() bool) { m.nonStreamingFn = fn }
+
+func (m *MainAgent) nonStreaming() bool { return m.nonStreamingFn != nil && m.nonStreamingFn() }
 
 func NewMainAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *MainAgent {
 	return &MainAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns}
@@ -128,7 +135,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		Compaction:         compactionConfig(m.compactionWindow()), // long chats stay within the window
 		Todos:              actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
-		Settlement: wrapupSettlement("mainagent", nil),
+		Settlement:   wrapupSettlement("mainagent", nil),
+		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx

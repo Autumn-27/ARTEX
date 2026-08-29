@@ -852,7 +852,7 @@ export interface Settings {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic";
+  format: "openai" | "anthropic" | "openai-responses";
   base_url?: string;
   proxy?: string;
   model: string;
@@ -869,6 +869,8 @@ export interface LLMProfile {
   priority?: number;
   // true = 不作为故障转移目标（仍可被 agent/任务显式绑定使用）。
   pool_exclude?: boolean;
+  // true（默认）= 流式(SSE) | false = 真·非流式(stream:false，一次性返回)。
+  streaming?: boolean;
 }
 
 // ---- LLM 轮询（故障转移）----
@@ -1133,6 +1135,13 @@ export interface CommandRecord {
   created_at: string;
 }
 
+// 单个工具的调用统计（/commands/stats）；errors 为其中失败的次数。
+export interface ToolStat {
+  tool: string;
+  total: number;
+  errors: number;
+}
+
 // ---- LLM recording ----
 export interface LLMRecordItem {
   id: number;
@@ -1154,6 +1163,11 @@ export interface LLMRecordItem {
 export interface LLMRecordDetail extends LLMRecordItem {
   request_body: string;
   response_body: string;
+  // provider 实际收发的 HTTP 原文：请求为 buildBody() 发出的完整 body（含工具
+  // schema），响应为原始 SSE 帧。上面的 request_body/response_body 是归一化视图，
+  // 丢弃了工具 schema 与 tool_use 块。旧记录为空。
+  raw_request?: string;
+  raw_response?: string;
 }
 
 // One distinct task with its LLM-record count (task picker on the records page).

@@ -19,18 +19,10 @@ type CommandRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ListCommands returns tool executions (tool_use + paired tool_result) across all
-// explorations, with optional filtering and pagination. Covers every tool, not
-// just Bash; q matches the tool name or its input.
-func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
-	if size <= 0 {
-		size = 50
-	}
-	if page < 0 {
-		page = 0
-	}
-	offset := page * size
-
+// commandFilter builds the WHERE clause shared by the tool-execution list and
+// its per-tool tally, so the summary always describes exactly the rows the table
+// pages through. Returns the clause, its args, and the next placeholder index.
+func commandFilter(expID *int64, q string) (string, []any, int) {
 	where := `WHERE u.kind = 'tool_use'`
 	args := []any{}
 	argN := 1
@@ -45,6 +37,59 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 		args = append(args, "%"+q+"%")
 		argN++
 	}
+	return where, args, argN
+}
+
+// ToolStat is one tool's execution tally for the usage summary.
+type ToolStat struct {
+	Tool   string `json:"tool"`
+	Total  int    `json:"total"`
+	Errors int    `json:"errors"`
+}
+
+// ToolStats counts executions grouped by tool under the same filters
+// ListCommands takes. Unpaginated on purpose: the tally describes the whole
+// filtered set, not the page currently on screen.
+func (d *DB) ToolStats(expID *int64, q string) ([]ToolStat, error) {
+	where, args, _ := commandFilter(expID, q)
+
+	rows, err := d.Query(`
+SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool, COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE COALESCE(r.is_error,false)) AS errors
+FROM activity u
+LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
+`+where+`
+GROUP BY 1
+ORDER BY total DESC, tool ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []ToolStat{}
+	for rows.Next() {
+		var s ToolStat
+		if err := rows.Scan(&s.Tool, &s.Total, &s.Errors); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ListCommands returns tool executions (tool_use + paired tool_result) across all
+// explorations, with optional filtering and pagination. Covers every tool, not
+// just Bash; q matches the tool name or its input.
+func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
+	if size <= 0 {
+		size = 50
+	}
+	if page < 0 {
+		page = 0
+	}
+	offset := page * size
+
+	where, args, argN := commandFilter(expID, q)
 
 	// count
 	var total int
@@ -99,6 +144,13 @@ type LLMRecord struct {
 	Error        string    `json:"error,omitempty"`
 	RequestBody  string    `json:"request_body,omitempty"`
 	ResponseBody string    `json:"response_body,omitempty"`
+	// RawRequest / RawResponse are the untouched HTTP bodies exchanged with the
+	// provider — the request as buildBody() sent it (full tool schemas included)
+	// and the raw SSE frames. RequestBody/ResponseBody above are the normalized
+	// view, which drops tool schemas and tool_use blocks entirely. Empty for
+	// records written before this was added, or when the call never reached HTTP.
+	RawRequest  string `json:"raw_request,omitempty"`
+	RawResponse string `json:"raw_response,omitempty"`
 }
 
 const llmRecordsSchema = `
@@ -118,7 +170,9 @@ CREATE TABLE IF NOT EXISTS llm_records (
     status        TEXT,
     error         TEXT,
     request_body  TEXT,
-    response_body TEXT
+    response_body TEXT,
+    raw_request   TEXT,
+    raw_response  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_llm_records_ts ON llm_records(ts);
 CREATE INDEX IF NOT EXISTS idx_llm_records_session ON llm_records(session_id);
@@ -129,6 +183,8 @@ const llmRecordsMigrate = `
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS task_id TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS worker TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS profile_name TEXT;
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_request TEXT;
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_response TEXT;
 `
 
 // EnsureLLMRecordsTable creates the llm_records table if it does not exist.
@@ -153,11 +209,12 @@ func (d *DB) EnsureLLMRecordsTable() error {
 // InsertLLMRecord stores one LLM call record.
 func (d *DB) InsertLLMRecord(r *LLMRecord) error {
 	_, err := d.Exec(`
-INSERT INTO llm_records(model, profile_name, session_id, task_id, worker, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status, error, request_body, response_body)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+INSERT INTO llm_records(model, profile_name, session_id, task_id, worker, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status, error, request_body, response_body, raw_request, raw_response)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		r.Model, nullIfEmpty(r.ProfileName), r.SessionID, nullIfEmpty(r.TaskID), nullIfEmpty(r.Worker),
 		r.LatencyMs, r.InputTokens, r.OutputTokens, r.CacheRead, r.CacheWrite,
-		r.Status, nullIfEmpty(r.Error), nullIfEmpty(r.RequestBody), nullIfEmpty(r.ResponseBody))
+		r.Status, nullIfEmpty(r.Error), nullIfEmpty(r.RequestBody), nullIfEmpty(r.ResponseBody),
+		nullIfEmpty(r.RawRequest), nullIfEmpty(r.RawResponse))
 	return err
 }
 
@@ -270,19 +327,21 @@ func (d *DB) DeleteLLMRecords(task string) (int64, error) {
 // GetLLMRecord returns a single LLM record with full request/response bodies.
 func (d *DB) GetLLMRecord(id int64) (*LLMRecord, error) {
 	var r LLMRecord
-	var reqBody, respBody sql.NullString
+	var reqBody, respBody, rawReq, rawResp sql.NullString
 	err := d.QueryRow(`SELECT id, ts, COALESCE(model,''), COALESCE(profile_name,''), COALESCE(session_id,''), COALESCE(task_id,''), COALESCE(worker,''),
 		COALESCE(latency_ms,0), COALESCE(input_tokens,0), COALESCE(output_tokens,0), COALESCE(cache_read,0), COALESCE(cache_write,0),
-		COALESCE(status,''), COALESCE(error,''), request_body, response_body
+		COALESCE(status,''), COALESCE(error,''), request_body, response_body, raw_request, raw_response
 		FROM llm_records WHERE id=$1`, id).
 		Scan(&r.ID, &r.Ts, &r.Model, &r.ProfileName, &r.SessionID, &r.TaskID, &r.Worker, &r.LatencyMs,
 			&r.InputTokens, &r.OutputTokens, &r.CacheRead, &r.CacheWrite, &r.Status, &r.Error,
-			&reqBody, &respBody)
+			&reqBody, &respBody, &rawReq, &rawResp)
 	if err != nil {
 		return nil, err
 	}
 	r.RequestBody = reqBody.String
 	r.ResponseBody = respBody.String
+	r.RawRequest = rawReq.String
+	r.RawResponse = rawResp.String
 	return &r, nil
 }
 

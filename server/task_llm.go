@@ -139,6 +139,36 @@ func (r *taskLLMRuntime) current() (*Task, int64, int64, llm.Provider, error) {
 	return t, 0, pt.LLMChainRevision, prov, nil
 }
 
+// nonStreaming reports whether the task's currently-active LLM source is set to
+// non-streaming. It mirrors current()'s source precedence (agent binding →
+// active chain profile → global) but reads only the streaming flag. Read-only
+// and best-effort: any resolution error falls back to streaming (false), the
+// safe default. If failover switches to a profile with a different streaming
+// setting, the change takes effect on the next agent run (a fresh Session is
+// built per run in captureRun).
+func (r *taskLLMRuntime) nonStreaming() bool {
+	taskNum, err := parseTaskID(r.taskID)
+	if err != nil {
+		return false
+	}
+	pt, err := r.s.m.pg.GetTask(taskNum)
+	if err != nil || pt == nil {
+		return false
+	}
+	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
+		return !cfg.Stream
+	}
+	if len(pt.LLMProfileIDs) > 0 && pt.ActiveLLMProfileID != nil {
+		if _, cfg, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID); ok {
+			return !cfg.Stream
+		}
+	}
+	if _, cfg, ok := r.s.globalProvider(); ok {
+		return !cfg.Stream
+	}
+	return false
+}
+
 func parseTaskID(id string) (int64, error) {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil || n <= 0 {
@@ -147,9 +177,11 @@ func parseTaskID(id string) (int64, error) {
 	return n, nil
 }
 
-func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
-	ctx = llmrec.WithTaskID(ctx, r.taskID)
-	hooks := taskLLMStreamHooks{
+// streamHooks builds the failover/exhaustion callbacks shared by Stream and
+// Complete: how to read the current profile selection, how to mark it quota
+// exhausted, and how to emit a failover transition.
+func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
+	return taskLLMStreamHooks{
 		current: func() (taskLLMSelection, error) {
 			task, profileID, revision, provider, err := r.current()
 			return taskLLMSelection{task: task, profileID: profileID, revision: revision, provider: provider}, err
@@ -169,7 +201,70 @@ func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) 
 			r.s.emitTaskLLMTransition(selection.task, transition, cause)
 		},
 	}
-	return streamTaskLLM(ctx, r.taskID, req, hooks)
+}
+
+func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	ctx = llmrec.WithTaskID(ctx, r.taskID)
+	return streamTaskLLM(ctx, r.taskID, req, r.streamHooks())
+}
+
+// Complete is the non-streaming counterpart of Stream. A non-streaming call is
+// atomic — it never delivers partial output — so every failure is safe to retry
+// on the same provider or fail over to the next profile without risking
+// duplicated model output or tool execution (the "committed" bookkeeping the
+// streaming path needs is unnecessary here).
+func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	ctx = llmrec.WithTaskID(ctx, r.taskID)
+	return completeTaskLLM(ctx, r.taskID, req, r.streamHooks())
+}
+
+func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) (llm.Message, string, llm.Usage, error) {
+	for {
+		selection, err := hooks.current()
+		if err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
+		var (
+			msg     llm.Message
+			sr      string
+			usage   llm.Usage
+			callErr error
+		)
+		// 同 provider 安全窗口重试:非流式调用要么整体成功、要么整体失败,没有
+		// 中途已交付输出的问题,所以任何瞬时失败都可原样重试。
+		for attempt := 0; ; attempt++ {
+			msg, sr, usage, callErr = selection.provider.Complete(ctx, req)
+			if callErr != nil && ctx.Err() == nil &&
+				attempt < sameProviderStreamRetries && isRetryableStreamError(callErr) {
+				backoff := sameProviderRetryBackoff(attempt)
+				log.Printf("[task-llm] task %s 非流式调用失败,%v 后同 provider 重试 (%d/%d): %v",
+					taskID, backoff, attempt+1, sameProviderStreamRetries, callErr)
+				if sleepCtx(ctx, backoff) {
+					break // 退避期间 ctx 取消 → 停止重试
+				}
+				continue
+			}
+			break
+		}
+		if callErr == nil {
+			return msg, sr, usage, nil
+		}
+		// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
+		if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
+			return llm.Message{}, "", llm.Usage{}, callErr
+		}
+		transition, markErr := hooks.exhaust(selection, callErr)
+		if markErr != nil {
+			return llm.Message{}, "", llm.Usage{}, fmt.Errorf("mark profile quota exhausted after %v: %w", callErr, markErr)
+		}
+		if transition.Advanced && !transition.Stale && hooks.transition != nil {
+			hooks.transition(selection, transition, callErr)
+		}
+		if !transition.Stale && transition.NextProfileID == nil {
+			return llm.Message{}, "", llm.Usage{}, &taskLLMError{taskID: taskID, chainExhausted: transition.ChainExhausted, cause: callErr}
+		}
+		// 没有任何输出交付给调用方,换下一个 profile 重放同一逻辑请求是安全的。
+	}
 }
 
 func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) iter.Seq2[llm.StreamEvent, error] {
@@ -435,6 +530,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	window := workerRuntime.CompactionWindow()
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
+	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
@@ -442,6 +538,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
+	pl.SetNonStreaming(plannerRuntime.nonStreaming)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
@@ -449,6 +546,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
+	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏

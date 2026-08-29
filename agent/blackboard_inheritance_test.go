@@ -326,7 +326,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 		t.Fatalf("inherited host context missing: %#v", coverage)
 	}
 
-	facts := callReadJSON(t, tools.listFacts(), `{}`).([]any)
+	facts := callReadJSON(t, tools.listFacts(), `{}`).(map[string]any)["facts"].([]any)
 	seenSource, seenGrand := false, false
 	for _, raw := range facts {
 		item := raw.(map[string]any)

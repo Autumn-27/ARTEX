@@ -687,7 +687,6 @@ func (e *Engine) interveneWork(ctx context.Context, t *Task, intentID int64, req
 	}
 	if !duplicate {
 		e.publishStoredActivity(t, activity)
-		t.NotifyWorkerMessage(intentID, activity.ID, message)
 	}
 	e.readyDirectedClaim(intentID)
 	t.NotifyWorker()
@@ -752,10 +751,6 @@ func (e *Engine) recoverWorkerMessages(ctx context.Context, t *Task, allowAdmiss
 				log.Printf("[worker chat] task %s 恢复意图 #%d 待处理消息失败: %v", t.ID, item.IntentID, recoverErr)
 			}
 		case db.IntentInterventionAccepted:
-			// Reconstruct the Planner-facing event while the Worker hand-off is still
-			// pending. The durable graph_overview view remains authoritative even if
-			// this notification was already consumed before a later restart.
-			t.NotifyWorkerMessage(item.IntentID, item.ActivityID, item.Message)
 			if item.IntentState == "paused" {
 				if changed, setErr := t.Store.CompareAndSetIntentState(item.IntentID, "paused", "open"); setErr != nil {
 					return setErr
