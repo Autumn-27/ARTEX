@@ -324,6 +324,11 @@ ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS priority     INTEGER NOT NULL 
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS pool_exclude BOOLEAN NOT NULL DEFAULT false;
 -- 流式开关；补旧库。默认 true = 保持既有的流式行为，旧配置无感升级。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS streaming    BOOLEAN NOT NULL DEFAULT true;
+-- 放开 format 约束以容纳 openai-responses(OpenAI Responses API)；补旧库。
+-- 每次启动执行,幂等:先删旧 CHECK 再建含三值的新 CHECK。
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_format_check;
+ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_format_check
+    CHECK (format IN ('openai','anthropic','openai-responses'));
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，

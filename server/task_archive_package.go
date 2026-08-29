@@ -96,6 +96,17 @@ func stageTaskArchiveFiles(dataDir string, archiveID int64, taskID string, explo
 		if err := json.Unmarshal(raw, &stage.journal); err != nil {
 			return nil, fmt.Errorf("read task archive staging journal: %w", err)
 		}
+		// The journal is written before the first rename, so its presence does not mean
+		// the payload is complete: a previous round may have failed mid-loop with a
+		// rollback that itself errored, which leaves the root in place. Replay the moves
+		// rather than packaging a payload that is missing transcripts or workspace files.
+		if err := os.MkdirAll(filepath.Join(stage.payload, "files"), archiveDirMode); err != nil {
+			return nil, err
+		}
+		if err := stage.applyMoves(); err != nil {
+			_ = stage.rollback()
+			return nil, err
+		}
 		return stage, nil
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -133,18 +144,40 @@ func stageTaskArchiveFiles(dataDir string, archiveID int64, taskID string, explo
 		_ = stage.rollback()
 		return nil, err
 	}
-	for _, move := range targets {
-		destination := filepath.Join(stage.payload, move.Relative)
-		if err := os.MkdirAll(filepath.Dir(destination), archiveDirMode); err != nil {
-			_ = stage.rollback()
-			return nil, err
-		}
-		if err := os.Rename(move.Source, destination); err != nil {
-			_ = stage.rollback()
-			return nil, fmt.Errorf("stage task archive path %s: %w", move.Source, err)
-		}
+	if err := stage.applyMoves(); err != nil {
+		_ = stage.rollback()
+		return nil, err
 	}
 	return stage, nil
+}
+
+// applyMoves performs the renames recorded in the journal. Entries already sitting
+// in the payload are skipped, so an interrupted staging round can be resumed in
+// place without moving anything twice.
+func (s *taskArchiveFileStage) applyMoves() error {
+	for _, move := range s.journal.Moves {
+		destination := filepath.Join(s.payload, move.Relative)
+		if _, err := os.Lstat(destination); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if _, err := os.Lstat(move.Source); err != nil {
+			if os.IsNotExist(err) {
+				// Neither side exists: the path was removed outside the archive flow
+				// after the journal was written. Nothing can be staged for it.
+				continue
+			}
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), archiveDirMode); err != nil {
+			return err
+		}
+		if err := os.Rename(move.Source, destination); err != nil {
+			return fmt.Errorf("stage task archive path %s: %w", move.Source, err)
+		}
+	}
+	return nil
 }
 
 func (s *taskArchiveFileStage) rollback() error {
@@ -368,6 +401,18 @@ func recoverTaskArchiveStages(dataDir string, pg *pgdb.DB) error {
 		}
 		root := filepath.Join(parent, entry.Name())
 		raw, err := os.ReadFile(filepath.Join(root, "journal.json"))
+		if os.IsNotExist(err) {
+			// Either staging died between creating the directory tree and writing the
+			// journal — no rename had run, so payload holds nothing — or commit/rollback
+			// failed part-way through removing the root, in which case payload only holds
+			// copies already inside the package. Without a journal there is nothing to
+			// roll back, and reporting an error here keeps the archive worker from ever
+			// starting, so discard the directory instead.
+			if err := os.RemoveAll(root); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if err != nil {
 			errs = append(errs, err)
 			continue
