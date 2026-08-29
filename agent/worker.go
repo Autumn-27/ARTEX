@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -64,6 +65,40 @@ type Worker struct {
 	injectConstraints func() bool
 }
 
+<<<<<<< Updated upstream
+=======
+// WorkerSessionID returns the stable transcript key used by a worker intent.
+// Worker slots are reusable, so the intent id (rather than work#N) is the
+// session identity. Keep this helper public so the Worker message API and UI
+// can refer to exactly the conversation that will be resumed.
+func WorkerSessionID(explorationID, intentID int64) string {
+	return fmt.Sprintf("exp%d-worker-i%d", explorationID, intentID)
+}
+
+const workerChatMarkerPrefix = "<!-- ARTEX_WORKER_CHAT:"
+
+func workerChatMarker(requestID string) string {
+	return workerChatMarkerPrefix + requestID + " -->"
+}
+
+func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
+	marker := workerChatMarker(requestID)
+	for _, message := range messages {
+		if message.Role == llm.RoleUser && strings.Contains(message.Text(), marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetNonStreaming wires a resolver deciding whether runs use the non-streaming
+// model path (true = non-streaming). nil/unset = streaming (default). Read per
+// run so a profile or task-chain toggle takes effect without rebuilding.
+func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
+
+func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
+
+>>>>>>> Stashed changes
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the worker system prompt. nil = inject (default).
 func (w *Worker) SetConstraintInject(fn func() bool) { w.injectConstraints = fn }
@@ -263,6 +298,18 @@ func renderWorkerGraphOverview(data map[string]any) string {
 // explored but persisted nothing isn't mistaken for done, and the engine can log
 // facts/assets/findings separately instead of lumping them under "facts").
 func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
+	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, "", "")
+}
+
+// ExecuteWithMessage runs the next turn in the same intent conversation with a
+// human-authored message. The HTTP handler does not edit the transcript;
+// agentcore records the message as a normal user turn when this Worker starts.
+// This keeps Worker continuation identical to the regular agent chat flow.
+func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, strings.TrimSpace(requestID), strings.TrimSpace(message))
+}
+
+func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
@@ -346,7 +393,7 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
-		opts.SessionID = fmt.Sprintf("exp%d-worker-i%d", ts.ID(), intent.ID)
+		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
 	}
 	intentID := intent.ID
 	emitWrap := func(r db.Activity) {
@@ -386,11 +433,26 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 	// being re-run. The transcript ID is deterministic per intent, so if a prior
 	// session exists the worker continues from where it left off instead of
 	// restarting from scratch.
+	alreadyRecorded := false
 	if w.tx != nil {
 		_ = s.Resume(opts.SessionID)
-		if len(s.Messages()) > 0 {
+		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
+		if len(s.Messages()) > 0 && message == "" {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 			input = "继续执行。"
+		} else if len(s.Messages()) > 0 {
+			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
+		}
+	}
+	if message != "" {
+		if alreadyRecorded {
+			input = "继续执行上一次人工对话输入的新意图。不要重复已经完成的动作。"
+		} else if len(s.Messages()) > 0 {
+			input = workerChatMarker(requestID) + "\n【人工对话输入的新意图】\n" + message +
+				"\n\n请立即按这条人工输入执行，完成后再根据上下文决定原任务是否需要继续。"
+		} else {
+			input += "\n\n" + workerChatMarker(requestID) + "\n【人工对话输入的新意图】\n" + message +
+				"\n\n请优先执行这条人工输入。"
 		}
 	}
 

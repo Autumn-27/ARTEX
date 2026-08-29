@@ -45,6 +45,7 @@ func TestControlWorkCarriesUserActionCause(t *testing.T) {
 	}{
 		{action: "pause", code: "work_paused_by_user"},
 		{action: "cancel", code: "work_cancelled_by_user"},
+		{action: "intervene", code: "work_intervened_by_user"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			e := NewEngine(nil)
