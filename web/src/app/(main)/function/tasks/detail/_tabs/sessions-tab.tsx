@@ -14,7 +14,6 @@ import {
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
-  PlayIcon,
   RadioIcon,
   RotateCwIcon,
   ShieldAlertIcon,
@@ -43,6 +42,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, sseUrl } from "@/lib/api";
@@ -93,6 +93,18 @@ const PAGE = 200; // history page size
 const SYSTEM_SCAN_PAGE = 500; // generic activity pages scanned to recover sparse system audit events
 const MAX_KEEP = 4000; // per-session in-memory cap; older pages re-fetched on scroll-up
 const STREAM_WINDOW_MS = 5000; // "live" = activity seen within this window
+const MAX_WORKER_MESSAGE_CHARS = 4000;
+
+function newWorkerMessageRequestID(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `worker-message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+  );
+}
+
+function workerMessageCharCount(value: string): number {
+  return Array.from(value).length;
+}
 
 // One session's lazily-loaded, reverse-paginated cache. `lastTs`/`unread` are kept
 // live even for sessions that were never opened, so the list shows liveness + unread
@@ -313,8 +325,6 @@ function SessionItem({
   hasPending,
   unread,
   onClick,
-  onPause,
-  onResume,
   onCancel,
   controlling,
   deleted,
@@ -325,8 +335,6 @@ function SessionItem({
   hasPending?: boolean;
   unread?: number;
   onClick: () => void;
-  onPause?: () => void;
-  onResume?: () => void;
   onCancel?: () => void;
   controlling?: boolean;
   deleted?: boolean;
@@ -339,7 +347,8 @@ function SessionItem({
     <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
   ) : null;
 
-  const controllable = s.role === "worker" && !s.inherited && (s.status === "running" || s.status === "paused");
+  const cancellable =
+    s.role === "worker" && !s.inherited && !deleted && (s.status === "running" || s.status === "paused");
   return (
     <div
       className={cn(
@@ -386,33 +395,8 @@ function SessionItem({
           </span>
         )}
       </button>
-      {controllable && (
+      {cancellable && (
         <div className="flex shrink-0 items-center gap-0.5 pr-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover/session:opacity-100 sm:group-focus-within/session:opacity-100">
-          {s.status === "running" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={onPause}
-              disabled={controlling}
-              title="暂停 Worker"
-              aria-label="暂停 Worker"
-            >
-              {controlling ? <Loader2Icon className="animate-spin" /> : <PauseIcon />}
-            </Button>
-          ) : (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={onResume}
-              disabled={controlling}
-              title="恢复 Worker"
-              aria-label="恢复 Worker"
-            >
-              {controlling ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}
-            </Button>
-          )}
           <Button
             type="button"
             variant="ghost"
@@ -495,6 +479,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
   const [cancelReason, setCancelReason] = React.useState("");
+  const [workerMessage, setWorkerMessage] = React.useState("");
+  const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
+  const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -554,6 +541,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     },
     [controllingIntent, patchIntentState, taskId],
   );
+
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
   const [sseLive, setSseLive] = React.useState(false);
@@ -1345,6 +1333,33 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       .finally(() => setSending(false));
   }
 
+  function sendWorkerChat() {
+    const intentId = active.intent_id;
+    const message = workerMessage.trim();
+    if (!intentId || active.inherited || active.status !== "paused" || workerMessageSending || !message) return;
+    if (workerMessageCharCount(message) > MAX_WORKER_MESSAGE_CHARS) {
+      toast.error(`消息不能超过 ${MAX_WORKER_MESSAGE_CHARS} 个字符`);
+      return;
+    }
+    const requestId = workerMessageRequestId || newWorkerMessageRequestID();
+    if (!workerMessageRequestId) setWorkerMessageRequestId(requestId);
+    setWorkerMessageSending(true);
+    api
+      .sendWorkerMessage(taskId, intentId, message, requestId)
+      .then((result) => {
+        // The server records the user turn and streams the run over SSE, so there is
+        // no optimistic insert: the message and the continuation arrive live.
+        patchIntentState(intentId, result.state);
+        setWorkerMessage("");
+        setWorkerMessageRequestId("");
+        toast.success(`消息已发送给 Worker #${intentId}，已立即继续执行`);
+      })
+      .catch((error) => {
+        toast.error(`发送失败：${(error as Error).message || "请稍后重试"}`);
+      })
+      .finally(() => setWorkerMessageSending(false));
+  }
+
   const mainLoaded = !!store.main?.loaded;
   // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
   const sendMode = useChatSendMode();
@@ -1475,11 +1490,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           onClick={() => {
                             setActiveId(s.id);
                             setListOpen(false); // 手机端选完即收起，把高度还给会话记录
+                            setWorkerMessage("");
+                            setWorkerMessageRequestId("");
                           }}
                           controlling={controllingIntent === s.intent_id}
                           deleted={meta?.deleted}
-                          onPause={() => void controlWorker(s, "pause")}
-                          onResume={() => void controlWorker(s, "resume")}
                           onCancel={() => {
                             setCancelIntent(s);
                           }}
@@ -1745,6 +1760,86 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     >
                       {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
                     </InputGroupButton>
+                  )}
+                </InputGroupAddon>
+              </InputGroup>
+            </div>
+          ) : active.role === "worker" &&
+            !active.inherited &&
+            (active.status === "running" || active.status === "paused") ? (
+            <div className="border-t p-3">
+              <InputGroup className="min-h-9 has-disabled:opacity-100">
+                <InputGroupTextarea
+                  rows={1}
+                  aria-label={`给 Worker #${active.intent_id} 发消息`}
+                  placeholder={`给 Worker #${active.intent_id} 发消息，调整执行方向…`}
+                  value={workerMessage}
+                  onChange={(event) => {
+                    setWorkerMessage(event.target.value);
+                    setWorkerMessageRequestId("");
+                  }}
+                  onKeyDown={(event) => {
+                    if (!shouldSubmitOnKey(event, sendMode)) return;
+                    event.preventDefault();
+                    sendWorkerChat();
+                  }}
+                  disabled={active.status === "running" || workerMessageSending}
+                  aria-invalid={workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS}
+                  className="max-h-36 min-h-9 overflow-y-auto"
+                />
+                <InputGroupAddon align="block-end">
+                  <span
+                    className={cn(
+                      "px-1 text-[10px] tabular-nums text-muted-foreground",
+                      workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS && "text-destructive",
+                    )}
+                  >
+                    {workerMessageCharCount(workerMessage)}/{MAX_WORKER_MESSAGE_CHARS}
+                  </span>
+                  {active.status === "running" ? (
+                    <InputGroupButton
+                      className="ml-auto"
+                      size="icon-xs"
+                      variant="destructive"
+                      onClick={() => void controlWorker(active, "pause")}
+                      disabled={controllingIntent === active.intent_id}
+                      title="暂停当前 Worker"
+                      aria-label="暂停当前 Worker"
+                    >
+                      {controllingIntent === active.intent_id ? (
+                        <Loader2Icon className="animate-spin" />
+                      ) : (
+                        <SquareIcon />
+                      )}
+                    </InputGroupButton>
+                  ) : (
+                    <>
+                      <InputGroupButton
+                        className="ml-auto"
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => void controlWorker(active, "resume")}
+                        disabled={controllingIntent === active.intent_id || workerMessageSending}
+                        title="不发消息，直接继续执行"
+                        aria-label="直接继续执行"
+                      >
+                        {controllingIntent === active.intent_id ? <Loader2Icon className="animate-spin" /> : "直接继续"}
+                      </InputGroupButton>
+                      <InputGroupButton
+                        size="icon-xs"
+                        variant="default"
+                        onClick={sendWorkerChat}
+                        disabled={
+                          workerMessageSending ||
+                          !workerMessage.trim() ||
+                          workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS
+                        }
+                        title="发送消息"
+                        aria-label="发送消息"
+                      >
+                        {workerMessageSending ? <Spinner /> : <ArrowUpIcon />}
+                      </InputGroupButton>
+                    </>
                   )}
                 </InputGroupAddon>
               </InputGroup>

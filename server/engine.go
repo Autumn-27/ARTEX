@@ -913,15 +913,28 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 	}
 }
 
-// runWorkerStep claims and fully settles at most one intent. Its caller holds one
-// task-operation admission for the whole claim/execute/state-write sequence so a
-// delete cannot observe quiescence between the LLM return and the final DB writes.
+// runWorkerStep claims one intent from the frontier and fully settles it via
+// runIntent. Returns false when nothing was claimable. The pool worker loop is its
+// only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
 	}
 	log.Printf("[worker %s] task %s 领取意图 #%d", name, t.ID, intent.ID)
+	return e.runIntent(ctx, t, name, worker, intent, "", "")
+}
+
+// runIntent executes and fully settles one already-claimed (state=running) intent.
+// Both the pool worker loop (via runWorkerStep) and the human-message handler (via
+// runDetachedIntent, a dedicated goroutine outside the worker pool) call it, so the
+// execute/retry/state-write logic lives in exactly one place. A non-empty message
+// is injected as this turn's input through ExecuteWithMessage; requestID keys the
+// transcript marker that dedups re-injection across model_error retries. The caller
+// must already hold one task-operation admission for the whole sequence so a delete
+// cannot observe quiescence between the LLM return and the final DB writes.
+func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
@@ -947,7 +960,14 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 	hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
-	reason, wrote, err := worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+	var reason harness.TerminalReason
+	var wrote agent.WriteCounts
+	var err error
+	if hasChatMessage {
+		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+	} else {
+		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+	}
 	e.EndLLMCall(t.ID)
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
@@ -961,7 +981,11 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
 		e.BeginLLMCall(t.ID)
-		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+		if hasChatMessage {
+			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+		} else {
+			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+		}
 		e.EndLLMCall(t.ID)
 	}
 	// Capture kill state before detachWork cancels workCtx. kill = this work's
@@ -1074,6 +1098,61 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
 	return true
+}
+
+// runDetachedIntent runs one paused intent OUTSIDE the worker pool in its own
+// goroutine — the human-message path. It transitions the intent paused->running
+// itself (never through 'open'), so the pool, which only claims 'open', can never
+// race it; the "at most one run per intent" invariant still holds because winning
+// the CAS is the sole entry and work[intentID] was cleared when the pause settled.
+// Because it does not compete for a frontier slot, a user message continues the
+// worker immediately even when all pool slots are busy (mirroring how the
+// main-agent chat handler starts its run directly). The spawned goroutine owns one
+// task-operation admission for the whole run and roots its context at ctx (pass the
+// server root, never the HTTP request, so a disconnect cannot strand the run while
+// task pause/delete/shutdown still stops it). Returns an error if the run could not
+// be started; the intent is left untouched in that case.
+func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message string) error {
+	if !e.beginTaskOperation(t.ID) {
+		return fmt.Errorf("task is being deleted")
+	}
+	release := true
+	defer func() {
+		if release {
+			e.decInflight(t.ID)
+		}
+	}()
+	_, worker := e.snapshotFor(t)
+	if worker == nil {
+		return fmt.Errorf("worker 尚未就绪")
+	}
+	node, err := t.Store.GetNode(intentID)
+	if err != nil {
+		return err
+	}
+	if node == nil || node.Kind != db.KindIntent {
+		return fmt.Errorf("intent not found")
+	}
+	changed, err := t.Store.CompareAndSetIntentState(intentID, "paused", "running")
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+	}
+	node.State, node.Owner = "running", "chat"
+	// Record the human turn as a visible activity BEFORE the run starts, so it is
+	// ordered ahead of any worker step and never appears without the run happening.
+	// This is the UI copy; ExecuteWithMessage separately writes it into the intent
+	// transcript as the LLM input.
+	uid := intentID
+	e.emitActivity(t, db.Activity{NodeID: &uid, Worker: "user", Kind: "user", Summary: message, Detail: message})
+	release = false // ownership of the admission passes to the goroutine
+	go func() {
+		defer e.decInflight(t.ID)
+		e.runIntent(ctx, t, "chat", worker, node, requestID, message)
+	}()
+	return nil
 }
 
 func taskExecutionPaused(cause error) bool {
