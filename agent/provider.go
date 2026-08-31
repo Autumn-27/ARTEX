@@ -58,6 +58,15 @@ type Config struct {
 	// 某些网关糟糕的 SSE 实现(空帧、思考字段丢帧),代价是失去运行中的实时进度/实时
 	// token 计数。映射为 agentcore.Options.NonStreaming = !Stream。
 	Stream bool
+	// MaxTokens 是单次回复的输出上限(token)。0 = 不发送该字段,由服务端默认值决定
+	// (历史行为)。与 ContextWindowK 不同:后者是模型总容量,只在本地用来算压缩阈值,
+	// 不出现在请求里;本值随每次请求发出。映射为 agentcore.Options.MaxTokens。
+	MaxTokens int
+	// MaxTokensField 选择 MaxTokens 用哪个请求字段名,仅对 format=openai 生效:
+	//   "" = max_tokens(默认); "max_completion_tokens" = 新字段。
+	// OpenAI 推理模型(o 系列/GPT-5)只认后者,收到 max_tokens 会直接报
+	// unsupported_parameter;而多数兼容网关只认前者,故不做自动推断,交由用户按端点选。
+	MaxTokensField string
 }
 
 // compaction window resolution bounds (in K tokens). Below the floor the
@@ -230,6 +239,9 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	// 可只发 thinking.type、只发 effort、都发、或都不发。
 	lc.ThinkingType = c.ThinkingType
 	lc.ReasoningEffort = c.ReasoningEffort
+	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
+	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。
+	lc.MaxTokensField = c.MaxTokensField
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}

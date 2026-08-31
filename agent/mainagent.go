@@ -29,6 +29,7 @@ type MainAgent struct {
 	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
 	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
 	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
@@ -36,6 +37,17 @@ type MainAgent struct {
 func (m *MainAgent) SetNonStreaming(fn func() bool) { m.nonStreamingFn = fn }
 
 func (m *MainAgent) nonStreaming() bool { return m.nonStreamingFn != nil && m.nonStreamingFn() }
+
+// SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
+// send no cap and let the endpoint decide. Read per run, like nonStreaming.
+func (m *MainAgent) SetMaxTokens(fn func() int) { m.maxTokensFn = fn }
+
+func (m *MainAgent) maxTokens() int {
+	if m.maxTokensFn == nil {
+		return 0
+	}
+	return m.maxTokensFn()
+}
 
 func NewMainAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *MainAgent {
 	return &MainAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns}
@@ -137,6 +149,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
+		MaxTokens:    m.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx

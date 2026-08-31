@@ -312,6 +312,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
+	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -327,16 +328,19 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
 	var id int64
-	// agent.Config carries no failover fields, so carry the stored ones forward —
-	// otherwise this legacy endpoint would silently reset the profile's priority,
-	// pool_exclude, and streaming to zero values on every save.
+	// 这个 legacy 端点的请求体不含轮询/收发/输出上限参数,故把库里已存的值原样带回 —
+	// 否则每次保存都会把 profile 的 priority、pool_exclude、streaming 以及输出上限
+	// (max_tokens / max_tokens_field)悄悄重置成零值。
 	var priority int
 	var poolExclude bool
 	streaming := true // 旧库/新建默认流式
+	var maxTokens int
+	var maxTokensField string
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
 				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
+				maxTokens, maxTokensField = p.MaxTokens, p.MaxTokensField
 				break
 			}
 		}
@@ -346,6 +350,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
+		MaxTokens: maxTokens, MaxTokensField: maxTokensField,
 	})
 	if err != nil {
 		return err
@@ -396,6 +401,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
 	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
+	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
@@ -404,6 +410,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
+	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
 	return pl, wk
 }
 
@@ -413,6 +420,12 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 func nonStreamingResolver(cfg agent.Config) func() bool {
 	nonStreaming := !cfg.Stream
 	return func() bool { return nonStreaming }
+}
+
+// maxTokensResolver mirrors nonStreamingResolver for the per-reply output cap.
+func maxTokensResolver(cfg agent.Config) func() int {
+	maxTokens := cfg.MaxTokens
+	return func() int { return maxTokens }
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -459,6 +472,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
+	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -466,6 +480,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
+	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -492,6 +507,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
+	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -644,6 +660,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
+	ca.SetMaxTokens(maxTokensResolver(cfg))
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex

@@ -721,6 +721,8 @@ export const api = {
     priority?: number; // 轮询顺位，越大越先用
     pool_exclude?: boolean; // true=不作为故障转移目标
     streaming?: boolean; // true(默认)=流式 | false=非流式
+    max_tokens?: number; // 单次回复输出上限；0=不发送，由服务端默认值决定
+    max_tokens_field?: string; // ""=max_tokens(默认) | "max_completion_tokens"（仅 openai 格式）
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),

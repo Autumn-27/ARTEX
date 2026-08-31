@@ -139,34 +139,46 @@ func (r *taskLLMRuntime) current() (*Task, int64, int64, llm.Provider, error) {
 	return t, 0, pt.LLMChainRevision, prov, nil
 }
 
-// nonStreaming reports whether the task's currently-active LLM source is set to
-// non-streaming. It mirrors current()'s source precedence (agent binding →
-// active chain profile → global) but reads only the streaming flag. Read-only
-// and best-effort: any resolution error falls back to streaming (false), the
-// safe default. If failover switches to a profile with a different streaming
-// setting, the change takes effect on the next agent run (a fresh Session is
-// built per run in captureRun).
-func (r *taskLLMRuntime) nonStreaming() bool {
+// activeCfg resolves the task's currently-active LLM config, mirroring current()'s
+// source precedence (agent binding → active chain profile → global). Read-only and
+// best-effort: ok=false when nothing resolves, leaving the per-setting fallback to
+// the caller. If failover switches profiles, the change takes effect on the next
+// agent run (a fresh Session is built per run in captureRun).
+func (r *taskLLMRuntime) activeCfg() (agent.Config, bool) {
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
-		return false
+		return agent.Config{}, false
 	}
 	pt, err := r.s.m.pg.GetTask(taskNum)
 	if err != nil || pt == nil {
-		return false
+		return agent.Config{}, false
 	}
 	if _, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
-		return !cfg.Stream
+		return cfg, true
 	}
 	if len(pt.LLMProfileIDs) > 0 && pt.ActiveLLMProfileID != nil {
 		if _, cfg, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID); ok {
-			return !cfg.Stream
+			return cfg, true
 		}
 	}
 	if _, cfg, ok := r.s.globalProvider(); ok {
-		return !cfg.Stream
+		return cfg, true
 	}
-	return false
+	return agent.Config{}, false
+}
+
+// nonStreaming reports whether the task's currently-active LLM source is set to
+// non-streaming. Unresolvable → streaming (false), the safe default.
+func (r *taskLLMRuntime) nonStreaming() bool {
+	cfg, ok := r.activeCfg()
+	return ok && !cfg.Stream
+}
+
+// maxTokens returns the currently-active source's per-reply output cap.
+// Unresolvable → 0, i.e. send no cap, matching the pre-setting behaviour.
+func (r *taskLLMRuntime) maxTokens() int {
+	cfg, _ := r.activeCfg() // 未解析出配置时是零值 0
+	return cfg.MaxTokens
 }
 
 func parseTaskID(id string) (int64, error) {
@@ -531,6 +543,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
+	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
@@ -539,6 +552,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
+	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
@@ -547,6 +561,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
+	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏

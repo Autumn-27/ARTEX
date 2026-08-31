@@ -3017,6 +3017,9 @@ export const llmProfiles: LLMProfile[] = [
     is_default: true,
     priority: 0,
     pool_exclude: false,
+    // anthropic 的字段名固定，故 max_tokens_field 恒为空。
+    max_tokens: 0,
+    max_tokens_field: "",
   },
   {
     id: "2",
@@ -3033,6 +3036,9 @@ export const llmProfiles: LLMProfile[] = [
     is_default: false,
     priority: 10,
     pool_exclude: false,
+    // openai 格式 + 推理模型：上限走 max_completion_tokens。
+    max_tokens: 8192,
+    max_tokens_field: "max_completion_tokens",
   },
 ];
 

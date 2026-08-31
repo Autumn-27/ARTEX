@@ -67,6 +67,9 @@ type Worker struct {
 	// path. Read per run so a profile/task toggle takes effect without rebuilding
 	// the agent. nil = streaming (default).
 	nonStreamingFn func() bool
+	// maxTokensFn resolves the per-reply output cap in tokens, on the same
+	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
+	maxTokensFn func() int
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -99,6 +102,17 @@ func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
 func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
 
 func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
+
+// SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
+// send no cap and let the endpoint decide. Read per run, like nonStreaming.
+func (w *Worker) SetMaxTokens(fn func() int) { w.maxTokensFn = fn }
+
+func (w *Worker) maxTokens() int {
+	if w.maxTokensFn == nil {
+		return 0
+	}
+	return w.maxTokensFn()
+}
 
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the worker system prompt. nil = inject (default).
@@ -386,6 +400,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
 		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
+		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks

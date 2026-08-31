@@ -25,6 +25,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 )
 
@@ -1804,6 +1805,15 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
+	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
+	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
+	// 故非 openai 格式一律清空。未知取值同样清空,避免把 DB CHECK 的报错甩给用户。
+	if p.MaxTokens < 0 {
+		p.MaxTokens = 0
+	}
+	if p.Format != "openai" || p.MaxTokensField != llm.MaxTokensFieldCompletion {
+		p.MaxTokensField = ""
+	}
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
 		writeErr(w, 500, err.Error())

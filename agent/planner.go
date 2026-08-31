@@ -34,6 +34,7 @@ type Planner struct {
 	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
 	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -54,6 +55,17 @@ func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 func (p *Planner) SetNonStreaming(fn func() bool) { p.nonStreamingFn = fn }
 
 func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonStreamingFn() }
+
+// SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
+// send no cap and let the endpoint decide. Read per run, like nonStreaming.
+func (p *Planner) SetMaxTokens(fn func() int) { p.maxTokensFn = fn }
+
+func (p *Planner) maxTokens() int {
+	if p.maxTokensFn == nil {
+		return 0
+	}
+	return p.maxTokensFn()
+}
 
 func (p *Planner) compactionWindow() int {
 	if p.windowFn != nil {
@@ -366,6 +378,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
+		MaxTokens:    p.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
