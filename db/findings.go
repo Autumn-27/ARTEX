@@ -148,6 +148,14 @@ type FindingFilter struct {
 	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
 	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort      string // "severity" | "time"
+	// AssetScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
+	// 选中一个节点等于选中它的整棵子树。空 = 不按资产筛选。
+	AssetScope string
+
+	// 下面三个由 applyAssetScope 从 AssetScope 解析而来,调用方不用设置。
+	assetIDs  []int64 // 子树里所有资产 id
+	assetNone bool    // 只要「未关联资产」的发现
+	assetMiss bool    // 选中的节点在当前筛选下不存在 → 结果恒空
 }
 
 // FindingUnassignedTask is the task filter sentinel for findings whose task is
@@ -178,6 +186,25 @@ func (f FindingFilter) where() (string, []any) {
 		args = append(args, tid)
 		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
 	}
+	// 资产筛选:asset_ids 是 jsonb 数组,@> ANY(...) 能走 idx_findings_asset_ids。
+	switch {
+	case f.assetMiss:
+		conds = append(conds, "FALSE")
+	case f.assetNone:
+		// 「未关联资产」= asset_ids 为空,或者里面的 id 一个都不在 assets 表里
+		// (资产已被删除)。两类都进资产树的未关联桶,这里必须同样收下,否则桶上
+		// 的计数会大于点开后能查到的条数。
+		conds = append(conds, `(
+			jsonb_array_length(COALESCE(f.asset_ids, '[]'::jsonb)) = 0
+			OR NOT EXISTS (
+				SELECT 1 FROM jsonb_array_elements_text(f.asset_ids) e(v)
+				JOIN assets a ON a.id = e.v::bigint
+			)
+		)`)
+	case len(f.assetIDs) > 0:
+		args = append(args, assetIDContainments(f.assetIDs))
+		conds = append(conds, fmt.Sprintf("f.asset_ids @> ANY($%d::jsonb[])", len(args)))
+	}
 	if query := strings.TrimSpace(f.Query); query != "" {
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 		args = append(args, "%"+escaped+"%")
@@ -204,6 +231,10 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	}
 	if pageSize <= 0 {
 		pageSize = 20
+	}
+	f, err := d.applyAssetScope(f)
+	if err != nil {
+		return nil, 0, err
 	}
 	where, args := f.where()
 
@@ -263,6 +294,10 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 	}
 	if pageSize <= 0 {
 		pageSize = 10
+	}
+	f, err := d.applyAssetScope(f)
+	if err != nil {
+		return nil, 0, 0, err
 	}
 	where, args := f.where()
 	grouped := ` FROM findings f LEFT JOIN tasks t ON f.task_id=t.id` + where +
@@ -444,7 +479,11 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 			WHERE f.id IN (` + strings.Join(ph, ",") + `)
 			` + order
 	} else {
-		where, wargs := f.where()
+		scoped, err := d.applyAssetScope(f)
+		if err != nil {
+			return nil, err
+		}
+		where, wargs := scoped.where()
 		q = `SELECT ` + cols + `
 			FROM findings f
 			LEFT JOIN tasks t ON f.task_id = t.id` + where + `

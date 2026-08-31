@@ -548,7 +548,40 @@ export interface FindingQuery {
   task?: string; // 任务 id;"all"/空 = 不按任务筛选
   query?: string;
   sort?: "severity" | "time";
+  // 资产树节点 key;选中一个节点 = 选中它的整棵子树。空 = 不按资产筛选。
+  assetScope?: string;
 }
+
+// ---- Findings by asset (资产视图) ----
+export type FindingAssetKind = "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint" | "none";
+
+// FindingAssetNode 是资产树的一个节点。key 形如 a:<id>(资产)、c:<id>(企业)、
+// r:<domain>(库里没有资产行的根域名)、__none__(未关联资产)。
+export interface FindingAssetNode {
+  key: string;
+  parent?: string;
+  kind: FindingAssetKind;
+  label: string;
+  asset_id?: number;
+  company_id?: number;
+  self: number; // 直接挂在该资产上的发现数
+  total: number; // 含子孙、按发现去重
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  last_found_at: string;
+}
+
+export interface FindingAssetTree {
+  nodes: FindingAssetNode[];
+  finding_total: number;
+  truncated: boolean;
+  dropped_kinds?: string[];
+}
+
+// FINDING_UNASSIGNED_ASSET 与后端 db.FindingUnassignedAsset 对应。
+export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =

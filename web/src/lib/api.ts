@@ -29,6 +29,7 @@ import type {
   DeleteTaskResult,
   Edge,
   Finding,
+  FindingAssetTree,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
@@ -177,6 +178,20 @@ const del = <T>(p: string, body?: unknown) =>
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
+
+// findingFilterParams 把发现页的筛选条件序列化成 query string。列表 / 分组 /
+// 资产树 / 导出共用同一份,新增筛选项只改这里(后端也只解析这一份)。
+function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSearchParams {
+  const p = new URLSearchParams();
+  if (q.severity && q.severity !== "all") p.set("severity", q.severity);
+  if (q.status && q.status !== "all") p.set("status", q.status);
+  if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
+  if (q.task && q.task !== "all") p.set("task_id", q.task);
+  if (q.query?.trim()) p.set("q", q.query.trim());
+  if (q.sort) p.set("sort", q.sort);
+  if (q.assetScope) p.set("asset_scope", q.assetScope);
+  return p;
+}
 
 export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
@@ -456,25 +471,21 @@ export const api = {
   frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),
   findings: (task?: string) => get<Finding[]>(`/exploration/findings${tq(task)}`).then(arr),
   findingsPage: (q: FindingQuery) => {
-    const p = new URLSearchParams({ page: String(q.page), limit: String(q.pageSize) });
-    if (q.severity && q.severity !== "all") p.set("severity", q.severity);
-    if (q.status && q.status !== "all") p.set("status", q.status);
-    if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
-    if (q.task && q.task !== "all") p.set("task_id", q.task);
-    if (q.query?.trim()) p.set("q", q.query.trim());
-    if (q.sort) p.set("sort", q.sort);
+    const p = findingFilterParams(q);
+    p.set("page", String(q.page));
+    p.set("limit", String(q.pageSize));
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
   },
   findingGroups: (q: FindingQuery) => {
-    const p = new URLSearchParams({ page: String(q.page), limit: String(q.pageSize) });
-    if (q.severity && q.severity !== "all") p.set("severity", q.severity);
-    if (q.status && q.status !== "all") p.set("status", q.status);
-    if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
-    if (q.task && q.task !== "all") p.set("task_id", q.task);
-    if (q.query?.trim()) p.set("q", q.query.trim());
-    if (q.sort) p.set("sort", q.sort);
+    const p = findingFilterParams(q);
+    p.set("page", String(q.page));
+    p.set("limit", String(q.pageSize));
     return get<FindingGroupsPage>(`/exploration/findings/groups?${p.toString()}`);
   },
+  // findingAssetTree 取「按资产」视图的左侧树:只含有发现的资产及其祖先,
+  // 节点带子树聚合计数。不分页——树是导航结构,一次取完。
+  findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
+    get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
@@ -488,13 +499,7 @@ export const api = {
     if (opts.scope === "selected") {
       p.set("ids", (opts.ids ?? []).join(","));
     } else if (opts.scope === "filtered" && opts.filters) {
-      const f = opts.filters;
-      if (f.severity && f.severity !== "all") p.set("severity", f.severity);
-      if (f.status && f.status !== "all") p.set("status", f.status);
-      if (f.vulnclass && f.vulnclass !== "all") p.set("vulnclass", f.vulnclass);
-      if (f.task && f.task !== "all") p.set("task_id", f.task);
-      if (f.query?.trim()) p.set("q", f.query.trim());
-      if (f.sort) p.set("sort", f.sort);
+      for (const [k, v] of findingFilterParams(opts.filters)) p.set(k, v);
     }
     const token = getToken();
     const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {

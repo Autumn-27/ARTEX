@@ -775,6 +775,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
+	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
@@ -1887,16 +1888,7 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		}
 		page := findingPaginationParam(q.Get("page"), 1, 0)
 		limit := findingPaginationParam(q.Get("limit"), 20, 200)
-		filter := db.FindingFilter{
-			Severity:  normFilter(q.Get("severity")),
-			Status:    normFilter(q.Get("status")),
-			VulnClass: normFilter(q.Get("vulnclass")),
-			// task_id(独立于会切到「按任务节点」分支的 task 参数):全局表按任务筛选。
-			TaskID: normFilter(q.Get("task_id")),
-			Query:  q.Get("q"),
-			Sort:   q.Get("sort"),
-		}
-		fs, total, err := s.m.pg.ListFindingsPage(filter, page, limit)
+		fs, total, err := s.m.pg.ListFindingsPage(findingFilterFromQuery(q), page, limit)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -2092,14 +2084,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	case "all":
 		// 空 filter = 不加任何条件。
 	case "filtered", "":
-		filter = db.FindingFilter{
-			Severity:  normFilter(q.Get("severity")),
-			Status:    normFilter(q.Get("status")),
-			VulnClass: normFilter(q.Get("vulnclass")),
-			TaskID:    normFilter(q.Get("task_id")),
-			Query:     q.Get("q"),
-			Sort:      q.Get("sort"),
-		}
+		filter = findingFilterFromQuery(q)
 	default:
 		writeErr(w, 400, "bad scope: "+scope)
 		return
