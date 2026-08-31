@@ -119,6 +119,28 @@ func (c *Capture) RawResponse() string {
 	return b.String()
 }
 
+// Attempt is one HTTP round trip's status code and response bytes.
+type Attempt struct {
+	Status int
+	Body   string
+}
+
+// Attempts returns every round trip in order. Unlike RawResponse — which drops
+// the header line for a lone attempt so the bytes stay replayable — this always
+// carries the status code, for callers that must report "HTTP 401 + body".
+func (c *Capture) Attempts() []Attempt {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Attempt, 0, len(c.attempts))
+	for _, a := range c.attempts {
+		out = append(out, Attempt{Status: a.status, Body: a.body.String()})
+	}
+	return out
+}
+
 // teeBody mirrors reads into a Capture attempt, guarded by the Capture's mutex
 // so a snapshot taken mid-stream never races the writer.
 type teeBody struct {

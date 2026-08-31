@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -356,6 +357,38 @@ func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
 	return &http.Client{Transport: quotaAwareTransport{base: transport}}, nil
 }
 
+// logTestConnection prints the raw HTTP status code(s) and response body of a
+// connection test to the server log, so "点击测试" leaves a diagnosable trail of
+// exactly what the gateway returned — 401 bodies, quota text, empty frames — not
+// just the collapsed ok/err the UI shows. Bodies are clipped to keep a chatty
+// SSE stream from flooding the log.
+func logTestConnection(c Config, capt *llmrec.Capture) {
+	attempts := capt.Attempts()
+	if len(attempts) == 0 {
+		log.Printf("[llm-test] %s / %s @ %s — 未发出任何 HTTP 请求(配置解析或建连即失败)",
+			c.Provider(), c.Model, c.BaseURL)
+		return
+	}
+	for i, a := range attempts {
+		log.Printf("[llm-test] %s / %s @ %s — 尝试 %d/%d HTTP %d\n响应体: %s",
+			c.Provider(), c.Model, c.BaseURL, i+1, len(attempts), a.Status, clipBody(a.Body))
+	}
+}
+
+// clipBody trims a wire body for logging. 4K is plenty to show an error JSON or
+// the head of an SSE stream while bounding a runaway response.
+func clipBody(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(空)"
+	}
+	const max = 4096
+	if len(s) > max {
+		return s[:max] + fmt.Sprintf("…(截断,共 %d 字节)", len(s))
+	}
+	return s
+}
+
 // TestConnection makes a minimal real completion to verify the provider/model/
 // endpoint/key actually work. Returns the round-trip latency and the model's
 // reply text.
@@ -366,6 +399,11 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	// 抓取原始 wire 报文:连接测试最需要看到的就是网关到底回了什么(状态码+响应体),
+	// 而 norma 把响应解码成 StreamEvent 后这些就没了。quotaAwareTransport 会在
+	// context 里找到这个 Capture 并填入每次 HTTP 尝试的状态码与 body。
+	ctx, capt := llmrec.NewCapture(ctx)
+	defer logTestConnection(c, capt)
 	start := time.Now()
 	// MaxTokens 要给足：推理模型(如 deepseek-v4-pro)在给出答案前会先产出一大段
 	// 思考(实测对一句 "ping" 也能烧 ~2900 token)。若只给 32,模型会一直卡在"思考阶段"
