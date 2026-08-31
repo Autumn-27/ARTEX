@@ -249,9 +249,6 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
 		}
-		if err := s.engine.RecoverWorkerMessages(ctx, t); err != nil {
-			log.Printf("[worker chat] task %s 恢复待处理人工消息失败: %v", t.ID, err)
-		}
 		if lifecycle.Paused {
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
@@ -474,11 +471,6 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.llmOn = true
 	s.cfgMu.Unlock()
 	s.invalidateTaskAgents()
-	for _, task := range s.m.List() {
-		if err := s.engine.RecoverWorkerMessages(s.ctx, task); err != nil {
-			log.Printf("[worker chat] task %s 在 LLM 就绪后恢复待处理人工消息失败: %v", task.ID, err)
-		}
-	}
 
 	// wake the active task so a task created while idle starts exploring.
 	if t := s.m.ActiveTask(); t != nil {

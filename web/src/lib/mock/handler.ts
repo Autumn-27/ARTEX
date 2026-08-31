@@ -465,23 +465,23 @@ function sendMockWorkerMessage(
   }
   const intent = mockIntents.find((item) => item.id === id);
   if (!intent) return { ok: false, error: "意图不存在" };
-  if (intent.inherited || (intent.state !== "running" && intent.state !== "paused")) {
-    return { ok: false, state: intent.state, error: "Worker 状态已变化" };
+  if (intent.inherited || intent.state !== "paused") {
+    return { ok: false, state: intent.state, error: "仅已暂停的 Worker 可以发送消息，请先暂停" };
   }
   if (!normalizedMessage) return { ok: false, state: intent.state, error: "消息不能为空" };
   if (Array.from(normalizedMessage).length > 4000) {
     return { ok: false, state: intent.state, error: "消息不能超过 4000 个字符" };
   }
 
-  // The real endpoint stops the active turn, persists a normal user message,
-  // and immediately reopens the same intent. Keep the mock's transition in sync,
-  // then emulate a Worker reclaiming it shortly afterward.
-  intent.state = "open";
+  // The real endpoint transitions the intent paused->running, records the user turn,
+  // and runs it in a dedicated goroutine outside the worker pool. Keep the mock in
+  // sync: flip to running immediately and emit the visible user activity.
+  intent.state = "running";
   const activitySeq = nextMockWorkerMessageActivitySeq++;
   const workerMessage: MockWorkerMessage = {
     intentId: id,
     message: normalizedMessage,
-    state: "open",
+    state: "running",
     activitySeq,
   };
   mockWorkerMessages.set(normalizedRequestId, workerMessage);
@@ -494,12 +494,6 @@ function sendMockWorkerMessage(
     summary: normalizedMessage,
     detail: normalizedMessage,
   } satisfies Activity);
-  setTimeout(() => {
-    if (intent.state === "open") {
-      intent.state = "running";
-      workerMessage.state = "running";
-    }
-  }, 250);
   return {
     ok: true,
     state: workerMessage.state,
@@ -1008,9 +1002,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (!result.ok) throw new Error(result.error ?? "Worker 状态已变化");
     return {
       id: Number(id.replace(/\D/g, "")) || 0,
-      state: result.state ?? "open",
+      state: result.state ?? "running",
       accepted: true,
-      activity_seq: result.activitySeq ?? 0,
       request_id: result.requestId ?? "",
     };
   }

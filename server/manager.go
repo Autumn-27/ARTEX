@@ -63,7 +63,6 @@ type Task struct {
 	Store                *pgdb.ExplorationStore `json:"-"`
 	Guard                *guard.Guard           `json:"-"`
 	notify               chan struct{}
-	workerWake           chan struct{}
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
 
@@ -738,7 +737,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
-		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1), workerWake: make(chan struct{}, 64),
+		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }
 
@@ -1635,20 +1634,6 @@ func (m *Manager) List() []*Task {
 func (t *Task) Notify() {
 	select {
 	case t.notify <- struct{}{}:
-	default:
-	}
-}
-
-// NotifyWorker wakes one idle execution slot without also scheduling a Planner
-// round. The channel is separate from notify because human intervention needs
-// the reopened intent reclaimed immediately, while graph-change notifications
-// are Planner-facing and debounced. A nil channel is tolerated by test fixtures.
-func (t *Task) NotifyWorker() {
-	if t == nil || t.workerWake == nil {
-		return
-	}
-	select {
-	case t.workerWake <- struct{}{}:
 	default:
 	}
 }

@@ -1,13 +1,11 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -28,9 +26,15 @@ func validWorkerMessageRequestID(id string) bool {
 	return true
 }
 
-// sendWorkerMessage pauses a running Worker when necessary, records one user
-// turn for its existing conversation, and immediately schedules that same
-// intent to continue. A disconnected browser cannot strand an accepted message.
+// sendWorkerMessage continues a paused Worker intent with a human-authored message.
+// The message is injected as the next turn's input through the same
+// resume-from-transcript path the worker uses on a normal resume (ExecuteWithMessage),
+// so this reuses the existing pause/resume machinery rather than a bespoke protocol.
+// The run happens in a dedicated goroutine outside the worker pool (runDetachedIntent),
+// so the message is picked up immediately even when every pool slot is busy — the same
+// way the main-agent chat handler starts its run directly. In-memory only: a process
+// restart re-runs the intent from its transcript without the message, which is
+// acceptable for this rare interrupt-then-continue action.
 func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
@@ -71,11 +75,28 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.engine.beginTaskOperation(t.ID) {
+	// Reject non-runnable task lifecycles up front so the caller gets a clear reason
+	// instead of a silent no-op. The intent itself must be paused: the UI flow is
+	// interrupt (pause) first, then send.
+	if s.engine.IsDeleting(t.ID) {
 		writeErr(w, http.StatusConflict, "任务正在删除，无法向 Worker 发送消息")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	lifecycle := t.lifecycleSnapshot()
+	switch {
+	case lifecycle.Paused || s.engine.IsPaused(t.ID):
+		writeErr(w, http.StatusConflict, "任务已暂停，请先恢复任务再向 Worker 发送消息")
+		return
+	case lifecycle.Queued:
+		writeErr(w, http.StatusConflict, "排队中的任务无法向 Worker 发送消息")
+		return
+	case isTerminalStatus(lifecycle.Status):
+		writeErr(w, http.StatusConflict, "终态任务无法向 Worker 发送消息")
+		return
+	case s.engine.isSettling(t.ID):
+		writeErr(w, http.StatusConflict, "任务正在收尾，无法向 Worker 发送消息")
+		return
+	}
 
 	node, err := t.Store.GetNode(iid)
 	if err != nil {
@@ -94,19 +115,17 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "node is not an intent")
 		return
 	}
-	base := s.ctx
-	if base == nil {
-		base = context.Background()
+	if node.State != "paused" {
+		writeErr(w, http.StatusConflict, "仅已暂停的 Worker 可以发送消息，请先暂停")
+		return
 	}
-	opCtx, cancel := context.WithTimeout(base, workControlWaitTimeout+15*time.Second)
-	defer cancel()
-	result, err := s.engine.InterveneWork(opCtx, t, iid, requestID, message)
-	if err != nil {
+
+	// runDetachedIntent transitions paused->running, emits the user turn and starts a
+	// dedicated run. Root the run at s.ctx so a disconnected browser cannot strand it
+	// while task pause/delete/shutdown still stop it.
+	if err := s.engine.runDetachedIntent(s.ctx, t, iid, requestID, message); err != nil {
 		switch {
-		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-			writeErr(w, http.StatusGatewayTimeout, err.Error())
-		case errors.Is(err, errWorkInterventionConflict), errors.Is(err, errWorkControlConflict),
-			errors.Is(err, db.ErrIntentInterventionConflict), errors.Is(err, db.ErrIntentStateConflict):
+		case errors.Is(err, db.ErrIntentStateConflict):
 			writeErr(w, http.StatusConflict, err.Error())
 		default:
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -115,11 +134,9 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":           iid,
-		"state":        result.State,
-		"accepted":     true,
-		"activity_seq": result.ActivityID,
-		"request_id":   result.RequestID,
-		"duplicate":    result.Duplicate,
+		"id":         iid,
+		"state":      "running",
+		"accepted":   true,
+		"request_id": requestID,
 	})
 }

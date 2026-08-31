@@ -225,13 +225,6 @@ func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 }
 
 func (s *Server) startAdmittedTask(t *Task, mode string) {
-	recoverMessages := s.engine.RecoverWorkerMessages
-	if s.engine.IsPaused(t.ID) {
-		recoverMessages = s.engine.recoverWorkerMessagesForAdmission
-	}
-	if err := recoverMessages(s.ctx, t); err != nil {
-		log.Printf("[worker chat] task %s 恢复待处理人工消息失败: %v", t.ID, err)
-	}
 	if mode == "bootstrap" {
 		if !s.engine.beginTaskOperation(t.ID) {
 			return

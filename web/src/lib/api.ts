@@ -287,9 +287,8 @@ export const api = {
   sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>
     post<{
       id: number;
-      state: "open" | "running" | "paused";
+      state: "running";
       accepted: true;
-      activity_seq: number;
       request_id: string;
     }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId }),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),

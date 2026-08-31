@@ -45,8 +45,6 @@ var (
 		"规划者调用 kill_work 主动终止了这条意图，通常表示方向跑偏或已无继续价值；意图会标记为 stopped，不会自动重新领取")
 	AbortWorkPausedByUser = cause("work_paused_by_user", "用户暂停了这条 Worker 意图",
 		"用户暂停了正在运行的 Worker。本次调用被取消，意图转为 paused；已经登记的意图、事实、漏洞和活动记录全部保留，恢复后从头重新执行")
-	AbortWorkIntervenedByUser = cause("work_intervened_by_user", "用户暂停 Worker 并发起了新对话",
-		"用户向正在运行的 Worker 发送了新的对话意图。本次调用被立即取消并短暂进入 paused；新消息作为同一会话的下一条用户消息，随后自动恢复并优先重新领取")
 	AbortWorkCancelledByUser = cause("work_cancelled_by_user", "用户取消了这条 Worker 意图",
 		"用户取消了正在运行的 Worker。本次调用被取消；Worker 退出写入区后，服务端会事务性删除该意图及其直接产生的事实、漏洞和执行记录")
 	AbortWorkFinished = cause("work_finished", "Worker 已正常结束并释放 context",

@@ -75,7 +75,6 @@ const (
 )
 
 var errWorkControlConflict = errors.New("work control conflict")
-var errWorkInterventionConflict = errors.New("work intervention conflict")
 
 // retryableWorkerModelError excludes errors already handled by the task router.
 // In particular, a quota error after partial streaming advances the task cursor
@@ -131,17 +130,6 @@ type Engine struct {
 	// runWorkerStep has stopped writing and committed its final state.
 	workMu sync.Mutex
 	work   map[int64]*workExecution
-	// interventionLocks serializes reservation, cancellation and message hand-off
-	// per intent. PostgreSQL separately serializes the durable transaction steps.
-	interventionLocks sync.Map // intentID -> *sync.Mutex
-
-	// directedClaims keeps intents with a new human message ahead of the normal
-	// frontier without mutating their persisted priority. runWorkerStep installs
-	// the entry before releasing ControlWork, so a single worker slot cannot grab
-	// unrelated work in the paused->open hand-off gap.
-	directedMu     sync.Mutex
-	directedClaims map[string][]int64
-	directedReady  map[int64]bool
 
 	// steerBox queues planner course-corrections for a running work (keyed by intent
 	// id). The worker's PreToolUse hook drains it before its next tool call and hands
@@ -174,14 +162,7 @@ type taskRuntime struct {
 type workExecution struct {
 	cancel context.CancelCauseFunc
 	done   chan error
-	action string // user action: pause | cancel | intervene
-}
-
-type WorkInterventionResult struct {
-	RequestID  string
-	ActivityID int64
-	State      string
-	Duplicate  bool
+	action string // user action: pause | cancel
 }
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
@@ -304,12 +285,6 @@ func (e *Engine) StopTask(taskID string) {
 	e.stamped.Delete(taskID)
 	e.inflight.Delete(taskID)
 	e.coordStarted.Delete(taskID)
-	e.directedMu.Lock()
-	for _, intentID := range e.directedClaims[taskID] {
-		delete(e.directedReady, intentID)
-	}
-	delete(e.directedClaims, taskID)
-	e.directedMu.Unlock()
 	e.deleteMu.Lock()
 	e.deleting.Delete(taskID)
 	e.deleteMu.Unlock()
@@ -415,7 +390,7 @@ func NewEngine(m *Manager) *Engine {
 	return &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
 		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
 		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
-		directedClaims: map[string][]int64{}, directedReady: map[int64]bool{}, runtimes: map[string]*taskRuntime{}}
+		runtimes: map[string]*taskRuntime{}}
 }
 
 // registerWork records the cancel for the work currently running intentID.
@@ -450,7 +425,7 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 // worker has fully stopped writing. Cancellation cleanup is performed by the API
 // handler after this returns; pause state is committed by runWorkerStep itself.
 func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string) error {
-	if action != "pause" && action != "cancel" && action != "intervene" {
+	if action != "pause" && action != "cancel" {
 		return fmt.Errorf("unsupported work action %q", action)
 	}
 	if ctx == nil {
@@ -469,11 +444,8 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 	run.action = action
 	done := run.done
 	cause := error(agent.AbortWorkPausedByUser)
-	switch action {
-	case "cancel":
+	if action == "cancel" {
 		cause = agent.AbortWorkCancelledByUser
-	case "intervene":
-		cause = agent.AbortWorkIntervenedByUser
 	}
 	run.cancel(cause)
 	e.workMu.Unlock()
@@ -492,282 +464,6 @@ func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string)
 	}
 }
 
-func (e *Engine) lockWorkIntervention(intentID int64) func() {
-	value, _ := e.interventionLocks.LoadOrStore(intentID, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
-
-func (e *Engine) validateWorkInterventionTask(t *Task, allowAdmissionPause bool) error {
-	if t == nil {
-		return fmt.Errorf("%w: task not found", errWorkInterventionConflict)
-	}
-	lifecycle := t.lifecycleSnapshot()
-	switch {
-	case e.IsDeleting(t.ID):
-		return fmt.Errorf("%w: 任务正在删除，无法向 Worker 发送消息", errWorkInterventionConflict)
-	case lifecycle.Paused || (!allowAdmissionPause && e.IsPaused(t.ID)):
-		return fmt.Errorf("%w: 任务已暂停，无法向 Worker 发送消息", errWorkInterventionConflict)
-	case lifecycle.Queued:
-		return fmt.Errorf("%w: 排队中的任务无法向 Worker 发送消息", errWorkInterventionConflict)
-	case isTerminalStatus(lifecycle.Status):
-		return fmt.Errorf("%w: 终态任务无法向 Worker 发送消息", errWorkInterventionConflict)
-	case e.isSettling(t.ID):
-		return fmt.Errorf("%w: 任务正在收尾，无法向 Worker 发送消息", errWorkInterventionConflict)
-	default:
-		return nil
-	}
-}
-
-func (e *Engine) abandonWorkIntervention(t *Task, intentID int64, requestID string, reason error) {
-	e.removeDirectedClaim(t.ID, intentID)
-	target := "open"
-	lifecycle := t.lifecycleSnapshot()
-	if e.IsDeleting(t.ID) || isTerminalStatus(lifecycle.Status) {
-		target = "stopped"
-	} else if e.isSettling(t.ID) {
-		target = "exhausted"
-	}
-	if changed, err := t.Store.CompareAndSetIntentState(intentID, "paused", target); err != nil {
-		log.Printf("[worker intervention] task %s 意图 #%d 补偿 paused->%s 失败: %v", t.ID, intentID, target, err)
-	} else if changed && target == "open" {
-		t.NotifyWorker()
-	}
-	if err := t.Store.RejectIntentIntervention(intentID, requestID, reason.Error()); err != nil {
-		log.Printf("[worker intervention] task %s 意图 #%d 标记请求 %s rejected 失败: %v", t.ID, intentID, requestID, err)
-	}
-}
-
-// InterveneWork performs the complete Worker message protocol. Once the request
-// has a durable pending reservation it no longer depends on the HTTP request
-// context: the caller supplies a server-owned bounded context so disconnects do
-// not strand the intent. The accepted DB transition is running -> paused ->
-// open, with the visible user message and reopen committed atomically.
-func (e *Engine) InterveneWork(ctx context.Context, t *Task, intentID int64, requestID, message string) (WorkInterventionResult, error) {
-	return e.interveneWork(ctx, t, intentID, requestID, message, false)
-}
-
-func (e *Engine) interveneWork(ctx context.Context, t *Task, intentID int64, requestID, message string, allowAdmissionPause bool) (WorkInterventionResult, error) {
-	out := WorkInterventionResult{RequestID: requestID}
-	if t == nil || t.Store == nil {
-		return out, fmt.Errorf("%w: task not found", errWorkInterventionConflict)
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	unlock := e.lockWorkIntervention(intentID)
-	defer unlock()
-
-	existing, err := t.Store.IntentInterventionByRequest(intentID, requestID)
-	if err != nil {
-		return out, err
-	}
-	if existing != nil {
-		if existing.Message != message {
-			return out, fmt.Errorf("%w: request_id 已用于不同的 Worker 消息", errWorkInterventionConflict)
-		}
-		if existing.Status == db.IntentInterventionAccepted {
-			out.ActivityID, out.State, out.Duplicate = existing.ActivityID, existing.IntentState, true
-			if out.State == "open" && e.validateWorkInterventionTask(t, allowAdmissionPause) == nil {
-				e.queueDirectedClaim(t.ID, intentID)
-				e.readyDirectedClaim(intentID)
-				t.NotifyWorker()
-			}
-			return out, nil
-		}
-		if existing.Status != db.IntentInterventionPending {
-			return out, fmt.Errorf("%w: Worker 消息请求状态为 %s", errWorkInterventionConflict, existing.Status)
-		}
-	}
-	if err := e.validateWorkInterventionTask(t, allowAdmissionPause); err != nil {
-		lifecycle := t.lifecycleSnapshot()
-		if existing != nil && (e.IsDeleting(t.ID) || e.isSettling(t.ID) || isTerminalStatus(lifecycle.Status)) {
-			e.abandonWorkIntervention(t, intentID, requestID, err)
-		}
-		return out, err
-	}
-	_, worker := e.snapshotFor(t)
-	if worker == nil {
-		return out, fmt.Errorf("%w: worker 尚未就绪", errWorkInterventionConflict)
-	}
-	if existing == nil {
-		existing, err = t.Store.ReserveIntentIntervention(intentID, requestID, message)
-		if err != nil {
-			if errors.Is(err, db.ErrIntentInterventionConflict) {
-				return out, fmt.Errorf("%w: %v", errWorkInterventionConflict, err)
-			}
-			return out, err
-		}
-	}
-	out.ActivityID = existing.ActivityID
-
-	// A pending reservation can be recovered after a process restart. An open
-	// row is fenced back to paused before publishing the user turn; a running row
-	// is stopped through the normal live-work protocol so no late writer races us.
-	for {
-		node, getErr := t.Store.GetNode(intentID)
-		if getErr != nil {
-			return out, getErr
-		}
-		if node == nil {
-			return out, fmt.Errorf("%w: intent not found", errWorkInterventionConflict)
-		}
-		switch node.State {
-		case "running":
-			controlErr := e.ControlWork(ctx, intentID, "intervene")
-			if controlErr != nil {
-				// The per-work 30s wait may expire before the server-owned operation
-				// context. Keep waiting for the named cancellation to settle; timeout
-				// release marks the run no-handoff so a late exit cannot install a
-				// permanent directed-claim barrier behind our back. A freshly claimed
-				// intent can also be running just before registerWork; retrying closes
-				// that small claim-to-registration window.
-				for {
-					settled, readErr := t.Store.GetNode(intentID)
-					if readErr != nil {
-						return out, readErr
-					}
-					if settled != nil && settled.State == "paused" {
-						break
-					}
-					if ctx.Err() != nil || settled == nil || settled.State != "running" {
-						e.removeDirectedClaim(t.ID, intentID)
-						return out, fmt.Errorf("%w: %v", errWorkInterventionConflict, controlErr)
-					}
-					if sleepCtx(ctx, 50*time.Millisecond) {
-						e.removeDirectedClaim(t.ID, intentID)
-						return out, fmt.Errorf("%w: %v", errWorkInterventionConflict, controlErr)
-					}
-					if errors.Is(controlErr, errWorkControlConflict) {
-						controlErr = e.ControlWork(ctx, intentID, "intervene")
-					}
-				}
-			}
-		case "open":
-			changed, setErr := t.Store.CompareAndSetIntentState(intentID, "open", "paused")
-			if setErr != nil {
-				return out, setErr
-			}
-			if !changed {
-				continue
-			}
-			e.queueDirectedClaim(t.ID, intentID)
-		case "paused":
-			e.queueDirectedClaim(t.ID, intentID)
-		default:
-			e.abandonWorkIntervention(t, intentID, requestID,
-				fmt.Errorf("意图已进入 %s，无法发送新消息", node.State))
-			return out, fmt.Errorf("%w: 意图已进入 %s，无法发送新消息", errWorkInterventionConflict, node.State)
-		}
-		break
-	}
-	e.queueDirectedClaim(t.ID, intentID)
-
-	// Close lifecycle races that began while cancellation was settling. A task
-	// pause or queue preserves the pending message and paused intent for a later
-	// admission; terminal, settling and deleting transitions close the request.
-	if err := e.validateWorkInterventionTask(t, allowAdmissionPause); err != nil {
-		// The user message has not entered the transcript yet. Preserve the
-		// reservation and paused intent so the same request can be retried after a
-		// transient task pause; do not reopen it behind a terminal transition.
-		e.removeDirectedClaim(t.ID, intentID)
-		lifecycle := t.lifecycleSnapshot()
-		if e.IsDeleting(t.ID) || e.isSettling(t.ID) || isTerminalStatus(lifecycle.Status) {
-			e.abandonWorkIntervention(t, intentID, requestID, err)
-		}
-		return out, err
-	}
-	activity, duplicate, err := t.Store.AcceptIntentIntervention(intentID, requestID, message)
-	if err != nil {
-		// Keep this intent paused so a retry of the same request can safely finish;
-		// remove only the task-wide claim barrier so unrelated workers keep moving.
-		e.removeDirectedClaim(t.ID, intentID)
-		return out, err
-	}
-	if !duplicate {
-		e.publishStoredActivity(t, activity)
-	}
-	e.readyDirectedClaim(intentID)
-	t.NotifyWorker()
-	node, err := t.Store.GetNode(intentID)
-	if err != nil {
-		return out, err
-	}
-	out.Duplicate = duplicate
-	if node != nil {
-		out.State = node.State
-	}
-	return out, nil
-}
-
-// RecoverWorkerMessages reconstructs unfinished Worker chat handoffs before
-// ordinary frontier claiming. Pending messages are fenced in paused until an
-// agent runtime is available; accepted messages regain their directed priority
-// and are consumed by ExecuteWithMessage on the next claim.
-func (e *Engine) RecoverWorkerMessages(ctx context.Context, t *Task) error {
-	return e.recoverWorkerMessages(ctx, t, false)
-}
-
-// recoverWorkerMessagesForAdmission runs while the scheduler still owns the
-// Engine pause barrier but has already committed a runnable task lifecycle. It
-// restores directed hand-offs before Resume wakes any worker, so ordinary
-// frontier work cannot overtake the human message.
-func (e *Engine) recoverWorkerMessagesForAdmission(ctx context.Context, t *Task) error {
-	return e.recoverWorkerMessages(ctx, t, true)
-}
-
-func (e *Engine) recoverWorkerMessages(ctx context.Context, t *Task, allowAdmissionPause bool) error {
-	if t == nil || t.Store == nil {
-		return nil
-	}
-	items, err := t.Store.RecoverableIntentInterventions()
-	if err != nil {
-		return err
-	}
-	lifecycle := t.lifecycleSnapshot()
-	runnable := !e.IsDeleting(t.ID) && !e.isSettling(t.ID) && !isTerminalStatus(lifecycle.Status) &&
-		!lifecycle.Paused && !lifecycle.Queued && (allowAdmissionPause || !e.IsPaused(t.ID))
-	if !runnable {
-		for _, item := range items {
-			e.removeDirectedClaim(t.ID, item.IntentID)
-		}
-		return nil
-	}
-	for _, item := range items {
-		switch item.Status {
-		case db.IntentInterventionPending:
-			if item.IntentState == "open" {
-				if changed, setErr := t.Store.CompareAndSetIntentState(item.IntentID, "open", "paused"); setErr != nil {
-					return setErr
-				} else if changed {
-					item.IntentState = "paused"
-				}
-			}
-			if _, worker := e.snapshotFor(t); worker == nil {
-				continue
-			}
-			if _, recoverErr := e.interveneWork(ctx, t, item.IntentID, item.RequestID, item.Message, allowAdmissionPause); recoverErr != nil {
-				log.Printf("[worker chat] task %s 恢复意图 #%d 待处理消息失败: %v", t.ID, item.IntentID, recoverErr)
-			}
-		case db.IntentInterventionAccepted:
-			if item.IntentState == "paused" {
-				if changed, setErr := t.Store.CompareAndSetIntentState(item.IntentID, "paused", "open"); setErr != nil {
-					return setErr
-				} else if changed {
-					item.IntentState = "open"
-				}
-			}
-			if item.IntentState == "open" {
-				e.queueDirectedClaim(t.ID, item.IntentID)
-				e.readyDirectedClaim(item.IntentID)
-				t.NotifyWorker()
-			}
-		}
-	}
-	return nil
-}
-
 // releaseWorkControl drops only this caller's reservation after its wait is
 // cancelled. The work context stays cancelled; runWorkerStep recognizes the
 // named cancellation cause and settles the intent into the recoverable paused
@@ -775,11 +471,7 @@ func (e *Engine) recoverWorkerMessages(ctx context.Context, t *Task, allowAdmiss
 func (e *Engine) releaseWorkControl(intentID int64, run *workExecution, action string) {
 	e.workMu.Lock()
 	if current := e.work[intentID]; current == run && current.action == action {
-		if action == "intervene" {
-			current.action = "intervene_no_handoff"
-		} else {
-			current.action = ""
-		}
+		current.action = ""
 	}
 	e.workMu.Unlock()
 }
@@ -916,19 +608,6 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 	e.bc.Publish(t.ID, r)
 	e.touch(t.ID)
 	return r
-}
-
-// publishStoredActivity broadcasts an activity inserted by a larger DB
-// transaction, avoiding a second INSERT through emitActivity.
-func (e *Engine) publishStoredActivity(t *Task, r db.Activity) {
-	if t == nil || r.ID <= 0 {
-		return
-	}
-	if r.CreatedAt.IsZero() {
-		r.CreatedAt = time.Now()
-	}
-	e.bc.Publish(t.ID, r)
-	e.touch(t.ID)
 }
 
 // appendActivity persists one activity row, retrying briefly on write failure.
@@ -1197,13 +876,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		}
 		_, worker := e.snapshotFor(t)
 		if worker == nil {
-			if waitWorker(ctx, t, 1500*time.Millisecond) {
+			if sleepCtx(ctx, 1500*time.Millisecond) {
 				return
 			}
 			continue
 		}
 		if e.IsPaused(t.ID) {
-			if waitWorker(ctx, t, 1000*time.Millisecond) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
 			continue // user-paused: don't claim/execute intents
@@ -1212,13 +891,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			return
 		}
 		if e.isSettling(t.ID) {
-			if waitWorker(ctx, t, 1000*time.Millisecond) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
 			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
-			if waitWorker(ctx, t, 1000*time.Millisecond) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
 			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
@@ -1228,21 +907,34 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		}
 		claimed := e.runWorkerStep(ctx, t, name, worker)
 		e.decInflight(t.ID)
-		if !claimed && waitWorker(ctx, t, 800*time.Millisecond) {
+		if !claimed && sleepCtx(ctx, 800*time.Millisecond) {
 			return
 		}
 	}
 }
 
-// runWorkerStep claims and fully settles at most one intent. Its caller holds one
-// task-operation admission for the whole claim/execute/state-write sequence so a
-// delete cannot observe quiescence between the LLM return and the final DB writes.
+// runWorkerStep claims one intent from the frontier and fully settles it via
+// runIntent. Returns false when nothing was claimable. The pool worker loop is its
+// only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
 	}
 	log.Printf("[worker %s] task %s 领取意图 #%d", name, t.ID, intent.ID)
+	return e.runIntent(ctx, t, name, worker, intent, "", "")
+}
+
+// runIntent executes and fully settles one already-claimed (state=running) intent.
+// Both the pool worker loop (via runWorkerStep) and the human-message handler (via
+// runDetachedIntent, a dedicated goroutine outside the worker pool) call it, so the
+// execute/retry/state-write logic lives in exactly one place. A non-empty message
+// is injected as this turn's input through ExecuteWithMessage; requestID keys the
+// transcript marker that dedups re-injection across model_error retries. The caller
+// must already hold one task-operation admission for the whole sequence so a delete
+// cannot observe quiescence between the LLM return and the final DB writes.
+func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
@@ -1267,31 +959,16 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, fmt.Sprintf("%s · #%d", name, iid), taskEmit)
 	hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	chatRequestID, chatMessage, hasChatMessage, chatErr := t.Store.PendingIntentInterventionMessage(intent.ID)
-	if chatErr != nil {
-		log.Printf("[worker %s] task %s 读取意图 #%d 待处理人工对话失败: %v", name, t.ID, intent.ID, chatErr)
-		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 人工对话读取失败后回退失败: %v", name, t.ID, intent.ID, err)
-		}
-		_, completeWork := e.detachWork(intent.ID)
-		completeWork(chatErr)
-		return true
-	}
 	e.BeginLLMCall(t.ID)
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
 	if hasChatMessage {
-		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, chatRequestID, chatMessage)
+		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 	} else {
 		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
 	e.EndLLMCall(t.ID)
-	if hasChatMessage {
-		if markErr := t.Store.MarkIntentInterventionHandoffClaimed(intent.ID); markErr != nil {
-			log.Printf("[worker %s] task %s 标记意图 #%d 人工对话已消费失败: %v", name, t.ID, intent.ID, markErr)
-		}
-	}
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
@@ -1305,7 +982,7 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 		}
 		e.BeginLLMCall(t.ID)
 		if hasChatMessage {
-			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, chatRequestID, chatMessage)
+			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 		} else {
 			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
@@ -1326,8 +1003,6 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 		switch {
 		case errors.Is(workCause, agent.AbortWorkPausedByUser):
 			action = "pause"
-		case errors.Is(workCause, agent.AbortWorkIntervenedByUser):
-			action = "intervene"
 		case errors.Is(workCause, agent.AbortWorkCancelledByUser):
 			action = "cancel"
 		}
@@ -1341,22 +1016,6 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 			return true
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 已暂停", name, t.ID, intent.ID)
-		e.touch(t.ID)
-		return true
-	}
-	if action == "intervene" || action == "intervene_no_handoff" {
-		controlErr = transitionIntentState(t.Store, intent.ID, "running", "paused")
-		if controlErr != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 对话暂停落库失败: %v", name, t.ID, intent.ID, controlErr)
-			return true
-		}
-		// Install the directed barrier before completeWork releases ControlWork.
-		// With one worker slot this prevents its next loop from taking unrelated
-		// frontier work during the message hand-off.
-		if action == "intervene" {
-			e.queueDirectedClaim(t.ID, intent.ID)
-		}
-		log.Printf("[worker %s] task %s 意图 #%d 已暂停，等待新的对话意图", name, t.ID, intent.ID)
 		e.touch(t.ID)
 		return true
 	}
@@ -1441,6 +1100,61 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 	return true
 }
 
+// runDetachedIntent runs one paused intent OUTSIDE the worker pool in its own
+// goroutine — the human-message path. It transitions the intent paused->running
+// itself (never through 'open'), so the pool, which only claims 'open', can never
+// race it; the "at most one run per intent" invariant still holds because winning
+// the CAS is the sole entry and work[intentID] was cleared when the pause settled.
+// Because it does not compete for a frontier slot, a user message continues the
+// worker immediately even when all pool slots are busy (mirroring how the
+// main-agent chat handler starts its run directly). The spawned goroutine owns one
+// task-operation admission for the whole run and roots its context at ctx (pass the
+// server root, never the HTTP request, so a disconnect cannot strand the run while
+// task pause/delete/shutdown still stops it). Returns an error if the run could not
+// be started; the intent is left untouched in that case.
+func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message string) error {
+	if !e.beginTaskOperation(t.ID) {
+		return fmt.Errorf("task is being deleted")
+	}
+	release := true
+	defer func() {
+		if release {
+			e.decInflight(t.ID)
+		}
+	}()
+	_, worker := e.snapshotFor(t)
+	if worker == nil {
+		return fmt.Errorf("worker 尚未就绪")
+	}
+	node, err := t.Store.GetNode(intentID)
+	if err != nil {
+		return err
+	}
+	if node == nil || node.Kind != db.KindIntent {
+		return fmt.Errorf("intent not found")
+	}
+	changed, err := t.Store.CompareAndSetIntentState(intentID, "paused", "running")
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+	}
+	node.State, node.Owner = "running", "chat"
+	// Record the human turn as a visible activity BEFORE the run starts, so it is
+	// ordered ahead of any worker step and never appears without the run happening.
+	// This is the UI copy; ExecuteWithMessage separately writes it into the intent
+	// transcript as the LLM input.
+	uid := intentID
+	e.emitActivity(t, db.Activity{NodeID: &uid, Worker: "user", Kind: "user", Summary: message, Detail: message})
+	release = false // ownership of the admission passes to the goroutine
+	go func() {
+		defer e.decInflight(t.ID)
+		e.runIntent(ctx, t, "chat", worker, node, requestID, message)
+	}()
+	return nil
+}
+
 func taskExecutionPaused(cause error) bool {
 	var abort *agent.AbortCause
 	if !errors.As(cause, &abort) {
@@ -1464,114 +1178,7 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 	}
 }
 
-func waitWorker(ctx context.Context, t *Task, d time.Duration) (done bool) {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	var wake <-chan struct{}
-	if t != nil {
-		wake = t.workerWake
-	}
-	select {
-	case <-ctx.Done():
-		return true
-	case <-wake:
-		return false
-	case <-timer.C:
-		return false
-	}
-}
-
-func (e *Engine) queueDirectedClaim(taskID string, intentID int64) {
-	if taskID == "" || intentID <= 0 {
-		return
-	}
-	e.directedMu.Lock()
-	defer e.directedMu.Unlock()
-	for _, id := range e.directedClaims[taskID] {
-		if id == intentID {
-			return
-		}
-	}
-	e.directedClaims[taskID] = append(e.directedClaims[taskID], intentID)
-	e.directedReady[intentID] = false
-}
-
-func (e *Engine) readyDirectedClaim(intentID int64) {
-	e.directedMu.Lock()
-	if _, exists := e.directedReady[intentID]; exists {
-		e.directedReady[intentID] = true
-	}
-	e.directedMu.Unlock()
-}
-
-func (e *Engine) removeDirectedClaim(taskID string, intentID int64) {
-	e.directedMu.Lock()
-	defer e.directedMu.Unlock()
-	items := e.directedClaims[taskID]
-	for i, id := range items {
-		if id != intentID {
-			continue
-		}
-		items = append(items[:i], items[i+1:]...)
-		delete(e.directedReady, intentID)
-		if len(items) == 0 {
-			delete(e.directedClaims, taskID)
-		} else {
-			e.directedClaims[taskID] = items
-		}
-		return
-	}
-}
-
-// claimDirected tries every pending human-message hand-off before ordinary work
-// frontier. blocked=true means at least one hand-off is still paused/running;
-// callers must not let a just-released single worker slot overtake it.
-func (e *Engine) claimDirected(t *Task, name string) (intent *db.Node, blocked bool) {
-	e.directedMu.Lock()
-	ids := append([]int64(nil), e.directedClaims[t.ID]...)
-	ready := make(map[int64]bool, len(ids))
-	for _, id := range ids {
-		ready[id] = e.directedReady[id]
-	}
-	e.directedMu.Unlock()
-	for _, id := range ids {
-		node, err := t.Store.GetNode(id)
-		if err != nil {
-			return nil, true
-		}
-		if node == nil {
-			e.removeDirectedClaim(t.ID, id)
-			continue
-		}
-		switch node.State {
-		case "open":
-			if !ready[id] {
-				blocked = true
-				continue
-			}
-			ok, err := t.Store.ClaimIntent(id, name)
-			if err != nil {
-				return nil, true
-			}
-			if ok {
-				e.removeDirectedClaim(t.ID, id)
-				node.State, node.Owner = "running", name
-				return node, false
-			}
-			blocked = true
-		case "paused", "running":
-			blocked = true
-		default:
-			e.removeDirectedClaim(t.ID, id)
-		}
-	}
-	return nil, blocked
-}
-
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
-	if intent, blocked := e.claimDirected(t, name); intent != nil || blocked {
-		return intent
-	}
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
 		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {

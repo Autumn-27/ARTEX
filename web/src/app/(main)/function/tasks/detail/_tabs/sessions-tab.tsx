@@ -1336,14 +1336,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   function sendWorkerChat() {
     const intentId = active.intent_id;
     const message = workerMessage.trim();
-    if (
-      !intentId ||
-      active.inherited ||
-      (active.status !== "paused" && active.status !== "pending") ||
-      workerMessageSending ||
-      !message
-    )
-      return;
+    if (!intentId || active.inherited || active.status !== "paused" || workerMessageSending || !message) return;
     if (workerMessageCharCount(message) > MAX_WORKER_MESSAGE_CHARS) {
       toast.error(`消息不能超过 ${MAX_WORKER_MESSAGE_CHARS} 个字符`);
       return;
@@ -1354,23 +1347,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     api
       .sendWorkerMessage(taskId, intentId, message, requestId)
       .then((result) => {
-        const sentAt = new Date().toISOString();
-        const activity: Activity = {
-          seq: result.activity_seq,
-          intent_id: intentId,
-          worker: "user",
-          ts: sentAt,
-          kind: "user",
-          summary: message,
-          detail: message,
-        };
-        patchStore(`intent:${intentId}`, (state) => ({
-          ...state,
-          items: mergeBySeq(state.items, [activity]),
-          lastTs: sentAt,
-          loaded: true,
-          unread: 0,
-        }));
+        // The server records the user turn and streams the run over SSE, so there is
+        // no optimistic insert: the message and the continuation arrive live.
         patchIntentState(intentId, result.state);
         setWorkerMessage("");
         setWorkerMessageRequestId("");
@@ -1788,7 +1766,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             </div>
           ) : active.role === "worker" &&
             !active.inherited &&
-            (active.status === "running" || active.status === "paused" || active.status === "pending") ? (
+            (active.status === "running" || active.status === "paused") ? (
             <div className="border-t p-3">
               <InputGroup className="min-h-9 has-disabled:opacity-100">
                 <InputGroupTextarea
@@ -1835,21 +1813,33 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       )}
                     </InputGroupButton>
                   ) : (
-                    <InputGroupButton
-                      className="ml-auto"
-                      size="icon-xs"
-                      variant="default"
-                      onClick={sendWorkerChat}
-                      disabled={
-                        workerMessageSending ||
-                        !workerMessage.trim() ||
-                        workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS
-                      }
-                      title="发送消息"
-                      aria-label="发送消息"
-                    >
-                      {workerMessageSending ? <Spinner /> : <ArrowUpIcon />}
-                    </InputGroupButton>
+                    <>
+                      <InputGroupButton
+                        className="ml-auto"
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => void controlWorker(active, "resume")}
+                        disabled={controllingIntent === active.intent_id || workerMessageSending}
+                        title="不发消息，直接继续执行"
+                        aria-label="直接继续执行"
+                      >
+                        {controllingIntent === active.intent_id ? <Loader2Icon className="animate-spin" /> : "直接继续"}
+                      </InputGroupButton>
+                      <InputGroupButton
+                        size="icon-xs"
+                        variant="default"
+                        onClick={sendWorkerChat}
+                        disabled={
+                          workerMessageSending ||
+                          !workerMessage.trim() ||
+                          workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS
+                        }
+                        title="发送消息"
+                        aria-label="发送消息"
+                      >
+                        {workerMessageSending ? <Spinner /> : <ArrowUpIcon />}
+                      </InputGroupButton>
+                    </>
                   )}
                 </InputGroupAddon>
               </InputGroup>

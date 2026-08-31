@@ -14,11 +14,6 @@ import (
 // it to distinguish an expected control race (HTTP 409) from a storage failure.
 var ErrIntentStateConflict = errors.New("intent state changed concurrently")
 
-// ErrIntentInterventionConflict marks a rejected or conflicting worker
-// intervention request. It covers state races, a reused request id with a
-// different payload, and a second request trying to overtake a pending one.
-var ErrIntentInterventionConflict = errors.New("intent intervention conflict")
-
 // utf8Clean makes a string safe for a PostgreSQL text column. It (1) replaces
 // invalid UTF-8 byte sequences with U+FFFD and (2) strips NUL (0x00) bytes.
 // Tool output (nmap/curl/… stdout) can carry raw/truncated bytes that PostgreSQL's
@@ -333,376 +328,6 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
-}
-
-const (
-	IntentInterventionPending  = "pending"
-	IntentInterventionAccepted = "accepted"
-	IntentInterventionRejected = "rejected"
-)
-
-// IntentIntervention is the durable control record for one human interruption.
-// It deliberately lives in activity rather than a new table: activity already
-// participates in task archive/restore, and the accepted row is also the user
-// turn rendered in the intent transcript.
-type IntentIntervention struct {
-	RequestID   string
-	Message     string
-	Status      string
-	ActivityID  int64
-	IntentID    int64
-	IntentState string
-	CreatedAt   time.Time
-}
-
-// lockIntentIntervention serializes request-id reservation/finalization across
-// processes. exploration_nodes.id is a global primary key, so the intent id is
-// sufficient input to the namespaced advisory key.
-func lockIntentIntervention(tx *sql.Tx, intentID int64) error {
-	_, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended('artex-intent-intervention:' || $1::text, 0))`, intentID)
-	return err
-}
-
-func scanIntentIntervention(row *sql.Row) (*IntentIntervention, error) {
-	var it IntentIntervention
-	err := row.Scan(&it.ActivityID, &it.RequestID, &it.Message, &it.Status,
-		&it.IntentID, &it.IntentState, &it.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &it, nil
-}
-
-// IntentInterventionByRequest finds a prior reservation/acceptance. Callers do
-// this before ordinary lifecycle validation so retrying an already accepted
-// request remains idempotent even if the worker has since finished naturally.
-func (s *ExplorationStore) IntentInterventionByRequest(intentID int64, requestID string) (*IntentIntervention, error) {
-	return scanIntentIntervention(s.db.QueryRow(`
-SELECT COALESCE(NULLIF(a.metadata->>'accepted_activity_id','')::bigint, a.id),
-       COALESCE(a.metadata->>'intervention_request_id',''),
-       COALESCE(a.metadata->>'intervention_message', a.detail, ''),
-       COALESCE(a.metadata->>'intervention_status',''),
-       n.id, n.state, a.created_at
-FROM activity a
-JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-WHERE a.exploration_id=$1 AND a.node_id=$2
-  AND a.metadata->>'intervention_request_id'=$3
-ORDER BY a.id
-LIMIT 1`, s.expID, intentID, requestID))
-}
-
-// ReserveIntentIntervention durably claims a request id while the intent is
-// still running. A hidden intervention_control activity is the write-ahead
-// record; acceptance inserts a newer visible kind='user' row so SSE cursors can
-// never skip a message whose control reservation had an older id.
-func (s *ExplorationStore) ReserveIntentIntervention(intentID int64, requestID, message string) (*IntentIntervention, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	if err := lockIntentIntervention(tx, intentID); err != nil {
-		return nil, err
-	}
-
-	existing, err := scanIntentIntervention(tx.QueryRow(`
-SELECT COALESCE(NULLIF(a.metadata->>'accepted_activity_id','')::bigint, a.id),
-       COALESCE(a.metadata->>'intervention_request_id',''),
-       COALESCE(a.metadata->>'intervention_message', a.detail, ''),
-       COALESCE(a.metadata->>'intervention_status',''),
-       n.id, n.state, a.created_at
-FROM activity a
-JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-WHERE a.exploration_id=$1 AND a.node_id=$2
-  AND a.metadata->>'intervention_request_id'=$3
-ORDER BY a.id
-LIMIT 1`, s.expID, intentID, requestID))
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		if existing.Message != message {
-			return nil, fmt.Errorf("%w: request_id 已用于不同的 Worker 消息", ErrIntentInterventionConflict)
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return existing, nil
-	}
-
-	var state string
-	if err := tx.QueryRow(`SELECT state FROM exploration_nodes
-		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, intentID, s.expID).Scan(&state); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("%w: intent not found", ErrIntentInterventionConflict)
-		}
-		return nil, err
-	}
-	if state != "running" && state != "paused" {
-		return nil, fmt.Errorf("%w: intent state %s cannot receive a message", ErrIntentInterventionConflict, state)
-	}
-	var otherRequest string
-	err = tx.QueryRow(`SELECT COALESCE(metadata->>'intervention_request_id','')
-		FROM activity
-		WHERE exploration_id=$1 AND node_id=$2
-		  AND metadata->>'intervention_status'=$3
-		ORDER BY id LIMIT 1`, s.expID, intentID, IntentInterventionPending).Scan(&otherRequest)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-	if err == nil {
-		return nil, fmt.Errorf("%w: intent 已有待处理的 Worker 消息 %s", ErrIntentInterventionConflict, otherRequest)
-	}
-
-	metadata, err := json.Marshal(map[string]any{
-		"intervention":            true,
-		"intervention_handoff":    "pending",
-		"intervention_request_id": requestID,
-		"intervention_message":    message,
-		"intervention_status":     IntentInterventionPending,
-		"source":                  "user",
-	})
-	if err != nil {
-		return nil, err
-	}
-	var out IntentIntervention
-	err = tx.QueryRow(`
-INSERT INTO activity(exploration_id,node_id,worker,kind,metadata)
-VALUES ($1,$2,'system','intervention_control',$3)
-RETURNING id, created_at`, s.expID, intentID, string(metadata)).Scan(&out.ActivityID, &out.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	out.RequestID, out.Message, out.Status = requestID, message, IntentInterventionPending
-	out.IntentID, out.IntentState = intentID, state
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// AcceptIntentIntervention is the DB commit point: the hidden reservation
-// becomes an audited user turn in the same transaction that moves paused back
-// to open. Thus no Worker can claim the intent before its pending message and
-// visible activity are both durable.
-func (s *ExplorationStore) AcceptIntentIntervention(intentID int64, requestID, message string) (Activity, bool, error) {
-	var activity Activity
-	tx, err := s.db.Begin()
-	if err != nil {
-		return activity, false, err
-	}
-	defer tx.Rollback()
-	if err := lockIntentIntervention(tx, intentID); err != nil {
-		return activity, false, err
-	}
-
-	var controlID int64
-	var storedMessage, status, state, taskStatus string
-	var taskPaused, taskQueued bool
-	var taskDeletedAt sql.NullTime
-	var createdAt time.Time
-	err = tx.QueryRow(`
-SELECT a.id,
-       COALESCE(a.metadata->>'intervention_message', a.detail, ''),
-       COALESCE(a.metadata->>'intervention_status',''),
-       n.state, a.created_at, COALESCE(t.status,''), t.paused, t.queued, t.deleted_at
-FROM activity a
-JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-JOIN tasks t ON t.exploration_id=a.exploration_id
-WHERE a.exploration_id=$1 AND a.node_id=$2
-  AND a.metadata->>'intervention_request_id'=$3
-	ORDER BY a.id LIMIT 1
-	FOR UPDATE OF a,n,t`, s.expID, intentID, requestID).
-		Scan(&controlID, &storedMessage, &status, &state, &createdAt,
-			&taskStatus, &taskPaused, &taskQueued, &taskDeletedAt)
-	if err == sql.ErrNoRows {
-		return activity, false, fmt.Errorf("%w: intervention reservation not found", ErrIntentInterventionConflict)
-	}
-	if err != nil {
-		return activity, false, err
-	}
-	if storedMessage != message {
-		return activity, false, fmt.Errorf("%w: request_id 已用于不同的 Worker 消息", ErrIntentInterventionConflict)
-	}
-	if status == IntentInterventionAccepted {
-		var acceptedID int64
-		if err := tx.QueryRow(`SELECT COALESCE((metadata->>'accepted_activity_id')::bigint,0),
-			COALESCE((SELECT created_at FROM activity accepted
-				WHERE accepted.id=(activity.metadata->>'accepted_activity_id')::bigint), created_at)
-			FROM activity WHERE id=$1`, controlID).Scan(&acceptedID, &createdAt); err != nil {
-			return activity, false, err
-		}
-		if acceptedID <= 0 {
-			return activity, false, fmt.Errorf("accepted intervention has no activity id")
-		}
-		if err := tx.Commit(); err != nil {
-			return activity, false, err
-		}
-		nid := intentID
-		activity.ID = acceptedID
-		activity.NodeID, activity.Worker, activity.Kind = &nid, "user", "user"
-		activity.Summary, activity.Detail, activity.CreatedAt = message, message, createdAt
-		return activity, true, nil
-	}
-	if status != IntentInterventionPending {
-		return activity, false, fmt.Errorf("%w: intervention status %s cannot be accepted", ErrIntentInterventionConflict, status)
-	}
-	if state != "paused" {
-		return activity, false, fmt.Errorf("%w: intent state %s cannot be reopened", ErrIntentInterventionConflict, state)
-	}
-	if taskPaused || taskQueued || taskDeletedAt.Valid || IsTerminal(taskStatus) {
-		return activity, false, fmt.Errorf("%w: task lifecycle changed (status=%s paused=%v queued=%v deleted=%v)",
-			ErrIntentInterventionConflict, taskStatus, taskPaused, taskQueued, taskDeletedAt.Valid)
-	}
-
-	metadata, err := json.Marshal(map[string]any{
-		"intervention":            true,
-		"intervention_request_id": requestID,
-		"intervention_message":    message,
-		"intervention_status":     IntentInterventionAccepted,
-		"source":                  "user",
-	})
-	if err != nil {
-		return activity, false, err
-	}
-	if err := tx.QueryRow(`INSERT INTO activity(
-		exploration_id,node_id,worker,kind,summary,detail,metadata)
-		VALUES ($1,$2,'user','user',$3,$3,$4)
-		RETURNING id,created_at`, s.expID, intentID, utf8Clean(message), string(metadata)).
-		Scan(&activity.ID, &createdAt); err != nil {
-		return activity, false, err
-	}
-	var acceptedMeta map[string]any
-	if err := json.Unmarshal(metadata, &acceptedMeta); err != nil {
-		return activity, false, err
-	}
-	acceptedMeta["accepted_activity_id"] = activity.ID
-	controlMetadata, err := json.Marshal(acceptedMeta)
-	if err != nil {
-		return activity, false, err
-	}
-	if _, err := tx.Exec(`UPDATE activity SET metadata=$1 WHERE id=$2`, string(controlMetadata), controlID); err != nil {
-		return activity, false, err
-	}
-	res, err := tx.Exec(`UPDATE exploration_nodes
-		SET state='open', owner=NULL, completed_at=NULL, blocked_reason=NULL
-		WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='paused'`, intentID, s.expID)
-	if err != nil {
-		return activity, false, err
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		if err != nil {
-			return activity, false, err
-		}
-		return activity, false, fmt.Errorf("%w: intent is no longer paused", ErrIntentInterventionConflict)
-	}
-	if err := tx.Commit(); err != nil {
-		return activity, false, err
-	}
-	nid := intentID
-	activity.NodeID, activity.Worker, activity.Kind = &nid, "user", "user"
-	activity.Summary, activity.Detail, activity.CreatedAt = message, message, createdAt
-	activity.Metadata = metadata
-	return activity, false, nil
-}
-
-// RecoverableIntentInterventions returns control operations that must be
-// reconstructed before ordinary frontier claiming after a process restart:
-// pending transcript commits, plus accepted hand-offs not yet claimed once.
-func (s *ExplorationStore) RecoverableIntentInterventions() ([]IntentIntervention, error) {
-	rows, err := s.db.Query(`
-SELECT COALESCE(NULLIF(a.metadata->>'accepted_activity_id','')::bigint, a.id),
-       COALESCE(a.metadata->>'intervention_request_id',''),
-       COALESCE(a.metadata->>'intervention_message',''),
-       COALESCE(a.metadata->>'intervention_status',''),
-       n.id,n.state,a.created_at
-FROM activity a
-JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-WHERE a.exploration_id=$1 AND a.kind='intervention_control'
-  AND (a.metadata->>'intervention_status'=$2 OR (
-       a.metadata->>'intervention_status'=$3
-       AND COALESCE(a.metadata->>'intervention_handoff','pending')='pending'))
-ORDER BY a.id`, s.expID, IntentInterventionPending, IntentInterventionAccepted)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []IntentIntervention{}
-	for rows.Next() {
-		var item IntentIntervention
-		if err := rows.Scan(&item.ActivityID, &item.RequestID, &item.Message, &item.Status,
-			&item.IntentID, &item.IntentState, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, rows.Err()
-}
-
-// MarkIntentInterventionHandoffClaimed records that the accepted instruction
-// has been preferentially claimed once. Idempotency status remains accepted.
-func (s *ExplorationStore) MarkIntentInterventionHandoffClaimed(intentID int64) error {
-	_, err := s.db.Exec(`UPDATE activity SET metadata=jsonb_set(
-		metadata,'{intervention_handoff}',to_jsonb('claimed'::text))
-		WHERE id=(SELECT id FROM activity
-			WHERE exploration_id=$1 AND node_id=$2 AND kind='intervention_control'
-			  AND metadata->>'intervention_status'=$3
-			  AND COALESCE(metadata->>'intervention_handoff','pending')='pending'
-			ORDER BY id DESC LIMIT 1)`, s.expID, intentID, IntentInterventionAccepted)
-	return err
-}
-
-// PendingIntentInterventionMessage returns the accepted human chat turn that
-// should be consumed by the next Worker run. The handoff remains pending until
-// the run has actually started, so a process restart can reconstruct the
-// directed claim without losing the user's message.
-func (s *ExplorationStore) PendingIntentInterventionMessage(intentID int64) (string, string, bool, error) {
-	var requestID, message string
-	err := s.db.QueryRow(`SELECT
-		COALESCE(metadata->>'intervention_request_id',''),
-		COALESCE(metadata->>'intervention_message','')
-		FROM activity
-		WHERE exploration_id=$1 AND node_id=$2 AND kind='intervention_control'
-		  AND metadata->>'intervention_status'=$3
-		  AND COALESCE(metadata->>'intervention_handoff','pending')='pending'
-		ORDER BY id DESC LIMIT 1`, s.expID, intentID, IntentInterventionAccepted).
-		Scan(&requestID, &message)
-	if err == sql.ErrNoRows {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	return requestID, message, true, nil
-}
-
-// RejectIntentIntervention closes a pending control reservation without making
-// it visible in task activity. It is used when lifecycle validation changes or
-// the transcript could not be made durable; a different future request is then
-// free to proceed after the user explicitly resumes the paused intent.
-func (s *ExplorationStore) RejectIntentIntervention(intentID int64, requestID, reason string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := lockIntentIntervention(tx, intentID); err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE activity
-		SET metadata=jsonb_set(jsonb_set(metadata,'{intervention_status}',to_jsonb($1::text)),
-			'{intervention_reject_reason}',to_jsonb($2::text))
-		WHERE exploration_id=$3 AND node_id=$4
-		  AND metadata->>'intervention_request_id'=$5
-		  AND metadata->>'intervention_status'=$6`,
-		IntentInterventionRejected, utf8Clean(reason), s.expID, intentID, requestID, IntentInterventionPending)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // IntentCleanup summarizes the blackboard records removed when a user cancels
@@ -1381,8 +1006,7 @@ func (d *DB) TokenTotalsAll() (map[int64]TokenUsage, error) {
 // Persisted (unlike Engine.LastActivity's in-memory map), so it survives restarts
 // and gives终态任务 a stable "ran until" time for computing run duration.
 func (d *DB) LastActivityAll() (map[int64]int64, error) {
-	rows, err := d.Query(`SELECT exploration_id, EXTRACT(EPOCH FROM MAX(created_at))::bigint
-		FROM activity WHERE kind IS DISTINCT FROM 'intervention_control' GROUP BY exploration_id`)
+	rows, err := d.Query(`SELECT exploration_id, EXTRACT(EPOCH FROM MAX(created_at))::bigint FROM activity GROUP BY exploration_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1433,7 +1057,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		LEFT JOIN LATERAL (
 			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
 			FROM activity
-			WHERE exploration_id=task.exploration_id AND kind IS DISTINCT FROM 'intervention_control'
+			WHERE exploration_id=task.exploration_id
 			ORDER BY created_at DESC
 			LIMIT 1
 		) latest_activity ON true
@@ -1564,10 +1188,10 @@ func (s *ExplorationStore) ActivityList(nodeID *int64, sinceID int64, limit int)
 	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
 	if nodeID != nil {
 		rows, err = s.db.Query(`SELECT `+cols+`
-FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind IS DISTINCT FROM 'intervention_control' AND id>$3 ORDER BY id LIMIT $4`, s.expID, *nodeID, sinceID, limit)
+FROM activity WHERE exploration_id=$1 AND node_id=$2 AND id>$3 ORDER BY id LIMIT $4`, s.expID, *nodeID, sinceID, limit)
 	} else {
 		rows, err = s.db.Query(`SELECT `+cols+`
-FROM activity WHERE exploration_id=$1 AND kind IS DISTINCT FROM 'intervention_control' AND id>$2 ORDER BY id LIMIT $3`, s.expID, sinceID, limit)
+FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, sinceID, limit)
 	}
 	if err != nil {
 		return nil, sinceID, err
@@ -1604,7 +1228,7 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND a.id>$3
 	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage','intervention_control')
+	  AND a.kind NOT IN ('thinking','usage')
 	ORDER BY a.id LIMIT $4`, s.expID, nodeID, sinceID, limit)
 	if err != nil {
 		return nil, sinceID, err
@@ -1667,7 +1291,7 @@ func (s *ExplorationStore) ActivityPage(f ActivitySessionFilter, before int64, l
 	limitArg := len(args) + 1
 	args = append(args, limit+1) // one extra row to detect older history
 	q := fmt.Sprintf(`SELECT `+cols+`
-FROM activity WHERE exploration_id=$1 AND kind IS DISTINCT FROM 'intervention_control'%s AND ($%d <= 0 OR id < $%d)
+FROM activity WHERE exploration_id=$1%s AND ($%d <= 0 OR id < $%d)
 ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -1712,7 +1336,7 @@ func (s *ExplorationStore) ActivityPageForTerminalIntent(nodeID, before int64, l
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2
 	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage','intervention_control')
+	  AND a.kind NOT IN ('thinking','usage')
 	  AND ($3 <= 0 OR a.id < $3)
 	ORDER BY a.id DESC LIMIT $4`, s.expID, nodeID, before, limit+1)
 	if err != nil {
@@ -1748,7 +1372,7 @@ func (s *ExplorationStore) ActivityPageForTerminalIntent(nodeID, before int64, l
 // session, since one SSE covers the whole task.
 func (s *ExplorationStore) ActivityMaxID() (int64, error) {
 	var max sql.NullInt64
-	err := s.db.QueryRow(`SELECT MAX(id) FROM activity WHERE exploration_id=$1 AND kind IS DISTINCT FROM 'intervention_control'`, s.expID).Scan(&max)
+	err := s.db.QueryRow(`SELECT MAX(id) FROM activity WHERE exploration_id=$1`, s.expID).Scan(&max)
 	if err != nil {
 		return 0, err
 	}
@@ -1758,7 +1382,7 @@ func (s *ExplorationStore) ActivityMaxID() (int64, error) {
 // ActivityDetail lazily returns the full detail blob for one step.
 func (s *ExplorationStore) ActivityDetail(id int64) (string, error) {
 	var d sql.NullString
-	err := s.db.QueryRow(`SELECT detail FROM activity WHERE id=$1 AND exploration_id=$2 AND kind IS DISTINCT FROM 'intervention_control'`, id, s.expID).Scan(&d)
+	err := s.db.QueryRow(`SELECT detail FROM activity WHERE id=$1 AND exploration_id=$2`, id, s.expID).Scan(&d)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1791,7 +1415,7 @@ func (s *ExplorationStore) ActivityTrace(nodeID int64, limit int) ([]Activity, e
 		limit = 500
 	}
 	rows, err := s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','intervention_control')
+FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage')
 ORDER BY id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1811,7 +1435,7 @@ func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit in
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage','intervention_control')
+	  AND a.kind NOT IN ('thinking','usage')
 	ORDER BY a.id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1833,11 +1457,11 @@ func (s *ExplorationStore) ActivityTraceSearch(nodeID *int64, q string, limit in
 	var err error
 	if nodeID != nil {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','intervention_control')
+FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage')
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, *nodeID, like, limit)
 	} else {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND kind NOT IN ('thinking','usage','intervention_control')
+FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND kind NOT IN ('thinking','usage')
 AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, limit)
 	}
 	if err != nil {
@@ -1859,7 +1483,7 @@ func (s *ExplorationStore) ActivityTraceSearchForTerminalIntent(nodeID int64, q 
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage','intervention_control')
+	  AND a.kind NOT IN ('thinking','usage')
 	  AND (a.summary ILIKE $3 OR a.detail ILIKE $3)
 	ORDER BY a.id LIMIT $4`, s.expID, nodeID, like, limit)
 	if err != nil {
@@ -1881,7 +1505,7 @@ func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit in
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage','intervention_control')
+	  AND a.kind NOT IN ('thinking','usage')
 	  AND (a.summary ILIKE $2 OR a.detail ILIKE $2)
 	ORDER BY a.id LIMIT $3`, s.expID, like, limit)
 	if err != nil {
@@ -1952,7 +1576,7 @@ func (s *ExplorationStore) ActivityTraceSearchExcluding(excludeNodeID int64, q s
 	like := "%" + q + "%"
 	rows, err := s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND node_id <> $2
-AND kind NOT IN ('thinking','usage','intervention_control')
+AND kind NOT IN ('thinking','usage')
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, excludeNodeID, like, limit)
 	if err != nil {
 		return nil, err
@@ -1976,7 +1600,7 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 		args[i+1] = id
 	}
 	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
-FROM activity WHERE exploration_id=$1 AND kind NOT IN ('thinking','intervention_control') AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
+FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2010,7 +1634,7 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.detail,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage','intervention_control') AND n.kind='intent'
+		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage') AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
 	  AND a.id IN (`+strings.Join(ph, ",")+`) ORDER BY a.id`, args...)
 	if err != nil {
