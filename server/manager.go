@@ -935,8 +935,9 @@ func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, e
 	return assetsDeleted, nil
 }
 
-// ReplaceTaskLLMProfiles resets a non-terminal task's ordered provider chain and
-// mirrors the committed state onto the live task handle.
+// ReplaceTaskLLMProfiles resets a task's ordered provider chain and mirrors the
+// committed state onto the live task handle. Terminal tasks are editable too —
+// their 主 Agent 对话 keeps running on the chain after the task finishes.
 func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activeProfileID int64) (int64, error) {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
@@ -954,6 +955,13 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
 	}
 	m.mu.Unlock()
+	// 终态任务不重开额度阻塞意图:任务已经没有 worker 在跑,重开只会把它们从
+	// blocked 挪到 open——那里既没人执行,也不再满足「重跑意图」的可重跑条件,
+	// 反而变成死状态。终态任务想接着跑,走重跑意图/新增目标,那条路会把任务重新
+	// admit 回运行态。
+	if pgdb.IsTerminal(pt.Status) {
+		return 0, nil
+	}
 	if task, ok := m.Task(id); ok {
 		reopened, reopenErr := task.Store.ReopenIntentsByBlockedReason(pgdb.IntentBlockedLLMQuota)
 		if reopenErr != nil {

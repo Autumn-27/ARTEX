@@ -464,7 +464,7 @@ func TestTaskRelationsAndLLMFailoverChain(t *testing.T) {
 	}
 }
 
-func TestTaskContextRejectsDuplicatesAndTerminalEdits(t *testing.T) {
+func TestTaskContextRejectsDuplicatesAndAllowsTerminalLLMEdits(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
@@ -480,6 +480,17 @@ func TestTaskContextRejectsDuplicatesAndTerminalEdits(t *testing.T) {
 		t.Fatal("duplicate source task ids should be rejected")
 	}
 
+	// 终态任务仍然可以改 LLM 配置链:任务结束后主 Agent 对话继续走这条链,
+	// 链上模型不可用时必须还能换。
+	profileID, err := d.SaveProfile(&LLMProfile{
+		Name: fmt.Sprintf("terminal-chain-%d", time.Now().UnixNano()), Format: "openai",
+		Model: "terminal-model", APIKey: "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteProfile(profileID) })
+
 	task, err := d.CreateTask("terminal", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -488,8 +499,21 @@ func TestTaskContextRejectsDuplicatesAndTerminalEdits(t *testing.T) {
 	if err := d.SetStatus(task.ID, "done"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ReplaceTaskLLMProfiles(task.ID, nil, 0); err == nil {
-		t.Fatal("terminal task LLM edit should be rejected")
+	if err := d.ReplaceTaskLLMProfiles(task.ID, []int64{profileID}, profileID); err != nil {
+		t.Fatalf("terminal task LLM edit should be allowed: %v", err)
+	}
+	got, err := d.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got.LLMProfileIDs) != fmt.Sprint([]int64{profileID}) {
+		t.Fatalf("terminal task chain not persisted: %v", got.LLMProfileIDs)
+	}
+	if got.ActiveLLMProfileID == nil || *got.ActiveLLMProfileID != profileID {
+		t.Fatalf("terminal task active profile not persisted: %v", got.ActiveLLMProfileID)
+	}
+	if err := d.ReplaceTaskLLMProfiles(task.ID, nil, 0); err != nil {
+		t.Fatalf("clearing a terminal task's chain should be allowed: %v", err)
 	}
 }
 

@@ -1511,10 +1511,8 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if isTerminalStatus(t.lifecycleSnapshot().Status) {
-		writeErr(w, 409, "已结束的任务不能修改 LLM 配置")
-		return
-	}
+	// 任何生命周期状态(含终态)都可以改链:任务结束后主 Agent 对话仍走这条链,
+	// 模型不可用时不换链就等于把已完成任务的交互一起锁死。
 	before := t.llmStateSnapshot()
 	var req struct {
 		LLMProfileIDs      []int64 `json:"llm_profile_ids"`
@@ -1534,11 +1532,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active)
 	if err != nil {
-		if strings.Contains(err.Error(), "terminal") {
-			writeErr(w, 409, err.Error())
-		} else {
-			writeErr(w, 400, err.Error())
-		}
+		writeErr(w, 400, err.Error())
 		return
 	}
 	// Profile edits affect only subsequent LLM calls. Existing in-flight calls

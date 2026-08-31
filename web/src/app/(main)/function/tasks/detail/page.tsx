@@ -77,8 +77,9 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
 
   const chain = taskProfileIDs(task);
   const exhausted = task.llm_failover_state === "chain_exhausted";
+  // 任何状态都可以改链,终态也不例外:任务结束后主 Agent 对话仍走这条链,
+  // 链上模型出问题时必须能换掉,否则已完成任务就没法继续交互。
   const terminal = ["done", "failed", "timeout"].includes(task.status);
-  const editable = !terminal && (task.status === "running" || task.status === "paused" || exhausted);
   // A null active profile on an exhausted, non-empty chain is a persisted end
   // cursor. Keep the status display honest; choosing the first profile is only
   // the editor's reset draft and does not mean it is currently active.
@@ -94,9 +95,8 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   const currentTitle = [currentLabel, activeProfile?.model, backupCount > 0 ? `${backupCount} 个备用` : ""]
     .filter(Boolean)
     .join(" · ");
-  let editorDescription = "仅运行中、暂停或配置链耗尽的任务可以修改配置。";
-  if (editable) editorDescription = "调整顺序或当前配置后，将从下一次 LLM 调用开始生效。";
-  if (terminal) editorDescription = "已结束的任务仅支持查看配置。";
+  let editorDescription = "调整顺序或当前配置后，将从下一次 LLM 调用开始生效。";
+  if (terminal) editorDescription = "任务已结束，改动只影响后续的主 Agent 对话。";
   let saveLabel = "保存";
   if (exhausted) saveLabel = "保存并重置";
   if (saving) saveLabel = "保存中";
@@ -118,7 +118,6 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   };
 
   const save = async () => {
-    if (!editable) return;
     setSaving(true);
     try {
       const result = await api.updateTaskLLMProfiles(
@@ -181,7 +180,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           activeProfileId={activeProfileID}
           onActiveProfileChange={setActiveProfileID}
           inputId="task-llm-profiles"
-          disabled={!editable || saving}
+          disabled={saving}
           portalContainer={popoverContentRef}
         />
 
@@ -189,12 +188,10 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)}>
             关闭
           </Button>
-          {editable && (
-            <Button type="button" size="sm" onClick={save} disabled={saving}>
-              {saving && <Spinner data-icon="inline-start" />}
-              {saveLabel}
-            </Button>
-          )}
+          <Button type="button" size="sm" onClick={save} disabled={saving}>
+            {saving && <Spinner data-icon="inline-start" />}
+            {saveLabel}
+          </Button>
         </div>
       </PopoverContent>
     </Popover>

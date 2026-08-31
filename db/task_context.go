@@ -402,6 +402,8 @@ FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, taskID)
 // ReplaceTaskLLMProfiles atomically replaces and resets the explicit task chain.
 // activeProfileID=0 selects the first entry. An empty list restores the existing
 // agent-binding/global fallback behavior.
+// 终态(done/failed/timeout)任务同样允许改链:任务结束后主 Agent 对话仍会走这条链,
+// 链上模型不可用时必须能换,否则已完成任务就再也没法交互了。
 func (d *DB) ReplaceTaskLLMProfiles(taskID int64, profileIDs []int64, activeProfileID int64) error {
 	tx, err := d.Begin()
 	if err != nil {
@@ -411,15 +413,12 @@ func (d *DB) ReplaceTaskLLMProfiles(taskID int64, profileIDs []int64, activeProf
 	// Keep the task -> profile lock order shared by all task LLM mutations and
 	// DeleteProfile. Inserts below may take KEY SHARE locks on llm_profiles for
 	// their foreign keys, so the task row must be locked before any of them.
-	var status string
-	if err := tx.QueryRow(`SELECT status FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&status); err != nil {
+	var lockedID int64
+	if err := tx.QueryRow(`SELECT id FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&lockedID); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("task %d not found", taskID)
 		}
 		return err
-	}
-	if IsTerminal(status) {
-		return fmt.Errorf("terminal task cannot change LLM profiles")
 	}
 	if _, err := tx.Exec(`DELETE FROM task_llm_profiles WHERE task_id=$1`, taskID); err != nil {
 		return err
