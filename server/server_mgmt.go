@@ -20,27 +20,41 @@ import (
 	"text/template"
 	"text/template/parse"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/skill"
 )
 
-// reSkillName is the base character-set pattern; validSkillName enforces
-// the full agentskills.io spec rules on top of it.
-var reSkillName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
-
-// validSkillName checks all agentskills.io name constraints:
-// lowercase alphanumeric + hyphens, 1-64 chars, no leading/trailing/consecutive hyphens.
+// validSkillName checks the agentskills.io name constraints, widened so a skill can
+// also be named in Chinese (or any other script): ASCII must stay lowercase
+// alphanumeric + hyphens, while non-ASCII letters/digits are accepted as-is.
+// 1-64 runes, must start with a letter, no leading/trailing/consecutive hyphens.
+// The name doubles as a directory name under skillDir, so nothing that could carry a
+// path (separators, dots, spaces, control characters) is allowed through.
 func validSkillName(name string) bool {
-	if l := len(name); l == 0 || l > 64 {
+	if name == "" || !utf8.ValidString(name) {
 		return false
 	}
-	if !reSkillName.MatchString(name) {
+	rs := []rune(name)
+	if len(rs) > 64 {
 		return false
 	}
-	if name[len(name)-1] == '-' {
+	isLetter := func(r rune) bool {
+		return (r >= 'a' && r <= 'z') || (r > unicode.MaxASCII && unicode.IsLetter(r))
+	}
+	if !isLetter(rs[0]) || rs[len(rs)-1] == '-' {
 		return false
+	}
+	for _, r := range rs {
+		switch {
+		case isLetter(r), r >= '0' && r <= '9', r == '-':
+		case r > unicode.MaxASCII && unicode.IsDigit(r):
+		default:
+			return false
+		}
 	}
 	return !strings.Contains(name, "--")
 }
@@ -1257,7 +1271,8 @@ func skillNameFromFrontmatter(md []byte) string {
 			break // end of frontmatter
 		}
 		if inFM && strings.HasPrefix(t, "name:") {
-			return strings.TrimSpace(strings.TrimPrefix(t, "name:"))
+			v := strings.TrimSpace(strings.TrimPrefix(t, "name:"))
+			return strings.Trim(v, `"'`) // name: "中文技能" 也认
 		}
 	}
 	return ""
@@ -1282,36 +1297,43 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+	zr, err := newSkillZipReader(buf)
 	if err != nil {
-		writeErr(w, 400, "无法解析压缩包(需为 zip 格式)："+err.Error())
+		writeErr(w, 400, err.Error())
+		return
+	}
+	// entries carry UTF-8-decoded names (GBK 包也能读) and exclude archiver junk.
+	entriesAll := skillZipEntries(zr)
+	if err := checkSkillZipMethods(entriesAll); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 
 	// locate the shallowest SKILL.md → its directory is the skill root inside the zip.
-	skillMD := ""
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || path.Base(f.Name) != "SKILL.md" {
+	var skillMD *skillZipEntry
+	for i := range entriesAll {
+		e := &entriesAll[i]
+		if path.Base(e.name) != "SKILL.md" {
 			continue
 		}
-		if skillMD == "" || strings.Count(f.Name, "/") < strings.Count(skillMD, "/") {
-			skillMD = f.Name
+		if skillMD == nil || strings.Count(e.name, "/") < strings.Count(skillMD.name, "/") {
+			skillMD = e
 		}
 	}
-	if skillMD == "" {
+	if skillMD == nil {
 		writeErr(w, 400, "压缩包内未找到 SKILL.md")
 		return
 	}
-	root := path.Dir(skillMD) // "." when SKILL.md is at the zip root
+	root := path.Dir(skillMD.name) // "." when SKILL.md is at the zip root
 	prefix := ""
 	if root != "." {
 		prefix = root + "/"
 	}
 
 	// derive + validate the skill name from the SKILL.md frontmatter.
-	md, err := readZipEntry(zr, skillMD)
+	md, err := readZipEntry(skillMD.f)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "读取 SKILL.md 失败："+err.Error())
 		return
 	}
 	name := skillNameFromFrontmatter(md)
@@ -1319,10 +1341,12 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		name = path.Base(strings.TrimSuffix(prefix, "/"))
 	}
 	if name == "" {
-		name = strings.TrimSuffix(hdr.Filename, ".zip")
+		base := path.Base(filepath.ToSlash(hdr.Filename))
+		name = strings.TrimSuffix(base, path.Ext(base))
 	}
 	if !validSkillName(name) {
-		writeErr(w, 400, "skill 名称无效（取自 SKILL.md 的 name 字段）："+name)
+		writeErr(w, 400, "skill 名称无效（取自 SKILL.md 的 name 字段）："+name+
+			"（≤64 字符，字母开头，只能用小写字母/数字/连字符或中文等非 ASCII 字母，不能有空格、点、路径分隔符）")
 		return
 	}
 
@@ -1345,21 +1369,19 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 
 	var total int64
 	entries := 0
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
+	for _, e := range entriesAll {
+		f := e.f
+		// only files under the skill root; skip anything outside it.
+		if prefix != "" && !strings.HasPrefix(e.name, prefix) {
 			continue
 		}
-		// only files under the skill root; skip archive junk.
-		if prefix != "" && !strings.HasPrefix(f.Name, prefix) {
-			continue
-		}
-		rel := strings.TrimPrefix(f.Name, prefix)
-		if rel == "" || strings.HasPrefix(rel, "__MACOSX/") || path.Base(rel) == ".DS_Store" {
+		rel := strings.TrimPrefix(e.name, prefix)
+		if rel == "" {
 			continue
 		}
 		clean, msg := skillRelPath(rel)
 		if msg != "" {
-			writeErr(w, 400, "压缩包含非法路径 "+f.Name+"："+msg)
+			writeErr(w, 400, "压缩包含非法路径 "+e.name+"："+msg)
 			return
 		}
 		if entries++; entries > maxSkillEntries {
@@ -1414,14 +1436,15 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, map[string]any{"name": name, "files": entries})
 }
 
-// readZipEntry reads a single named entry's bytes (capped) from an open zip.
-func readZipEntry(zr *zip.Reader, name string) ([]byte, error) {
-	f, err := zr.Open(name)
+// readZipEntry reads a single entry's bytes (capped). Takes the *zip.File rather than
+// a name because zr.Open rejects names that aren't valid UTF-8 (GBK-named archives).
+func readZipEntry(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxSkillFileBytes))
+	defer rc.Close()
+	return io.ReadAll(io.LimitReader(rc, maxSkillFileBytes))
 }
 
 func (s *Server) fsDeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -1445,23 +1468,52 @@ func (s *Server) fsDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"deleted": name})
 }
 
-// reFilePath is a strict ASCII whitelist for relative paths inside a skill directory.
-// Allowed: A-Z a-z 0-9 hyphen underscore dot forward-slash.
-// This blocks before any normalization: null bytes, backslash, %, unicode look-alikes,
-// control characters, and any other byte not in the set.
-// Go's net/http URL-decodes PathValue once (e.g. %2F→/ %2e→.), so an attacker who
-// sends %252e%252e gets the literal string "%2e%2e" here — the '%' fails the whitelist.
-var reFilePath = regexp.MustCompile(`^[A-Za-z0-9\-_./]+$`)
+// skillPathBlocked lists the ASCII characters a skill-relative path may not contain.
+// '\' is a Windows separator; '%' keeps double-URL-encoding tricks from surviving
+// (Go's net/http URL-decodes PathValue once — %2F→/ %2e→. — so an attacker sending
+// %252e%252e arrives here as the literal "%2e%2e" and is rejected on the '%'); '#'
+// and '?' would truncate the path when it travels back through a URL; the rest are
+// reserved on Windows filesystems.
+const skillPathBlocked = `\%#?*:"<>|`
+
+// skillPathRune reports whether r may appear in a client-supplied skill path.
+// It is a blacklist over Unicode rather than an ASCII whitelist so that 中文 (and any
+// other script) file names work, while everything that makes path validation hard is
+// still refused: control/format characters, look-alike whitespace, separators.
+func skillPathRune(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7f, r == utf8.RuneError:
+		return false // NUL & control characters, invalid UTF-8
+	case strings.ContainsRune(skillPathBlocked, r):
+		return false
+	case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r):
+		return false // zero-width joiners, bidi overrides (RLO 文件名伪装), private use
+	case r != ' ' && unicode.IsSpace(r):
+		return false // NBSP / 全角空格 之类：看着是空格，其实不是
+	}
+	return true
+}
+
+// maxSkillPathLen caps a relative path so a pathological name can't reach the syscall.
+const maxSkillPathLen = 512
 
 // skillRelPath validates a relative file path supplied by the client.
 // Returns the cleaned path and an empty error string on success.
-// Validation order matters: whitelist first (before Clean) so encoding tricks can't
-// survive normalization.
+// Validation order matters: character check first (before Clean) so encoding tricks
+// can't survive normalization.
 func skillRelPath(file string) (string, string) {
-	// 1. Whitelist — reject anything outside [A-Za-z0-9-_./] before normalization.
-	//    This alone defeats: null bytes, backslash, %, unicode, control chars.
-	if !reFilePath.MatchString(file) {
-		return "", "invalid path: only [A-Za-z0-9-_./] allowed"
+	// 1. Character check — before normalization. Defeats null bytes, backslash,
+	//    '%', control characters and unicode look-alikes; CJK names pass through.
+	if file == "" || len(file) > maxSkillPathLen {
+		return "", "invalid path: empty or too long"
+	}
+	if !utf8.ValidString(file) {
+		return "", "invalid path: not valid UTF-8"
+	}
+	for _, r := range file {
+		if !skillPathRune(r) {
+			return "", "invalid path: illegal character " + strconv.QuoteRune(r)
+		}
 	}
 	// 2. Reject ".." explicitly. With the whitelist above, encoding bypass is already
 	//    impossible, but we keep this check so the intent is obvious to reviewers.
