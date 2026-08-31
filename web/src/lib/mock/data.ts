@@ -15,6 +15,7 @@ import type {
   DailyTokenBucket,
   Edge,
   Finding,
+  FindingAsset,
   InterceptApprovalRow,
   InterceptPending,
   InterceptRule,
@@ -565,10 +566,24 @@ export const assetCounts: Record<string, number> = assets.reduce<Record<string, 
   return m;
 }, {});
 
+// assetRef 把资产 id 变成 finding 上挂的资产引用(label 与后端 coverageNodeLabel
+// 的取值顺序一致:URL > 域名 > IP > 应用名)。「按资产」视图的树就是靠这些引用
+// 把发现挂到资产上的。
+function assetRef(id: number): FindingAsset {
+  const asset = assets.find((candidate) => candidate.id === id);
+  if (!asset) throw new Error(`mock assetRef: unknown asset ${id}`);
+  return {
+    id: String(id),
+    type: asset.type,
+    label: asset.url || asset.domain || asset.ip || asset.app_name || String(id),
+  };
+}
+
 // ── Findings ─────────────────────────────────────────────────────────────────
 export const findings: Finding[] = [
   {
     id: "f-1",
+    assets: [assetRef(18)],
     vulnclass: "SQL Injection",
     name: "官网搜索接口报错型 SQL 注入",
     severity: "high",
@@ -584,6 +599,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-2",
+    assets: [assetRef(15)],
     vulnclass: "IDOR",
     severity: "high",
     status: "pending",
@@ -596,6 +612,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-3",
+    assets: [assetRef(3)],
     vulnclass: "Weak JWT",
     severity: "high",
     status: "pending",
@@ -607,6 +624,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-4",
+    assets: [assetRef(18)],
     vulnclass: "Reflected XSS",
     severity: "medium",
     status: "pending",
@@ -618,6 +636,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-5",
+    assets: [assetRef(2)],
     vulnclass: "Exposed .git",
     severity: "medium",
     status: "pending",
@@ -629,6 +648,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-6",
+    assets: [assetRef(17)],
     vulnclass: "Default Credentials",
     severity: "high",
     status: "pending",
@@ -641,6 +661,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-7",
+    assets: [assetRef(17)],
     vulnclass: "Open Redirect",
     severity: "low",
     status: "pending",
@@ -652,6 +673,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-8",
+    assets: [assetRef(17)],
     vulnclass: "Missing Rate Limit",
     severity: "medium",
     status: "pending",
@@ -663,6 +685,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-9",
+    assets: [assetRef(16)],
     vulnclass: "Verbose Error",
     severity: "low",
     status: "pending",
@@ -674,6 +697,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-10",
+    assets: [assetRef(4)],
     vulnclass: "Outdated Component",
     severity: "medium",
     status: "pending",
@@ -698,6 +722,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-12",
+    assets: [assetRef(4)],
     vulnclass: "Deserialization RCE",
     name: "shop 商城 Fastjson 反序列化远程命令执行",
     severity: "critical",
@@ -714,6 +739,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-13",
+    assets: [assetRef(19)],
     vulnclass: "Privilege Escalation",
     severity: "high",
     status: "pending",
@@ -727,6 +753,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-14",
+    assets: [assetRef(19), assetRef(21)],
     vulnclass: "Network Segmentation",
     severity: "medium",
     status: "pending",
@@ -739,6 +766,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-15",
+    assets: [assetRef(26)],
     vulnclass: "Unauthenticated RCE",
     severity: "high",
     status: "pending",
@@ -752,6 +780,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-16",
+    assets: [assetRef(21)],
     vulnclass: "Kerberoasting",
     severity: "high",
     status: "pending",
@@ -764,6 +793,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-17",
+    assets: [assetRef(20)],
     vulnclass: "Domain Compromise",
     name: "内网域控 DC01 完全控制（Domain Admin）",
     severity: "critical",
@@ -1291,7 +1321,8 @@ export const activity: Activity[] = [
     kind: "tool_result",
     tool: "bash",
     tool_use_id: "p0-probe",
-    summary: "acme.com → 302 → www；Server: nginx/1.24.0\nadmin.acme.com → 200，X-Powered-By 缺省，body 命中 element-ui/vue 特征",
+    summary:
+      "acme.com → 302 → www；Server: nginx/1.24.0\nadmin.acme.com → 200，X-Powered-By 缺省，body 命中 element-ui/vue 特征",
     detail: "admin 是独立后台登录页；确认五入口有效，可把初始意图描述写精准。",
   },
   {
@@ -1426,7 +1457,8 @@ export const activity: Activity[] = [
     tool: "prove_goal",
     tool_use_id: "p2-pg",
     summary: "prove_goal(g3, evidence=fa6)",
-    detail: "reason：i7 RCE 拿到 DMZ 立足点(fa4)、fa5 提权 root、fa6 证明第二网卡直连内网并 ping 通 DC01——『突破 DMZ 建立内网立足点』验收达成。",
+    detail:
+      "reason：i7 RCE 拿到 DMZ 立足点(fa4)、fa5 提权 root、fa6 证明第二网卡直连内网并 ping 通 DC01——『突破 DMZ 建立内网立足点』验收达成。",
   },
   {
     seq: 1205,
@@ -1503,7 +1535,8 @@ export const activity: Activity[] = [
     tool: "prove_goal",
     tool_use_id: "p3-pg",
     summary: "prove_goal(g4, evidence=F-09)",
-    detail: "reason：Jenkins 泄露 svc_deploy(Domain Admin) → psexec 控制 DC01 → secretsdump 全域哈希，F-09 已确认，『拿下内部靶标域控 DC01』达成。",
+    detail:
+      "reason：Jenkins 泄露 svc_deploy(Domain Admin) → psexec 控制 DC01 → secretsdump 全域哈希，F-09 已确认，『拿下内部靶标域控 DC01』达成。",
   },
   {
     seq: 1305,
@@ -1524,7 +1557,13 @@ export const activity: Activity[] = [
   },
 
   // ── 第 4 轮 · 后台达成，收敛 g2（2026-07-26 03:55）──
-  { seq: 1400, worker: "planner", ts: T("2026-07-26T03:55:00Z"), kind: "round", summary: "第 4 轮 · 后台达成，收敛 g2" },
+  {
+    seq: 1400,
+    worker: "planner",
+    ts: T("2026-07-26T03:55:00Z"),
+    kind: "round",
+    summary: "第 4 轮 · 后台达成，收敛 g2",
+  },
   {
     seq: 1401,
     worker: "planner",
@@ -1541,7 +1580,8 @@ export const activity: Activity[] = [
     tool: "prove_goal",
     tool_use_id: "p4-pg",
     summary: "prove_goal(g1, evidence=fa1)",
-    detail: "reason：i2 用外网泄露的硬编码口令 Acme@2021 成功登入 admin 后台（Element-UI），获取后台管理权限，g1 达成。",
+    detail:
+      "reason：i2 用外网泄露的硬编码口令 Acme@2021 成功登入 admin 后台（Element-UI），获取后台管理权限，g1 达成。",
   },
   {
     seq: 1403,
@@ -4038,7 +4078,9 @@ export function llmRecordDetail(id: number, records = llmRecords) {
       model: item.model,
       max_tokens: 8192,
       stream: true,
-      system: [{ type: "text", text: "你是一个授权渗透测试系统的「执行者」…（省略）", cache_control: { type: "ephemeral" } }],
+      system: [
+        { type: "text", text: "你是一个授权渗透测试系统的「执行者」…（省略）", cache_control: { type: "ephemeral" } },
+      ],
       messages: [{ role: "user", content: "开始执行 system 提示里的这条意图：只做它、只产生事实、做完即停。" }],
       tools: [
         {

@@ -66,6 +66,15 @@ function parseAssetURL(raw: string): URL | null {
   }
 }
 
+// hostOf 取一个节点代表的宿主:URL 取 hostname,「host:port」取 host,其余就是
+// 标签本身(根域名 / 子域名 / IP)。
+function hostOf(label: string): string {
+  const url = parseAssetURL(label);
+  if (url) return stripBrackets(url.hostname);
+  const hostPort = label.match(/^(.+):(\d+)$/);
+  return stripBrackets(hostPort ? hostPort[1] : label);
+}
+
 // shortLabel 去掉与父节点重复的前缀。service / endpoint 的 label 是完整 URL,而
 // 宿主域名/IP 上一行已经写过了 —— 深层节点本来就窄,再把 host 重复一遍,真正有
 // 信息量的端口和路径就全被截断掉了。完整值仍在 title 与面包屑里。
@@ -78,16 +87,17 @@ function shortLabel(node: FindingAssetNode, parent?: FindingAssetNode): string {
   }
   if (node.kind !== "service" && node.kind !== "endpoint") return node.label;
 
-  // 接口挂在服务下:直接砍掉服务那段前缀,剩下的就是路径。
+  // 父标签正好是自己的前缀(接口挂在同 URL 的服务下、服务挂在同 IP 下):直接砍掉。
   if (node.label.startsWith(parent.label)) {
     return node.label.slice(parent.label.length) || node.label;
   }
 
+  // 否则只有父节点确实就是这个 URL 的宿主时才简写,不然会丢掉辨识信息
+  // (比如服务因为缺子域名资产行而直接挂在根域名下,那就得显示完整 URL)。
+  if (hostOf(node.label) !== hostOf(parent.label)) return node.label;
+
   const url = parseAssetURL(node.label);
   if (!url) return node.label;
-  // 只有父节点确实就是这个 URL 的宿主时才简写,否则会丢掉辨识信息。
-  if (stripBrackets(url.hostname) !== parent.label) return node.label;
-
   if (node.kind === "endpoint") return `${url.pathname}${url.search}` || "/";
   const scheme = url.protocol.replace(":", "");
   const port = url.port || (url.protocol === "https:" ? "443" : "80");

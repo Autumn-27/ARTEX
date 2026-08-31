@@ -76,8 +76,15 @@ func (a *assetRow) coverageNode() CoverageGraphNode {
 	}
 }
 
-// label 复用覆盖图的标签规则(URL > domain > ip > app_name > root_domain)。
+// label 复用覆盖图的标签规则(URL > domain > ip > app_name > root_domain),但没有
+// URL 的服务(SMB、非 HTTP 端口等)要补上端口:否则它的标签会和宿主 IP/域名那行
+// 一模一样,树上父子两行看起来完全重复。
 func (a *assetRow) label() string {
+	if a.kind == "service" && a.url == "" {
+		if host, port := a.hostPort(); host != "" && port > 0 {
+			return host + ":" + strconv.Itoa(port)
+		}
+	}
 	n := a.coverageNode()
 	n.Key = assetKey(a.id)
 	return coverageNodeLabel(&n)
