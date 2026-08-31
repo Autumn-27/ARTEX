@@ -6,7 +6,6 @@ import {
   classifyCompanyScopeLine,
   companyScopeRuleError,
   isCompanyScopeKind,
-  MAX_COMPANY_SCOPE_RULES,
   normalizeCompanyScopeValue,
 } from "../company-scope";
 import type {
@@ -599,7 +598,6 @@ function mockScopeRows(
   existing: ScopeRow[] = [],
 ): { rows: ScopeRow[]; invalid: number; skipped: number } {
   if (!Array.isArray(input)) return { rows: [], invalid: 0, skipped: 0 };
-  if (input.length > MAX_COMPANY_SCOPE_RULES) throw new Error(`企业范围最多支持 ${MAX_COMPANY_SCOPE_RULES} 条`);
   let nextID =
     mockCompanies.flatMap((company) => company.scope ?? []).reduce((max, row) => Math.max(max, row.id), 0) + 1;
   const rows: ScopeRow[] = [];
@@ -635,9 +633,6 @@ function mockScopeRows(
     }
     keys.add(key);
     rows.push(row);
-  }
-  if (existing.length + rows.length > MAX_COMPANY_SCOPE_RULES) {
-    throw new Error(`企业范围规则过多：每个企业最多 ${MAX_COMPANY_SCOPE_RULES} 条`);
   }
   return { rows, invalid, skipped };
 }
@@ -1438,7 +1433,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const numericTaskID = mockTaskAssetID(seg[1]);
     if (!task || numericTaskID === undefined) throw new Error("任务不存在");
     if (Array.isArray(b.scope)) {
-      if (b.scope.length === 0 || b.scope.length > MAX_COMPANY_SCOPE_RULES) throw new Error("请填写有效测试范围");
+      if (b.scope.length === 0) throw new Error("请填写有效测试范围");
       const rules: CompanyScopeRule[] = b.scope.map((candidate, index) => {
         if (typeof candidate === "string") {
           const issue = classifyCompanyScopeLine(candidate, index + 1);

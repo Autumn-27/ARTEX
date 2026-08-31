@@ -151,20 +151,29 @@ func TestCompanyScopeHTTPErrorClassificationAndBounds(t *testing.T) {
 		}
 	})
 
-	t.Run("too many scope rules is 400", func(t *testing.T) {
-		scope := make([]map[string]string, db.MaxCompanyScopeRules+1)
+	t.Run("scope rule count is unbounded", func(t *testing.T) {
+		scope := make([]map[string]string, 300)
 		for i := range scope {
-			scope[i] = map[string]string{"kind": "keyword", "value": fmt.Sprintf("keyword-%d", i)}
+			scope[i] = map[string]string{"kind": "keyword", "value": fmt.Sprintf("unbounded-%d-%d", time.Now().UnixNano(), i)}
 		}
-		body, err := json.Marshal(map[string]any{"name": "Too Many Scope Rules", "scope": scope})
+		body, err := json.Marshal(map[string]any{"name": fmt.Sprintf("Unbounded Scope %d", time.Now().UnixNano()), "scope": scope})
 		if err != nil {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodPost, "/api/companies", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		s.createCompany(rec, req)
-		if rec.Code != http.StatusBadRequest {
+		var created struct {
+			ID    int64 `json:"id"`
+			Added int   `json:"scope_added"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &created)
+		defer func() { _ = m.pg.Companies().DeleteCompany(created.ID) }()
+		if rec.Code != http.StatusCreated {
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if created.Added != len(scope) {
+			t.Fatalf("scope_added=%d want=%d", created.Added, len(scope))
 		}
 	})
 

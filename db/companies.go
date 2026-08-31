@@ -52,9 +52,9 @@ var (
 )
 
 const (
-	// MaxCompanyScopeRules bounds both request processing and the total number
-	// of persisted rules for one company.
-	MaxCompanyScopeRules = 256
+	// 企业范围不限制规则条数:逐个 IP / 域名录入的范围动辄上千条,封顶只会逼用户
+	// 拆成多个企业。请求体大小(server 侧 maxCompanyMutationBodyBytes)仍然兜底。
+	//
 	// Raw and normalized textual scope payloads are bounded by Unicode rune
 	// count so multi-byte input is treated consistently by the API and DB layer.
 	MaxCompanyScopeRawRunes   = 1024
@@ -69,12 +69,8 @@ func (e *CompanyScopeValidationError) Error() string { return e.Message }
 
 // ValidateCompanyScopeInputBounds applies request-wide limits before parsing.
 // Store methods call it again so non-HTTP callers cannot bypass the limits.
+// 只约束单条规则的长度,不限制条数。
 func ValidateCompanyScopeInputBounds(inputs []ScopeInput) error {
-	if len(inputs) > MaxCompanyScopeRules {
-		return &CompanyScopeValidationError{Message: fmt.Sprintf(
-			"企业范围规则过多: 最多 %d 条", MaxCompanyScopeRules,
-		)}
-	}
 	for i, input := range inputs {
 		if utf8.RuneCountInString(input.Value) > MaxCompanyScopeRawRunes {
 			return &CompanyScopeValidationError{Message: fmt.Sprintf(
@@ -373,9 +369,6 @@ func (s *CompanyStore) AddScopeInputsChecked(companyID int64, inputs []ScopeInpu
 	if err != nil {
 		return 0, 0, invalid, errors, err
 	}
-	if err := ensureCompanyScopeCapacityTx(tx, companyID); err != nil {
-		return 0, 0, invalid, errors, err
-	}
 	if needsAttribution {
 		warning, err := recomputeAttributionTx(tx)
 		if err != nil {
@@ -426,19 +419,6 @@ func ensureCompanyExistsTx(tx *sql.Tx, companyID int64) error {
 	}
 	if !exists {
 		return ErrCompanyNotFound
-	}
-	return nil
-}
-
-func ensureCompanyScopeCapacityTx(tx *sql.Tx, companyID int64) error {
-	var count int
-	if err := tx.QueryRow(`SELECT count(*) FROM company_scope WHERE company_id = $1`, companyID).Scan(&count); err != nil {
-		return err
-	}
-	if count > MaxCompanyScopeRules {
-		return &CompanyScopeValidationError{Message: fmt.Sprintf(
-			"企业范围规则过多: 每个企业最多 %d 条", MaxCompanyScopeRules,
-		)}
 	}
 	return nil
 }
@@ -712,9 +692,6 @@ func (s *CompanyStore) UpdateScopeInputsChecked(companyID int64, inputs []ScopeI
 	}
 	added, _, _, err = insertScopeRulesTx(tx, companyID, rules, reason)
 	if err != nil {
-		return 0, invalid, errs, err
-	}
-	if err := ensureCompanyScopeCapacityTx(tx, companyID); err != nil {
 		return 0, invalid, errs, err
 	}
 	// Rebuild even for an empty replacement because removing the old rules may

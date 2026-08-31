@@ -1,6 +1,5 @@
 import type { CompanyScopeKind, CompanyScopeRule } from "@/lib/types";
 
-export const MAX_COMPANY_SCOPE_RULES = 256;
 export const MAX_COMPANY_SCOPE_VALUE_LENGTH = 1024;
 
 export type CompanyScopeTextIssue = {
@@ -173,7 +172,7 @@ export function classifyCompanyScopeLine(
 
 export function parseCompanyScopeText(
   value: string,
-  options: { preservedRules?: CompanyScopeRule[]; maxRules?: number } = {},
+  options: { preservedRules?: CompanyScopeRule[] } = {},
 ): ParsedCompanyScopeText {
   const nonEmpty = value
     .split(/\r?\n/)
@@ -190,13 +189,6 @@ export function parseCompanyScopeText(
     const preservedRule = queue?.shift();
     return classifyCompanyScopeLine(raw, line, preservedRule);
   });
-  const maxRules = options.maxRules ?? MAX_COMPANY_SCOPE_RULES;
-  if (nonEmpty.length > maxRules) {
-    issues.push({
-      line: nonEmpty[Math.max(0, maxRules)]?.line ?? 1,
-      error: `最多允许 ${maxRules} 条范围，当前 ${nonEmpty.length} 条`,
-    });
-  }
   return {
     rules: issues.flatMap((item) => (item.rule ? [item.rule] : [])),
     errors: issues.flatMap((item) => (item.error ? [{ line: item.line, error: item.error }] : [])),

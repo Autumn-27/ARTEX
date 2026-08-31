@@ -180,9 +180,9 @@ func TestCompanyScopeLimitsAndCheckedErrors(t *testing.T) {
 	if err := ValidateCompanyScopeInputBounds([]ScopeInput{{Kind: "keyword", Value: boundary + "界"}}); !errors.As(err, &validationErr) {
 		t.Fatalf("oversized raw value error=%v want CompanyScopeValidationError", err)
 	}
-	tooMany := make([]ScopeInput, MaxCompanyScopeRules+1)
-	if err := ValidateCompanyScopeInputBounds(tooMany); !errors.As(err, &validationErr) {
-		t.Fatalf("too many rules error=%v want CompanyScopeValidationError", err)
+	// 条数不再设上限,只校验单条长度。
+	if err := ValidateCompanyScopeInputBounds(make([]ScopeInput, 1000)); err != nil {
+		t.Fatalf("rule count should be unbounded, got %v", err)
 	}
 
 	d, _, companies := testSetup(t)
@@ -193,24 +193,26 @@ func TestCompanyScopeLimitsAndCheckedErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanupCompany(d, companyID)
-	rules := make([]ScopeInput, MaxCompanyScopeRules)
+	// 曾经封顶 256 条,逐个 IP / 域名录范围的企业很容易撞上;现在不限条数。
+	const bulk = 300
+	rules := make([]ScopeInput, bulk)
 	for i := range rules {
 		rules[i] = ScopeInput{Kind: "keyword", Value: fmt.Sprintf("limit-%d-%d", stamp, i)}
 	}
-	if added, _, _, _, err := companies.AddScopeInputsChecked(companyID, rules, "test"); err != nil || added != MaxCompanyScopeRules {
-		t.Fatalf("fill scope capacity: added=%d err=%v", added, err)
+	if added, _, _, _, err := companies.AddScopeInputsChecked(companyID, rules, "test"); err != nil || added != bulk {
+		t.Fatalf("bulk scope insert: added=%d want=%d err=%v", added, bulk, err)
 	}
 	if added, _, _, _, err := companies.AddScopeInputsChecked(companyID, []ScopeInput{
-		{Kind: "keyword", Value: fmt.Sprintf("limit-%d-overflow", stamp)},
-	}, "test"); added != 0 || !errors.As(err, &validationErr) {
-		t.Fatalf("scope overflow: added=%d err=%v", added, err)
+		{Kind: "keyword", Value: fmt.Sprintf("limit-%d-extra", stamp)},
+	}, "test"); added != 1 || err != nil {
+		t.Fatalf("append past the old cap: added=%d err=%v", added, err)
 	}
 	var count int
 	if err := d.QueryRow(`SELECT count(*) FROM company_scope WHERE company_id=$1`, companyID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != MaxCompanyScopeRules {
-		t.Fatalf("failed capacity mutation changed scope count=%d want=%d", count, MaxCompanyScopeRules)
+	if count != bulk+1 {
+		t.Fatalf("scope count=%d want=%d", count, bulk+1)
 	}
 
 	missingID := companyID + 1_000_000_000

@@ -59,7 +59,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { MAX_COMPANY_SCOPE_RULES, parseCompanyScopeText } from "@/lib/company-scope";
+import { parseCompanyScopeText } from "@/lib/company-scope";
 import type { Asset, Company, CompanyScopeRule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -1510,11 +1510,7 @@ function AppendScopeDialog({ company, onSaved }: { company: Company; onSaved: ()
   const [scopeText, setScopeText] = React.useState("");
   const [reason, setReason] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  const remainingScopeRules = Math.max(0, MAX_COMPANY_SCOPE_RULES - (company.scope?.length || 0));
-  const parsedScope = React.useMemo(
-    () => parseCompanyScopeText(scopeText, { maxRules: remainingScopeRules }),
-    [remainingScopeRules, scopeText],
-  );
+  const parsedScope = React.useMemo(() => parseCompanyScopeText(scopeText), [scopeText]);
 
   React.useEffect(() => {
     if (!open) return;
