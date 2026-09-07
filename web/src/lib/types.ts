@@ -913,6 +913,9 @@ export interface LLMProfile {
   // 上限用哪个请求字段名，仅 format="openai" 有意义：
   // ""=max_tokens(默认) | "max_completion_tokens"(OpenAI 推理模型只认它)
   max_tokens_field?: string;
+  // 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
+  // ""=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
+  session_header_key?: string;
 }
 
 // ---- LLM 轮询（故障转移）----

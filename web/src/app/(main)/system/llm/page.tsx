@@ -324,6 +324,7 @@ function ProfileSheet({
   const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
+  const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -351,6 +352,7 @@ function ProfileSheet({
     setStreaming(profile?.streaming ?? true);
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));
+    setSessionHeaderKey(profile?.session_header_key ?? "");
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -437,6 +439,7 @@ function ProfileSheet({
         // 字段名开关只对 openai(Chat Completions) 有意义，其它格式一律回落到默认；
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
+        session_header_key: sessionHeaderKey.trim(),
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -567,6 +570,22 @@ function ProfileSheet({
             <p className="text-muted-foreground text-xs">
               仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如
               socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
+            </p>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-session-header">自定义会话头（可选）</Label>
+            <Input
+              id="p-session-header"
+              className="font-mono"
+              placeholder="如 x-session-id（留空=不发送）"
+              value={sessionHeaderKey}
+              onChange={(e) => setSessionHeaderKey(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              填写头名后，每次请求都会带上这个 HTTP 头，头值自动填为{" "}
+              <b>当前会话的 session id</b>（chat 会话如 conv-12、worker 如 exp3-worker-i87）。用于按 session-id
+              头做提示缓存 / 粘性路由的网关；同一会话多轮稳定、不同会话互不相同。留空则不发送。
             </p>
           </div>
 

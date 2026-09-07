@@ -313,6 +313,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
+	cfg.SessionHeaderKey = p.SessionHeaderKey
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -336,11 +337,13 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	streaming := true // 旧库/新建默认流式
 	var maxTokens int
 	var maxTokensField string
+	var sessionHeaderKey string
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
 				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
 				maxTokens, maxTokensField = p.MaxTokens, p.MaxTokensField
+				sessionHeaderKey = p.SessionHeaderKey
 				break
 			}
 		}
@@ -350,7 +353,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
-		MaxTokens: maxTokens, MaxTokensField: maxTokensField,
+		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
 	})
 	if err != nil {
 		return err
@@ -508,6 +511,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
+	cfg.SessionHeaderKey = p.SessionHeaderKey
 	if cfg.APIKey == "" {
 		return cfg, false
 	}

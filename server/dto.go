@@ -587,28 +587,32 @@ type LLMProfileDTO struct {
 	// (''=max_tokens | 'max_completion_tokens'，仅 openai 格式有意义)。
 	MaxTokens      int    `json:"max_tokens"`
 	MaxTokensField string `json:"max_tokens_field"`
+	// 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
+	// ''=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
+	SessionHeaderKey string `json:"session_header_key"`
 }
 
 func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 	return LLMProfileDTO{
-		ID:              i64s(p.ID),
-		Name:            p.Name,
-		Format:          p.Format,
-		BaseURL:         p.BaseURL,
-		Proxy:           p.Proxy,
-		Model:           p.Model,
-		APIKeyHint:      p.APIKeyHint,
-		RatePerSecond:   p.RatePerSecond,
-		RatePerMinute:   p.RatePerMinute,
-		ContextWindowK:  p.ContextWindowK,
-		ThinkingType:    p.ThinkingType,
-		ReasoningEffort: p.ReasoningEffort,
-		IsDefault:       p.IsDefault,
-		Priority:        p.Priority,
-		PoolExclude:     p.PoolExclude,
-		Streaming:       p.Streaming,
-		MaxTokens:       p.MaxTokens,
-		MaxTokensField:  p.MaxTokensField,
+		ID:               i64s(p.ID),
+		Name:             p.Name,
+		Format:           p.Format,
+		BaseURL:          p.BaseURL,
+		Proxy:            p.Proxy,
+		Model:            p.Model,
+		APIKeyHint:       p.APIKeyHint,
+		RatePerSecond:    p.RatePerSecond,
+		RatePerMinute:    p.RatePerMinute,
+		ContextWindowK:   p.ContextWindowK,
+		ThinkingType:     p.ThinkingType,
+		ReasoningEffort:  p.ReasoningEffort,
+		IsDefault:        p.IsDefault,
+		Priority:         p.Priority,
+		PoolExclude:      p.PoolExclude,
+		Streaming:        p.Streaming,
+		MaxTokens:        p.MaxTokens,
+		MaxTokensField:   p.MaxTokensField,
+		SessionHeaderKey: p.SessionHeaderKey,
 	}
 }
 
