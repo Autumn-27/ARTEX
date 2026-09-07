@@ -43,21 +43,33 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	}
 
 	// worker dual-text via {{if .ProxyAddr}} in a user template, plus the code tail:
-	// [B] trafficTool present only with a proxy, [C] artifact spec always present.
+	// [B] trafficTool present only when RECORDING (caCert set — the MITM is on, so
+	// the traffic_* tools exist), [C] artifact spec always present. The trafficTool
+	// block is gated on the CA (arg 2), NOT on ProxyAddr — a global egress proxy
+	// with capture off routes traffic but records nothing.
 	PromptOverride = func(k string) (string, bool) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
-	withProxy := workerSystem("127.0.0.1:8080", "/data", "/data")
-	if !strings.HasPrefix(withProxy, "走代理 127.0.0.1:8080") {
-		t.Fatalf("worker proxy branch body: %q", withProxy)
+	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data")
+	if !strings.HasPrefix(recording, "走代理 127.0.0.1:8080") {
+		t.Fatalf("worker proxy branch body: %q", recording)
 	}
-	if !strings.Contains(withProxy, "traffic_search") {
-		t.Fatalf("worker with proxy should inject trafficTool: %q", withProxy)
+	if !strings.Contains(recording, "traffic_search") {
+		t.Fatalf("worker while recording should inject trafficTool: %q", recording)
 	}
-	if !strings.Contains(withProxy, "中间产物输出规约") {
-		t.Fatalf("worker missing artifact tail: %q", withProxy)
+	if !strings.Contains(recording, "中间产物输出规约") {
+		t.Fatalf("worker missing artifact tail: %q", recording)
 	}
-	noProxy := workerSystem("", "/data", "/data")
+	// Egress proxy set but capture OFF (no CA): the ProxyAddr template branch still
+	// renders, but the trafficTool block must NOT — those tools are not registered.
+	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data")
+	if !strings.HasPrefix(egressOnly, "走代理 127.0.0.1:8080") {
+		t.Fatalf("worker egress-only branch body: %q", egressOnly)
+	}
+	if strings.Contains(egressOnly, "traffic_search") {
+		t.Fatalf("worker without recording must NOT inject trafficTool: %q", egressOnly)
+	}
+	noProxy := workerSystem("", "", "/data", "/data")
 	if !strings.HasPrefix(noProxy, "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}

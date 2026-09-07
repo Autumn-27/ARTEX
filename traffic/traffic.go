@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_refs_ex ON blob_refs(exchange_id);
 // must degrade to "no full-text search" rather than take the whole recorder down.
 // trigram (not the default unicode61) is required for two reasons this subsystem
 // depends on: it matches arbitrary substrings — "ssw0r" finds "P@ssw0rd" — and it
-// handles CJK, which unicode61 does not tokenize. Contentless (content='') keeps
+// handles CJK, which unicode61 does not tokenize. Contentless (content=”) keeps
 // only the index, since the text itself lives in exchange_bodies; contentless_delete
 // lets rows be deleted without replaying the original text back in.
 const ftsSchema = `CREATE VIRTUAL TABLE IF NOT EXISTS ex_fts USING fts5(
@@ -120,6 +120,11 @@ type Traffic struct {
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
 	pass sync.Map // hostname(string) -> struct{}
+	// upstream is the global egress proxy every captured request is forwarded
+	// through (nil = dial targets directly). Both the intercepted and the
+	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
+	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
+	upstream atomic.Pointer[url.URL]
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -159,12 +164,15 @@ func Open(dir, addr string) (*Traffic, error) {
 		db.Close()
 		return nil, err
 	}
-	// Dial targets DIRECTLY. go-mitmproxy's default upstream uses
+	// Upstream selection. By default (no global egress proxy set) targets are
+	// dialed DIRECTLY: go-mitmproxy's own default upstream uses
 	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment
 	// (a VPN/system proxy) would make it forward target requests through that
-	// external proxy — which can't reach the target → 502. We capture target
-	// traffic directly, never via the host's proxy.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return nil, nil })
+	// external proxy — which can't reach the target → 502. Returning nil forces
+	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
+	// every captured request — intercepted AND transparently tunneled — is
+	// forwarded through it instead, so no host leaks the real source IP.
+	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
@@ -188,6 +196,46 @@ func hostOnly(hostport string) string {
 
 // ProxyAddr returns the address workers should set as HTTP(S)_PROXY.
 func (t *Traffic) ProxyAddr() string { return "http://127.0.0.1" + t.addr }
+
+// SetUpstreamProxy points every captured request at a global egress proxy
+// (http/https/socks5, optional user:pass in the URL). An empty raw string clears
+// it, restoring direct dialing. The change is atomic and takes effect on the next
+// connection — no restart, no proxy rebuild. go-mitmproxy dials all three schemes
+// itself, so socks5 works uniformly here regardless of the target tool.
+func (t *Traffic) SetUpstreamProxy(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		t.upstream.Store(nil)
+		return nil
+	}
+	u, err := ValidateProxyURL(raw)
+	if err != nil {
+		return err
+	}
+	t.upstream.Store(u)
+	return nil
+}
+
+// ValidateProxyURL parses and checks a proxy URL (http/https/socks5, optional
+// user:pass), returning the parsed URL. Exposed so callers can validate a global
+// proxy before persisting it even when the traffic proxy itself is disabled.
+func ValidateProxyURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("解析代理地址 %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5":
+	case "":
+		return nil, fmt.Errorf("代理 %q 缺少协议(用 http://、https:// 或 socks5://)", raw)
+	default:
+		return nil, fmt.Errorf("不支持的代理协议 %q(用 http、https 或 socks5)", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("代理 %q 缺少主机地址", raw)
+	}
+	return u, nil
+}
 
 // CACertPath returns the PEM CA cert clients must trust to verify HTTPS through
 // the MITM proxy (go-mitmproxy writes it here on first start).

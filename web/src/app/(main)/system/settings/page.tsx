@@ -26,6 +26,8 @@ export default function SystemSettingsPage() {
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
+  const [globalProxyInput, setGlobalProxyInput] = React.useState("");
+  const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -46,6 +48,7 @@ export default function SystemSettingsPage() {
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy || "");
+    setGlobalProxyInput(s.global_proxy || "");
     setPyInterp(s.python_interpreter || "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
@@ -180,6 +183,18 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingProxy(false));
   };
 
+  const saveGlobalProxy = () => {
+    setSavingGlobalProxy(true);
+    api
+      .setSettings({ global_proxy: globalProxyInput.trim() })
+      .then((s) => {
+        apply(s);
+        toast.success(globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingGlobalProxy(false));
+  };
+
   // Run a real "test" search ("test") against the CURRENT form values (backend +
   // proxy + entered key), falling back to saved values server-side. Toasts result.
   const runTest = () => {
@@ -238,6 +253,48 @@ export default function SystemSettingsPage() {
               disabled={!loaded || saving}
               onCheckedChange={toggleTraffic}
             />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
+              全局代理
+            </CardTitle>
+            <CardDescription>
+              所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>，可带{" "}
+              <code>user:pass</code> 认证。留空=直连。
+              <br />
+              开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>（流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入
+              Agent 的 bash / WebFetch 出网。与网络搜索代理、LLM 代理相互独立。
+              <br />
+              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl 可用，部分工具可能忽略）；
+              若主要用 socks5，建议开启流量捕获——此路径由 MITM 亲自拨号，工具无感知、稳定生效。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <Label htmlFor="global-proxy" className="text-sm font-normal text-muted-foreground">
+              代理地址
+            </Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="global-proxy"
+                autoComplete="off"
+                placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
+                value={globalProxyInput}
+                disabled={!loaded || savingGlobalProxy}
+                onChange={(e) => setGlobalProxyInput(e.target.value)}
+              />
+              <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
+                保存
+              </Button>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              {globalProxyInput.trim()
+                ? "已配置 · 所有目标流量经此代理出网"
+                : "未配置 · 目标流量直连出网"}
+            </p>
           </CardContent>
         </Card>
 

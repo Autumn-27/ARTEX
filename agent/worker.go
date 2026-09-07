@@ -164,11 +164,14 @@ func (w *Worker) SetProxy(addr, caCert string) { w.proxyAddr, w.proxyCACert = ad
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 
 // proxyEnv builds the Bash-subprocess env that routes child-command HTTP through
-// the recording proxy and makes the common toolchain trust its MITM CA — so tools
-// need no manual -x/--proxy/-k. Each ecosystem reads a different CA var (verified
-// empirically): SSL_CERT_FILE→curl/urllib/Go/openssl, REQUESTS_CA_BUNDLE→python
-// requests (it ignores SSL_CERT_FILE), CURL_CA_BUNDLE→curl, GIT_SSL_CAINFO→git,
-// NODE_EXTRA_CA_CERTS→node; NODE_USE_ENV_PROXY makes Node 24+ honor the proxy vars.
+// the egress proxy (the recording MITM when capture is on, or the global proxy
+// directly when it is off) and, only when a MITM CA is present, makes the common
+// toolchain trust it — so tools need no manual -x/--proxy/-k. Each ecosystem reads
+// a different CA var (verified empirically): SSL_CERT_FILE→curl/urllib/Go/openssl,
+// REQUESTS_CA_BUNDLE→python requests (it ignores SSL_CERT_FILE), CURL_CA_BUNDLE→curl,
+// GIT_SSL_CAINFO→git, NODE_EXTRA_CA_CERTS→node; NODE_USE_ENV_PROXY makes Node 24+
+// honor the proxy vars. ALL_PROXY is set too so a socks5 egress proxy (which curl
+// only reads from ALL_PROXY, not HTTP(S)_PROXY) works in the capture-off path.
 // Empty proxyAddr → nil (direct, unchanged env).
 func proxyEnv(proxyAddr, caCert string) []string {
 	if proxyAddr == "" {
@@ -177,6 +180,7 @@ func proxyEnv(proxyAddr, caCert string) []string {
 	env := []string{
 		"HTTP_PROXY=" + proxyAddr, "HTTPS_PROXY=" + proxyAddr,
 		"http_proxy=" + proxyAddr, "https_proxy=" + proxyAddr,
+		"ALL_PROXY=" + proxyAddr, "all_proxy=" + proxyAddr, // socks5 egress: curl reads only this
 		"NODE_USE_ENV_PROXY=1", // Node 24+: honor HTTP(S)_PROXY in built-in fetch/http
 	}
 	if caCert != "" {
@@ -215,9 +219,12 @@ const workerDefaultTmpl = `你是一个授权渗透测试系统的"执行者"(wo
 只在授权范围内操作；若系统提示顶部附有【操作约束】，那是最高优先级红线——任何命令/探测在执行前先自检是否违反，违反即不做（哪怕它落在你领到的意图里）。完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
 
 // workerTrafficBlock is 段 [B]: the traffic-tool note, code-injected only when
-// traffic capture is on (proxyAddr set). Not stored, not editable.
-func workerTrafficBlock(proxyAddr string) string {
-	if proxyAddr == "" {
+// traffic capture (recording) is on — i.e. the traffic_* tools actually exist.
+// Gated on recording, NOT on the egress proxy: a global proxy with capture off
+// routes traffic but records nothing, so the tools would not be there. Not stored,
+// not editable.
+func workerTrafficBlock(recording bool) string {
+	if !recording {
 		return ""
 	}
 	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；可用 body_contains 在请求/响应正文里做全文搜索(至少 3 字符，支持子串和中文，如找密码/密钥/报错/内网地址)；要看某条原文用 traffic_get(id)，其中超大正文显示为 @blob sha256:<hash>，用 traffic_blob(hash) 分段取全文。"
@@ -254,9 +261,11 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 // cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
-func workerSystem(proxyAddr, dataDir, runDir string) string {
+func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
-	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
+	// caCert is present only when the recording MITM is on, which is exactly when
+	// the traffic_* tools are registered — so it gates the traffic-tool note.
+	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -351,7 +360,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 压缩。本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(w.proxyAddr, w.workDir, runDir)
+	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
