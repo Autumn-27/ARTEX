@@ -614,8 +614,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.addFinding(), t.recordFact(),
 		// cross-work retrieval
 		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
-		// asset management (handlers guard nil store internally)
-		t.insertAssets(), t.addCompanyScope(), t.listAssets(), t.listCompanies(),
+		// asset management (handlers guard nil store internally)。
+		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
+		t.insertAssets(), t.listAssets(), t.listCompanies(),
 	}
 }
 

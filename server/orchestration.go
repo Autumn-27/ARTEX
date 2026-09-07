@@ -448,6 +448,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
+	s.seedCompanyScopeRebind()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
@@ -713,6 +714,28 @@ func (s *Server) seedPlannerDefaultBindings() {
 	}
 	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"report_finding"}); err != nil {
 		log.Printf("[planner] report_finding 默认绑定失败: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// seedCompanyScopeRebind changes add_company_scope's default binding ONCE on
+// existing DBs (guarded by a settings flag): the tool moves off worker and onto
+// planner — defining a company's asset scope is a planning/main/auto concern, not
+// something a worker does mid-exploration. Fresh DBs already get planner via
+// PlannerTools() and lack worker via WorkerTools(); this only backfills old rows.
+// One-shot + flag-guarded so a user who later re-binds worker isn't overridden.
+func (s *Server) seedCompanyScopeRebind() {
+	const flag = "company_scope_rebind_v1" // worker→planner 默认绑定切换
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"add_company_scope"}); err != nil {
+		log.Printf("[planner] add_company_scope 默认绑定失败: %v", err)
+		return
+	}
+	if err := s.m.pg.RemoveAgentFromTool("worker", "add_company_scope"); err != nil {
+		log.Printf("[worker] add_company_scope 解绑失败: %v", err)
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
