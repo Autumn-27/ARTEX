@@ -412,6 +412,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
+	// 平行命名——后者只是它的最新窗口（≤15）截断视图。两键并排即自描述："看到的是 N/总数"，
+	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
+	if dt, err := t.ts.CountFinishedIntents(); err == nil {
+		out["done_intents_total"] = dt
+	}
 	out["frontier_open"] = len(fr)
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
@@ -532,16 +538,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				m["scope"] = scope
 			}
 			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
-				const hostContextLimit = 500
-				visible := hosts
-				if len(visible) > hostContextLimit {
-					visible = visible[:hostContextLimit]
-				}
-				m["hosts"] = visible
+				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
+				// 都重复携带的大量字符串，对规划决策价值有限）；具体主机按需 list_assets 查。
 				m["host_count"] = len(hosts)
-				if len(visible) < len(hosts) {
-					m["hosts_truncated"] = true
-				}
 			}
 			if len(m) > 0 {
 				out["coverage"] = m

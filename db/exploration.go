@@ -706,6 +706,18 @@ func (s *ExplorationStore) countByKindFiltered(kind, q string) (int, error) {
 	return n, err
 }
 
+// CountFinishedIntents counts this exploration's intents in a terminal explored
+// state (done/blocked/exhausted) — graph_overview's done_intents_total, so the planner
+// knows recent_done_intents (capped at a recent window) is a truncated view and
+// stays cautious about "already tried" dedup. Excludes 'stopped' (killed/deleted),
+// matching exactly what recent_done_intents surfaces.
+func (s *ExplorationStore) CountFinishedIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('done','blocked','exhausted')`, s.expID).Scan(&n)
+	return n, err
+}
+
 // GetNode returns one node of this exploration by id (nil, nil if not found).
 func (s *ExplorationStore) GetNode(id int64) (*Node, error) {
 	n, err := scanNode(s.db.QueryRow(`SELECT `+nodeCols+` FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, id, s.expID))
