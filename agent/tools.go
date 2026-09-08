@@ -1947,6 +1947,9 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
+		// list_assets：规划时按 DSL 检索全资产库（配合 list_untested_assets 的"范围内未测"视角，
+		// 补上"按域名/指纹/端口/状态码等条件在整库里查"的能力）。
+		t.listAssets(),
 		// add_company_scope：规划时可把域名/IP/CIDR/ICP/关键词纳入某公司的资产范围（自动认领命中资产）。
 		t.addCompanyScope(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。

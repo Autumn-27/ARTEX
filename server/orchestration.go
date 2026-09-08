@@ -448,6 +448,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
+	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
@@ -714,6 +715,23 @@ func (s *Server) seedPlannerDefaultBindings() {
 	}
 	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"report_finding"}); err != nil {
 		log.Printf("[planner] report_finding 默认绑定失败: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// seedPlannerListAssetsBinding adds "planner" to list_assets's binding ONCE
+// (guarded by a settings flag), so existing DBs — whose list_assets row was seeded
+// as auto/pentest-only — also let the planner query the asset store by DSL. Fresh
+// DBs already get it via PlannerTools(); this only backfills without overriding a
+// user unbind.
+func (s *Server) seedPlannerListAssetsBinding() {
+	const flag = "planner_list_assets_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"list_assets"}); err != nil {
+		log.Printf("[planner] list_assets 默认绑定失败: %v", err)
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
