@@ -178,10 +178,28 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已停止（不再执行），其原因已作为事实挂在该意图上；请据此重新规划。", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		default: // "done"
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), workerOutput(ts, ev.IntentID)))
+			if fids := factIDsYielded(ts, ev.IntentID); fids != "" {
+				b.WriteString(fmt.Sprintf("；本意图新产生的事实 id：%s ", fids))
+			}
 		}
 	}
 	b.WriteString("\n（完整细节可 node_detail / get_worker_output / list_findings 再查。）")
 	return b.String()
+}
+
+// factIDsYielded lists the fact ids an intent produced this run as "#12、#15", so the
+// planner can jump straight to the round's incremental facts. Empty (best-effort) when
+// the intent yielded no facts or the lookup fails.
+func factIDsYielded(ts *db.ExplorationStore, id int64) string {
+	ids, err := ts.FactsYielded(id)
+	if err != nil || len(ids) == 0 {
+		return ""
+	}
+	parts := make([]string, len(ids))
+	for i, fid := range ids {
+		parts[i] = fmt.Sprintf("#%d", fid)
+	}
+	return strings.Join(parts, "、")
 }
 
 // intentSummary reads an intent node's one-line summary (best-effort, "?" on miss).
@@ -381,7 +399,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    p.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

@@ -768,6 +768,31 @@ func (s *ExplorationStore) Edges(limit int) ([]Edge, error) {
 	return out, rows.Err()
 }
 
+// FactsYielded returns the ids of fact nodes an intent produced (intent --yields-->
+// fact), oldest first. Used to spell out the round's incremental facts to the planner
+// alongside the finished worker's output. Best-effort: returns nil for an intent with
+// no facts (or a missing one).
+func (s *ExplorationStore) FactsYielded(intentID int64) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT n.id
+		FROM exploration_edges e
+		JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3 AND n.kind=$4
+		ORDER BY n.id`, s.expID, intentID, RelYields, KindFact)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // FindingLineage returns the sub-DAG that leads FROM the exploration root TO the
 // given node: the node itself plus all its ancestors (nodes reverse-reachable by
 // following edges backward), and every edge whose both endpoints are in that set.
