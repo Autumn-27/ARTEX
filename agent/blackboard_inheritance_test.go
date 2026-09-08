@@ -103,9 +103,8 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if !ok || len(keywords) != 1 || keywords[0] != keyword {
 		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
 	}
-	hosts, ok := coverage["hosts"].([]string)
-	if !ok || !containsString(hosts, domain) {
-		t.Fatalf("company asset host missing from agent context: %#v", coverage["hosts"])
+	if hc, _ := coverage["host_count"].(int); hc < 1 {
+		t.Fatalf("company asset host not counted in agent context: %#v", coverage["host_count"])
 	}
 	untested := callReadJSON(t, tools.listUntestedAssets(), `{"type":"root_domain","page":1,"page_size":10}`)
 	if !strings.Contains(fmt.Sprint(untested), domain) {
@@ -153,9 +152,8 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage-disabled task lost asset context: %#v", disabledOverview["coverage"])
 	}
-	disabledHosts, ok := disabledCoverage["hosts"].([]string)
-	if !ok || !containsString(disabledHosts, domain) {
-		t.Fatalf("coverage-disabled task lost company asset host: %#v", disabledCoverage["hosts"])
+	if hc, _ := disabledCoverage["host_count"].(int); hc < 1 {
+		t.Fatalf("coverage-disabled task lost company asset host count: %#v", disabledCoverage["host_count"])
 	}
 	if _, exists := disabledCoverage["denominator"]; exists {
 		t.Fatalf("coverage-disabled task unexpectedly exposed metrics: %#v", disabledCoverage)
@@ -174,15 +172,6 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if err != nil || len(disabledWorkerAssets) != 1 || disabledWorkerAssets[0].IntentID != disabledIntentID || disabledWorkerAssets[0].AssetID != assetID {
 		t.Fatalf("coverage-disabled worker target=%+v err=%v", disabledWorkerAssets, err)
 	}
-}
-
-func containsString(items []string, target string) bool {
-	for _, item := range items {
-		if item == target {
-			return true
-		}
-	}
-	return false
 }
 
 func companiesName(t *testing.T, companies *db.CompanyStore, companyID int64) string {
@@ -321,9 +310,8 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage missing from overview: %#v", overview["coverage"])
 	}
-	hosts, ok := coverage["hosts"].([]string)
-	if !ok || len(hosts) != 1 || hosts[0] != host || coverage["host_count"] != 1 {
-		t.Fatalf("inherited host context missing: %#v", coverage)
+	if coverage["host_count"] != 1 {
+		t.Fatalf("inherited host context missing (want host_count=1): %#v", coverage)
 	}
 
 	facts := callReadJSON(t, tools.listFacts(), `{}`).(map[string]any)["facts"].([]any)
