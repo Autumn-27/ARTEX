@@ -577,14 +577,14 @@ func (s *Server) reseedMainAgentPrompt() {
 	log.Printf("[prompts] mainagent 提示词已追加新默认版本(加入目标达成后反问建目标,一次性)")
 }
 
-// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文重写了「0 意图」的正当理由
-// (从笼统"最常见"改为"仅在已覆盖/等待在跑 work 依赖时才 0 意图")、并新增「量化验收核对」(覆盖度等
-// 可量化目标未达标禁止 prove_goal)。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
+// reseedPlannerPrompt 把 planner 提示词刷成【当前代码默认】——默认正文做了精简重构,并把「克制」降级为
+// 仅去重、新增「深度优先于覆盖度」「硬底线:目标未达成且无在跑意图必须产出」、给否定结论复核加上界。
+// 每次默认有实质变更就 bump 下面的 flag(当前 v2)让存量旧库再刷一次。SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理
 // 【追加一个新版本】并切过去(ResetPromptToDefault),旧版本仍保留在历史里,用户若自定义过可从版本记录
 // 找回。settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。与
 // reseedGoalsPrompt 完全同构。
 func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_zerointent_acceptance_v1"
+	const flag = "planner_prompt_compact_realistic_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -605,15 +605,15 @@ func (s *Server) reseedPlannerPrompt() {
 		log.Printf("[prompts] planner 提示词重刷为新默认失败: %v", err)
 		return
 	}
-	log.Printf("[prompts] planner 提示词已追加新默认版本(重写0意图理由+加量化验收核对,一次性)")
+	log.Printf("[prompts] planner 提示词已追加新默认版本(精简重构+克制降级去重+深度优先+否定复核上界,一次性)")
 }
 
-// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文强化了「否定结论的证据门槛」
-// (未穷尽手段/证据弱一律标 inferred,别用轻率 observed 否定焊死路线)。SeedPromptIfEmpty 首插入only,
+// reseedWorkerPrompt 把 worker 提示词刷成【当前代码默认】——默认正文做了精简重构,并把否定结论改为
+// 「只写观察+试探性读法」、新增「跨意图线索写进 fact 交规划者、不自己追」。bump flag 至 v2 让存量旧库再刷一次。SeedPromptIfEmpty 首插入only,
 // 旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。settings flag
 // 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_negfact_threshold_v1"
+	const flag = "worker_prompt_compact_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -634,7 +634,7 @@ func (s *Server) reseedWorkerPrompt() {
 		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
 		return
 	}
-	log.Printf("[prompts] worker 提示词已追加新默认版本(加否定结论证据门槛,一次性)")
+	log.Printf("[prompts] worker 提示词已追加新默认版本(精简重构+否定改观察式+跨意图线索上报,一次性)")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：
