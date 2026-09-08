@@ -351,16 +351,40 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
 
-	// 意图 + 全局态势改放【启动 user 消息】(见下方 input)，system 只留静态角色正文
-	// (段[A]/[B]/[C] + deferred 块)。与 planner 一致：把易变的运行期数据移出 system，
-	// system 每 session 稳定、更利于缓存；代价是长 run 里这条 user 消息可能被 compaction
-	// 压缩。本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
+	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
+	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
+	// 长 run 里意图永远在场，续跑时也不依赖 transcript 历史是否留住那条首消息。代价是 system
+	// 混入 per-intent 易变数据、失去跨意图缓存复用；这是刻意的取舍（意图丢失比省 token 严重得多）。
+	// 与 planner「态势块放 user turn」分叉是有意的：planner 本身是产意图的那个、没有单一 mandate，
+	// worker 有。仅【全局态势 overview】留在启动 user 消息里——它可降级、容忍 stale，压掉无碍。
+	// 本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
+	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
+	sysBody += renderIntentTask(intent)
+	if as != nil {
+		if ids := intentAssetIDs(intent); len(ids) > 0 {
+			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
+				if b, err := json.Marshal(assets); err == nil {
+					sysBody += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
+				}
+				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
+				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
+				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
+				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
+				if coverageEnabled {
+					for _, a := range assets {
+						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
+					}
+				}
+			}
+		}
+	}
+	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
@@ -425,28 +449,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	// 意图 + 全局态势 + 启动指令 + 意图锚定资产的原始数据都放这条启动 user 消息里。
-	// 意图放最前、最醒目；overview 仅供了解大局。资产原始 JSON 直接附上，不做提取/格式化，
-	// 省去开场再查一次 list_assets。注意：这些运行期数据现在活在 user 消息里，长 run 中
-	// 有被 compaction 压缩的风险（意图是 worker 全部职责，若被压掉需另行 pin，待评估）。
-	input := renderIntentTask(intent) + overview + "\n\n开始执行上面这条意图：只做它、只产生事实、做完即停。"
-	if as != nil {
-		if ids := intentAssetIDs(intent); len(ids) > 0 {
-			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
-				if b, err := json.Marshal(assets); err == nil {
-					input += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
-				}
-				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
-				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
-				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
-				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
-				if coverageEnabled {
-					for _, a := range assets {
-						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
-					}
-				}
-			}
-		}
+	// 意图 / 启动指令 / 意图锚定资产已随 system prompt 下发（见上方 sysBody 组装）。
+	// 这条启动 user 消息只承载【全局态势 overview】——可降级的了解大局信息，压掉无碍。
+	// overview 罕见地 marshal 失败为空时，回退一句启动词，避免首轮出现空 user 消息。
+	input := overview
+	if strings.TrimSpace(input) == "" {
+		input = "开始执行 system 里领到的意图：只做它、只产生事实、assets、finding、做完即停。"
 	}
 
 	s := agentcore.NewSession(opts)
