@@ -948,6 +948,7 @@ export default function TasksPage() {
                       onSort={sortTasksBy}
                     />
                     <TableHead className="text-center">目标进度</TableHead>
+                    <TableHead className="text-center">运行中 Worker</TableHead>
                     <SortableTaskHead
                       field="created"
                       label="创建时间"
@@ -1208,6 +1209,13 @@ const TaskRow = React.memo(function TaskRow({
           `${task.goals_met}/${task.goals_total}`
         ) : (
           <span className="text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell className="text-center text-xs tabular-nums">
+        {task.in_flight && task.in_flight > 0 ? (
+          <span className="text-foreground font-medium">{task.in_flight}</span>
+        ) : (
+          <span className="text-muted-foreground">0</span>
         )}
       </TableCell>
       <TableCell className="text-muted-foreground text-right text-xs whitespace-nowrap tabular-nums">

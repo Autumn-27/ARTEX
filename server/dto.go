@@ -50,6 +50,7 @@ type TaskDTO struct {
 	Tokens             TokenTotalDTO `json:"tokens"` // whole-task token consumption
 	GoalsTotal         int           `json:"goals_total"`
 	GoalsMet           int           `json:"goals_met"`
+	InFlight           int           `json:"in_flight"`                // 运行中 Worker 数（state=running 的意图）
 	LLMProfileID       *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
 	LLMProfileIDs      []int64       `json:"llm_profile_ids"`
 	ActiveLLMProfileID *int64        `json:"active_llm_profile_id,omitempty"`

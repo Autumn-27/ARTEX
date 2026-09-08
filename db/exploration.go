@@ -1064,9 +1064,10 @@ type GoalCounts struct{ Total, Met int }
 
 // TaskListMetrics contains the aggregates rendered in task lists.
 type TaskListMetrics struct {
-	Tokens       TokenUsage
-	LastActivity int64
-	Goals        GoalCounts
+	Tokens         TokenUsage
+	LastActivity   int64
+	Goals          GoalCounts
+	RunningIntents int // kind='intent' 且 state='running' 的条数，即运行中 Worker 数
 }
 
 // TaskListMetricsAll returns list aggregates for every live task in one query.
@@ -1081,7 +1082,8 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		       COALESCE(token_metrics.cache_write_tokens,0),
 		       COALESCE(latest_activity.created_at,0),
 		       COALESCE(goal_metrics.total,0),
-		       COALESCE(goal_metrics.met,0)
+		       COALESCE(goal_metrics.met,0),
+		       COALESCE(intent_metrics.running,0)
 		FROM tasks task
 		LEFT JOIN LATERAL (
 			SELECT SUM(input_tokens) AS input_tokens,
@@ -1104,6 +1106,11 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			FROM exploration_nodes
 			WHERE exploration_id=task.exploration_id AND kind='goal'
 		) goal_metrics ON true
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS running
+			FROM exploration_nodes
+			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
+		) intent_metrics ON true
 		WHERE task.deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
@@ -1122,6 +1129,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			&metrics.LastActivity,
 			&metrics.Goals.Total,
 			&metrics.Goals.Met,
+			&metrics.RunningIntents,
 		); err != nil {
 			return nil, err
 		}
