@@ -611,8 +611,6 @@ func splitLines(s string) []string {
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.listFindings(), t.listFacts(), t.nodeDetail(),
-		// cold-digest §6.1: a worker may hit a folded id in lineage — let it expand.
-		t.expandDigest(), t.expandIndex(),
 		t.addFinding(), t.recordFact(),
 		// cross-work retrieval
 		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
