@@ -91,6 +91,9 @@ type taskLLMSelection struct {
 	profileID int64
 	revision  int64
 	provider  llm.Provider
+	// retry 是这次选中的配置解析出来的重试参数(profile 覆盖 → 全局策略 → 内置默认)。
+	// 同 provider 安全窗口重试按它走,所以换了 profile 就换一套重试节奏。
+	retry agent.RetryConfig
 }
 
 type taskLLMStreamHooks struct {
@@ -105,38 +108,43 @@ type taskLLMStreamHooks struct {
 // 构建失败时才降级到任务链，任务链为空时再降级到全局配置。
 // 返回的 profile id 只有走任务链时才非零 —— streamTaskLLM 以此判断额度错误是否
 // 应该推进任务的故障转移状态（绑定/全局路径不改任务链状态，沿用既有语义）。
-func (r *taskLLMRuntime) current() (*Task, int64, int64, llm.Provider, error) {
+func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
-		return nil, 0, 0, nil, err
+		return taskLLMSelection{}, err
 	}
 	pt, err := r.s.m.pg.GetTask(taskNum)
 	if err != nil {
-		return nil, 0, 0, nil, err
+		return taskLLMSelection{}, err
 	}
 	if pt == nil {
-		return nil, 0, 0, nil, fmt.Errorf("task %s not found", r.taskID)
+		return taskLLMSelection{}, fmt.Errorf("task %s not found", r.taskID)
 	}
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
-	if prov, _, ok := r.s.agentBindingProvider(r.agentKey); ok {
-		return t, 0, pt.LLMChainRevision, prov, nil
+	sel := taskLLMSelection{task: t, revision: pt.LLMChainRevision}
+	if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
+		sel.provider, sel.retry = prov, cfg.Retry
+		return sel, nil
 	}
 	if len(pt.LLMProfileIDs) > 0 {
 		if pt.ActiveLLMProfileID == nil {
-			return t, 0, pt.LLMChainRevision, nil, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
+			return sel, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
 		}
-		prov, _, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID)
+		sel.profileID = *pt.ActiveLLMProfileID
+		prov, cfg, ok := r.s.providerForProfile(sel.profileID)
 		if !ok {
-			return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, nil, fmt.Errorf("LLM profile #%d is missing or invalid", *pt.ActiveLLMProfileID)
+			return sel, fmt.Errorf("LLM profile #%d is missing or invalid", sel.profileID)
 		}
-		return t, *pt.ActiveLLMProfileID, pt.LLMChainRevision, prov, nil
+		sel.provider, sel.retry = prov, cfg.Retry
+		return sel, nil
 	}
-	prov, _, ok := r.s.globalProvider()
+	prov, cfg, ok := r.s.globalProvider()
 	if !ok {
-		return t, 0, pt.LLMChainRevision, nil, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
+		return sel, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
 	}
-	return t, 0, pt.LLMChainRevision, prov, nil
+	sel.provider, sel.retry = prov, cfg.Retry
+	return sel, nil
 }
 
 // activeCfg resolves the task's currently-active LLM config, mirroring current()'s
@@ -194,10 +202,7 @@ func parseTaskID(id string) (int64, error) {
 // exhausted, and how to emit a failover transition.
 func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 	return taskLLMStreamHooks{
-		current: func() (taskLLMSelection, error) {
-			task, profileID, revision, provider, err := r.current()
-			return taskLLMSelection{task: task, profileID: profileID, revision: revision, provider: provider}, err
-		},
+		current: r.current,
 		exhaust: func(selection taskLLMSelection, cause error) (db.TaskLLMTransition, error) {
 			taskNum, _ := parseTaskID(r.taskID)
 			transition, err := r.s.m.pg.MarkTaskLLMProfileQuotaExhaustedAtRevision(taskNum, selection.profileID, selection.revision, cause.Error())
@@ -244,13 +249,14 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		)
 		// 同 provider 安全窗口重试:非流式调用要么整体成功、要么整体失败,没有
 		// 中途已交付输出的问题,所以任何瞬时失败都可原样重试。
+		retries, backoffOf := sameProviderRetryPolicy(selection.retry)
 		for attempt := 0; ; attempt++ {
 			msg, sr, usage, callErr = selection.provider.Complete(ctx, req)
 			if callErr != nil && ctx.Err() == nil &&
-				attempt < sameProviderStreamRetries && isRetryableStreamError(callErr) {
-				backoff := sameProviderRetryBackoff(attempt)
+				attempt < retries && isRetryableStreamError(callErr) {
+				backoff := backoffOf(attempt)
 				log.Printf("[task-llm] task %s 非流式调用失败,%v 后同 provider 重试 (%d/%d): %v",
-					taskID, backoff, attempt+1, sameProviderStreamRetries, callErr)
+					taskID, backoff, attempt+1, retries, callErr)
 				if sleepCtx(ctx, backoff) {
 					break // 退避期间 ctx 取消 → 停止重试
 				}
@@ -290,6 +296,7 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 			committed := false
 			var pending []llm.StreamEvent
 			var streamErr error
+			retries, backoffOf := sameProviderRetryPolicy(selection.retry)
 			// 同 provider 安全窗口重试:committed 之前(还没向调用方交付任何输出)
 			// 的瞬时失败可以原样重放,不会重复模型输出或工具执行。committed 之后、
 			// ctx 取消、或确定性/额度错误则跳出,交给下方原有的透传/故障转移逻辑。
@@ -320,10 +327,10 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 					}
 				}
 				if streamErr != nil && !committed && ctx.Err() == nil &&
-					attempt < sameProviderStreamRetries && isRetryableStreamError(streamErr) {
-					backoff := sameProviderRetryBackoff(attempt)
+					attempt < retries && isRetryableStreamError(streamErr) {
+					backoff := backoffOf(attempt)
 					log.Printf("[task-llm] task %s 提交前流失败,%v 后同 provider 重试 (%d/%d): %v",
-						taskID, backoff, attempt+1, sameProviderStreamRetries, streamErr)
+						taskID, backoff, attempt+1, retries, streamErr)
 					if sleepCtx(ctx, backoff) {
 						break // 退避期间 ctx 取消 → 停止重试
 					}
@@ -388,18 +395,33 @@ func streamEventCommitsOutput(event llm.StreamEvent) bool {
 	}
 }
 
-// 提交前安全窗口内、对同一 provider 的重试次数。SDK 的 doStream 只重试建连阶段
-// (拿到 200 之前);流一旦开始,中途断流 / overloaded / 流内 429 等瞬时故障会直接
+// 提交前安全窗口内、对同一 provider 的【默认】重试次数。SDK 的 doStream 只重试建连
+// 阶段(拿到 200 之前);流一旦开始,中途断流 / overloaded / 流内 429 等瞬时故障会直接
 // 冒泡成 model_error,零重试。只要一个 token 都还没交给调用方(!committed),重放
 // 完全相同的请求就不会重复模型输出或工具副作用,因此这里补一层同 provider 退避重试,
-// 把这类抖动挡在意图整体重跑之前。
+// 把这类抖动挡在意图整体重跑之前。可被 LLM 配置的重试覆盖/全局重试策略改写。
 const sameProviderStreamRetries = 2
 
-// sameProviderRetryBackoff 是第 attempt 次重试前的退避(0.5s、1s…,上限 4s),
-// 与 SDK backoffSleep 同风格但封顶更小,避免拖住 worker 的收尾/取消响应。
+// sameProviderRetryBackoff 是第 attempt 次重试前的【默认】退避(0.5s、1s…,上限 4s),
+// 与 SDK 的指数梯度同风格但封顶更小,避免拖住 worker 的收尾/取消响应。
 // 以变量形式暴露,便于测试将退避置零。
 var sameProviderRetryBackoff = func(attempt int) time.Duration {
 	return min(500*time.Millisecond*(1<<attempt), 4*time.Second)
+}
+
+// sameProviderRetryPolicy 解析这次调用用哪套同 provider 重试参数:配置里设了次数就
+// 用配置的(负数 = 关掉这层重试),设了间隔就把指数退避换成固定间隔,两者都没设时
+// 与改可配之前逐字节一致。
+func sameProviderRetryPolicy(r agent.RetryConfig) (retries int, backoff func(int) time.Duration) {
+	retries, backoff = sameProviderStreamRetries, sameProviderRetryBackoff
+	if r.StreamAttempts != 0 {
+		retries = max(r.StreamAttempts, 0)
+	}
+	if r.StreamInterval > 0 {
+		d := r.StreamInterval
+		backoff = func(int) time.Duration { return d }
+	}
+	return retries, backoff
 }
 
 // isRetryableStreamError 判断「提交前的流失败」是否值得在同一 provider 上重放。

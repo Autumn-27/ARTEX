@@ -32,8 +32,9 @@ type State struct {
 // Open reports whether the breaker is currently open (profile should be skipped).
 func (s State) Open() bool { return time.Now().Before(s.OpenUntil) }
 
-// softTripAfter is how many consecutive TRANSIENT failures (429 / 5xx / network)
-// trip the breaker. Deterministic failures (no credit, bad key) trip on the first.
+// softTripAfter is the DEFAULT number of consecutive TRANSIENT failures (429 /
+// 5xx / network) that trip the breaker. Deterministic failures (no credit, bad
+// key) trip on the first regardless. Overridable via Registry.SetPolicy.
 const softTripAfter = 3
 
 // Registry holds the circuit-breaker state of every profile, keyed by profile id.
@@ -48,6 +49,43 @@ type Registry struct {
 	// restart. Both may be nil (no DB); both are called off the hot path.
 	persist func(id int64, st State)
 	forget  func(id int64)
+
+	// softTrip / cooldown are the operator-set overrides (0 = use the built-in
+	// default / ladder). They live here rather than being read per failure because
+	// Trip runs on the failure path of every request.
+	softTrip int
+	cooldown time.Duration
+}
+
+// SetPolicy overrides the breaker's two knobs. softTrip: how many consecutive
+// transient failures trip it (0 = default softTripAfter; negative = transient
+// failures never trip it, leaving only the deterministic ones). cooldown: a fixed
+// cooling-off window (0 = the 1min/5min/30min ladder). Safe to call at any time.
+func (r *Registry) SetPolicy(softTrip int, cooldown time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.softTrip, r.cooldown = softTrip, cooldown
+}
+
+// tripAfter is the effective consecutive-transient-failure threshold. Callers
+// hold r.mu. A negative override yields 0, which Trip reads as "never soft-trip".
+func (r *Registry) tripAfter() int {
+	if r.softTrip == 0 {
+		return softTripAfter
+	}
+	return max(r.softTrip, 0)
+}
+
+// coolFor is the cooling-off window for the trips-th trip (1-based): the fixed
+// override when set, else the ladder (last rung repeats). Callers hold r.mu.
+func (r *Registry) coolFor(trips int) time.Duration {
+	if r.cooldown > 0 {
+		return r.cooldown
+	}
+	if trips-1 < len(backoff) {
+		return backoff[trips-1]
+	}
+	return backoff[len(backoff)-1]
 }
 
 // NewRegistry builds an empty registry. persist/forget may be nil.
@@ -107,13 +145,10 @@ func (r *Registry) Trip(id int64, errMsg string, hard bool) (tripped bool) {
 	st.Fails++
 	st.LastError = errMsg
 	st.LastAt = time.Now()
-	if hard || st.Fails >= softTripAfter {
+	softTrip := r.tripAfter()
+	if hard || (softTrip > 0 && st.Fails >= softTrip) {
 		st.Trips++
-		d := backoff[len(backoff)-1]
-		if st.Trips-1 < len(backoff) {
-			d = backoff[st.Trips-1]
-		}
-		st.OpenUntil = time.Now().Add(d)
+		st.OpenUntil = time.Now().Add(r.coolFor(st.Trips))
 		st.Fails = 0 // counted into this trip; start fresh for the half-open probe
 		tripped = true
 	}

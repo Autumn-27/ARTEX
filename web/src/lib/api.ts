@@ -45,6 +45,8 @@ import type {
   LLMProfile,
   LLMRecordDetail,
   LLMRecordItem,
+  LLMRetryOverride,
+  LLMRetryPolicy,
   LLMTask,
   MCPServer,
   MCPTool,
@@ -724,6 +726,7 @@ export const api = {
     max_tokens?: number; // 单次回复输出上限；0=不发送，由服务端默认值决定
     max_tokens_field?: string; // ""=max_tokens(默认) | "max_completion_tokens"（仅 openai 格式）
     session_header_key?: string; // 非空=每次请求带该 HTTP 头，头值=当前会话 session id；""=不发送
+    retry?: LLMRetryOverride; // 本配置的重试覆盖；各项留 0 = 跟随全局重试策略
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
@@ -731,6 +734,9 @@ export const api = {
   llmPool: () => get<LLMPoolStatus>("/llm/pool"),
   // 清除熔断，让下一次调用立刻重试该配置；不传 id = 全部清除。
   resetLLMPool: (id?: string) => post<LLMPoolStatus>("/llm/pool/reset", { id: id ? Number(id) : 0 }),
+  // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。
+  llmRetryPolicy: () => get<LLMRetryPolicy>("/llm/retry-policy"),
+  saveLLMRetryPolicy: (p: LLMRetryPolicy) => post<LLMRetryPolicy>("/llm/retry-policy", p),
   fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number) =>
     post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
       provider,

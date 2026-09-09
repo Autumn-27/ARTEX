@@ -972,12 +972,13 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
-	for attempt := 1; attempt <= modelErrorRetries &&
+	maxRetries, retryBackoff := e.modelErrorRetryPolicy()
+	for attempt := 1; attempt <= maxRetries &&
 		retryableWorkerModelError(reason, err) &&
 		workCtx.Err() == nil && ectx.Err() == nil && !e.IsPaused(t.ID) && !e.isSettling(t.ID); attempt++ {
 		log.Printf("[worker %s] task %s 意图 #%d model_error 收场，%v 后重试 (%d/%d)",
-			name, t.ID, intent.ID, modelErrorRetryBackoff, attempt, modelErrorRetries)
-		if sleepCtx(workCtx, modelErrorRetryBackoff) {
+			name, t.ID, intent.ID, retryBackoff, attempt, maxRetries)
+		if sleepCtx(workCtx, retryBackoff) {
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
 		e.BeginLLMCall(t.ID)

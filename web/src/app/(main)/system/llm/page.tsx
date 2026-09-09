@@ -25,9 +25,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { LLMPoolMember, LLMPoolStatus, LLMProfile } from "@/lib/types";
+import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
 
 // 思考开关(thinking.type)与思考强度(reasoning_effort)是两个【互相独立】的字段，
 // 各自单独设置——有些接口没有 thinking 字段、只靠强度参数就能激活思考，故需解耦。
@@ -325,6 +328,7 @@ function ProfileSheet({
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
+  const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // 本配置的重试覆盖;全 0=跟随全局
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -336,9 +340,7 @@ function ProfileSheet({
   React.useEffect(() => {
     if (!open) return;
     setName(profile?.name ?? "");
-    setFormat(
-      profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic",
-    );
+    setFormat(profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic");
     setModel(profile?.model ?? "");
     setBaseUrl(profile?.base_url ?? "");
     setProxy(profile?.proxy ?? "");
@@ -353,6 +355,7 @@ function ProfileSheet({
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));
     setSessionHeaderKey(profile?.session_header_key ?? "");
+    setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -440,6 +443,7 @@ function ProfileSheet({
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
+        retry,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -583,9 +587,9 @@ function ProfileSheet({
               onChange={(e) => setSessionHeaderKey(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">
-              填写头名后，每次请求都会带上这个 HTTP 头，头值自动填为{" "}
-              <b>当前会话的 session id</b>（chat 会话如 conv-12、worker 如 exp3-worker-i87）。用于按 session-id
-              头做提示缓存 / 粘性路由的网关；同一会话多轮稳定、不同会话互不相同。留空则不发送。
+              填写头名后，每次请求都会带上这个 HTTP 头，头值自动填为 <b>当前会话的 session id</b>（chat 会话如
+              conv-12、worker 如 exp3-worker-i87）。用于按 session-id 头做提示缓存 /
+              粘性路由的网关；同一会话多轮稳定、不同会话互不相同。留空则不发送。
             </p>
           </div>
 
@@ -758,6 +762,8 @@ function ProfileSheet({
               </Select>
             </div>
           </div>
+
+          <ProfileRetryFields value={retry} onChange={setRetry} />
         </div>
 
         <div className="flex gap-2 border-t px-4 py-3">
@@ -869,97 +875,112 @@ export default function LLMPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {profiles.map((p) => {
-          const h = healthOf(p, health.get(p.id));
-          return (
-            // biome-ignore lint/a11y/useSemanticElements: 卡片内含自己的操作按钮，用原生 <button> 会造成按钮嵌套（非法 HTML）
-            <Card
-              key={p.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => openEditor(p)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openEditor(p);
-                }
-              }}
-              className={cn(
-                "cursor-pointer gap-0 py-4 outline-none transition-colors hover:border-foreground/30",
-                p.is_default && "border-amber-400/50 bg-amber-400/5",
-              )}
-            >
-              <CardContent className="grid gap-2 px-4">
-                <div className="flex items-start gap-2">
-                  <StarIcon
-                    className={cn(
-                      "mt-0.5 size-4 shrink-0",
-                      p.is_default ? "fill-amber-400 text-amber-400" : "text-muted-foreground",
-                    )}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="truncate font-medium text-sm">{p.name}</span>
-                      <Badge variant="outline" className="uppercase">
-                        {p.format}
-                      </Badge>
-                      <Badge variant="outline" className={cn("ml-auto", h.cls)} title={h.hint}>
-                        {h.label}
-                      </Badge>
+      <Tabs defaultValue="profiles" className="flex-1">
+        <TabsList>
+          <TabsTrigger value="profiles">模型配置</TabsTrigger>
+          <TabsTrigger value="retry">重试与退避</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="profiles" className="mt-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {profiles.map((p) => {
+              const h = healthOf(p, health.get(p.id));
+              return (
+                // biome-ignore lint/a11y/useSemanticElements: 卡片内含自己的操作按钮，用原生 <button> 会造成按钮嵌套（非法 HTML）
+                <Card
+                  key={p.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openEditor(p)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openEditor(p);
+                    }
+                  }}
+                  className={cn(
+                    "cursor-pointer gap-0 py-4 outline-none transition-colors hover:border-foreground/30",
+                    p.is_default && "border-amber-400/50 bg-amber-400/5",
+                  )}
+                >
+                  <CardContent className="grid gap-2 px-4">
+                    <div className="flex items-start gap-2">
+                      <StarIcon
+                        className={cn(
+                          "mt-0.5 size-4 shrink-0",
+                          p.is_default ? "fill-amber-400 text-amber-400" : "text-muted-foreground",
+                        )}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate font-medium text-sm">{p.name}</span>
+                          <Badge variant="outline" className="uppercase">
+                            {p.format}
+                          </Badge>
+                          <Badge variant="outline" className={cn("ml-auto", h.cls)} title={h.hint}>
+                            {h.label}
+                          </Badge>
+                        </div>
+                        <code className="mt-1 block truncate font-mono text-muted-foreground text-xs">{p.model}</code>
+                      </div>
                     </div>
-                    <code className="mt-1 block truncate font-mono text-muted-foreground text-xs">{p.model}</code>
-                  </div>
-                </div>
 
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
-                  {p.api_key_hint && <span>{p.api_key_hint}</span>}
-                  <span>
-                    {p.rate_per_second}/s · {p.rate_per_minute}/min
-                  </span>
-                  {p.proxy && <span className="truncate">代理 {p.proxy}</span>}
-                  {p.reasoning_effort && <span>思考 {p.reasoning_effort === "off" ? "关" : p.reasoning_effort}</span>}
-                  {/* 轮询相关的两个字段只在轮询开着时才有意义，关着时不占版面 */}
-                  {poolOn &&
-                    !p.is_default &&
-                    (p.pool_exclude ? <span>不参与轮询</span> : <span>优先级 {p.priority ?? 0}</span>)}
-                </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
+                      {p.api_key_hint && <span>{p.api_key_hint}</span>}
+                      <span>
+                        {p.rate_per_second}/s · {p.rate_per_minute}/min
+                      </span>
+                      {p.proxy && <span className="truncate">代理 {p.proxy}</span>}
+                      {p.reasoning_effort && (
+                        <span>思考 {p.reasoning_effort === "off" ? "关" : p.reasoning_effort}</span>
+                      )}
+                      {/* 轮询相关的两个字段只在轮询开着时才有意义，关着时不占版面 */}
+                      {poolOn &&
+                        !p.is_default &&
+                        (p.pool_exclude ? <span>不参与轮询</span> : <span>优先级 {p.priority ?? 0}</span>)}
+                    </div>
 
-                <div className="mt-1 flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="flex-1"
-                    disabled={p.is_default}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void activate(p.id, p.name);
-                    }}
-                  >
-                    {p.is_default ? "已激活" : "设为激活"}
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    aria-label="删除配置"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void remove(p);
-                    }}
-                  >
-                    <Trash2Icon className="text-destructive" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-        {profiles.length === 0 && (
-          <div className="col-span-full rounded-lg border border-dashed p-10 text-center text-muted-foreground text-sm">
-            还没有模型配置，点击右上角「新建」创建第一个。
+                    <div className="mt-1 flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1"
+                        disabled={p.is_default}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void activate(p.id, p.name);
+                        }}
+                      >
+                        {p.is_default ? "已激活" : "设为激活"}
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="outline"
+                        aria-label="删除配置"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void remove(p);
+                        }}
+                      >
+                        <Trash2Icon className="text-destructive" />
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+            {profiles.length === 0 && (
+              <div className="col-span-full rounded-lg border border-dashed p-10 text-center text-muted-foreground text-sm">
+                还没有模型配置，点击右上角「新建」创建第一个。
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </TabsContent>
+
+        <TabsContent value="retry" className="mt-4">
+          <RetryPolicyPanel />
+        </TabsContent>
+      </Tabs>
 
       <ProfileSheet profile={editing} open={editOpen} onOpenChange={setEditOpen} onSaved={() => void load()} />
       <PoolSheet open={poolOpen} onOpenChange={setPoolOpen} pool={pool} onReload={loadPool} />

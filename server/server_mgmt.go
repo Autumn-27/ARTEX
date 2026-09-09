@@ -1830,6 +1830,39 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"id": id})
 }
 
+// pgGetLLMRetryPolicy 返回全局重试策略(五层各自的次数+间隔)。未配置过 → 全零，
+// 前端把零显示成「默认」。
+func (s *Server) pgGetLLMRetryPolicy(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	writeJSON(w, 200, pg.LLMRetryPolicy())
+}
+
+// pgSaveLLMRetryPolicy 保存全局重试策略。三个「跟着端点走」的层(建连/空响应/同
+// provider 安全窗口)是 provider 的构建参数或调用参数，改完必须让缓存里的 provider
+// 重建；熔断参数则直接推给进程级 Registry。
+func (s *Server) pgSaveLLMRetryPolicy(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var pol db.LLMRetryPolicy
+	if err := decode(r, &pol); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := pg.SetLLMRetryPolicy(pol); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.applyRetryPolicy()
+	s.invalidateProfileAgents()
+	s.reapplyActiveProfile()
+	writeJSON(w, 200, pg.LLMRetryPolicy())
+}
+
 func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {

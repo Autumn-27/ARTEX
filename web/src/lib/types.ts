@@ -916,6 +916,32 @@ export interface LLMProfile {
   // 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
   // ""=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
   session_header_key?: string;
+  // 本配置对重试的覆盖（建连/空响应/同 provider 安全窗口）。留空/全 0 = 跟随全局策略。
+  retry?: LLMRetryOverride;
+}
+
+// ---- LLM 重试策略 ----
+// 一层重试的两个旋钮。两者都是「0 = 未配置」：
+//   attempts    0=用默认次数 | -1=关闭该层重试 | >0=重试次数
+//   interval_ms 0=用默认的指数退避 | >0=改用这个固定毫秒间隔
+export interface LLMRetryRule {
+  attempts: number;
+  interval_ms: number;
+}
+
+// 单个 LLM 配置能覆盖的三层（都是「跟着端点走」的重试）。
+export interface LLMRetryOverride {
+  connect: LLMRetryRule; // 建连重试：连接重置/超时/429/5xx，流开始前
+  empty: LLMRetryRule; // 空响应重试：完成但没有任何内容（仅 openai 格式）
+  stream: LLMRetryRule; // 同 provider 安全窗口重试：未交付输出前的断流重放
+}
+
+// 全局策略 = 上面三层的默认值 + 两层只有全局的：
+//   breaker 轮询熔断（attempts=连续几次瞬时失败熔断，interval_ms=固定冷却时长）
+//   intent  意图重跑（worker 以 model_error 收场后整条意图重跑）
+export interface LLMRetryPolicy extends LLMRetryOverride {
+  breaker: LLMRetryRule;
+  intent: LLMRetryRule;
 }
 
 // ---- LLM 轮询（故障转移）----

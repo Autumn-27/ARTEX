@@ -74,6 +74,29 @@ type Config struct {
 	// 空 = 不发送。值由 transcript.WithSessionID 挂在请求 context 上,由 RoundTripper
 	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
 	SessionHeaderKey string
+	// Retry 是该配置解析后的重试参数(profile 覆盖 → 全局策略 → 内置默认,由
+	// server 侧解析)。三层的含义见 RetryConfig;零值 = 完全沿用内置默认。
+	Retry RetryConfig
+}
+
+// RetryConfig 是随一个 LLM 配置走的重试参数。每层的「次数」统一语义:
+// 0 = 用内置默认次数;负数 = 关闭该层重试;>0 = 用该值。每层的「间隔」:
+// 0 = 用该层原本的指数退避;>0 = 改用这个固定间隔。
+type RetryConfig struct {
+	// ConnectAttempts/ConnectInterval:SDK 建连重试(连接重置/超时/429/5xx,流开始前),
+	// 直接映射为 llm.Config.MaxRetries / RetryInterval。默认 3 次、0.5s 起指数(封顶 8s)。
+	ConnectAttempts int
+	ConnectInterval time.Duration
+	// EmptyAttempts/EmptyInterval:SDK 空响应重试(完成但无 content block,仅 openai
+	// 格式),映射为 llm.Config.EmptyResponseRetries / EmptyResponseInterval。
+	// 默认 2 次、同一条指数梯度。
+	EmptyAttempts int
+	EmptyInterval time.Duration
+	// StreamAttempts/StreamInterval:同 provider 安全窗口重试——本项目在 SDK 之上补的
+	// 一层,只在「还没向调用方交付任何输出」时重放断流/过载/流内 429。SDK 看不到它,
+	// 由 server/task_llm.go 消费。默认 2 次、0.5s 起指数(封顶 4s)。
+	StreamAttempts int
+	StreamInterval time.Duration
 }
 
 // compaction window resolution bounds (in K tokens). Below the floor the
@@ -249,6 +272,11 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
 	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。
 	lc.MaxTokensField = c.MaxTokensField
+	// 重试参数与 SDK 同语义(次数 0=默认/负=关闭,间隔 0=指数退避/>0=固定),原样透传。
+	lc.MaxRetries = c.Retry.ConnectAttempts
+	lc.RetryInterval = c.Retry.ConnectInterval
+	lc.EmptyResponseRetries = c.Retry.EmptyAttempts
+	lc.EmptyResponseInterval = c.Retry.EmptyInterval
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}

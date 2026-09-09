@@ -367,6 +367,14 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- 自定义会话头：非空时每次请求带一个该名字的 HTTP 头，头值=当前运行的 session id
     -- (chat 会话/worker 意图)。用于某些按 session-id 头做提示缓存/粘性路由的网关。''=不发送。
     session_header_key TEXT NOT NULL DEFAULT '',
+    -- 重试覆盖：次数 0=用全局默认/-1=关闭/>0=该值；间隔 0=用默认指数退避/>0=固定毫秒。
+    -- 三组分别对应建连重试、空响应重试、同 provider 安全窗口重试，详见下方 ALTER 处注释。
+    retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,
+    retry_connect_interval_ms INTEGER NOT NULL DEFAULT 0,
+    retry_empty_attempts      INTEGER NOT NULL DEFAULT 0,
+    retry_empty_interval_ms   INTEGER NOT NULL DEFAULT 0,
+    retry_stream_attempts     INTEGER NOT NULL DEFAULT 0,
+    retry_stream_interval_ms  INTEGER NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -398,6 +406,24 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+
+-- 单配置的重试覆盖（见 docs/LLM重试设计.md）。三组各自一对「次数 + 固定间隔」，
+-- 语义统一：次数 0=沿用全局默认、-1=关闭该层重试、>0=用该值；间隔 0=沿用该层的
+-- 默认指数退避、>0=改用这个固定毫秒数。全部默认 0，所以旧库/旧配置行为不变。
+--   connect = 建连重试（SDK doStream：连接重置/超时/429/5xx，流开始前）
+--   empty   = 空响应重试（SDK：完成但没有任何 content block，仅 openai 格式）
+--   stream  = 同 provider 安全窗口重试（本项目 task_llm：未交付输出前的断流重放）
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_connect_attempts    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_connect_interval_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_empty_attempts      INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_empty_interval_ms   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_stream_attempts     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_stream_interval_ms  INTEGER NOT NULL DEFAULT 0;
+-- 同 format：先删再建，保证每次启动幂等。次数下限 -1(关闭)，间隔不能为负。
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_retry_check;
+ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_retry_check CHECK (
+    retry_connect_attempts >= -1 AND retry_empty_attempts >= -1 AND retry_stream_attempts >= -1
+    AND retry_connect_interval_ms >= 0 AND retry_empty_interval_ms >= 0 AND retry_stream_interval_ms >= 0);
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
