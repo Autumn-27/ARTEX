@@ -36,6 +36,10 @@ type LayerMeta = {
   title: string;
   /** 这层重试发生在哪、由谁执行 */
   where: string;
+  /** 什么样的错误会走到这层——具体到状态码，别让人猜 */
+  trigger: string;
+  /** 长得像但【不】走这层的错误，省得填了没反应还以为是 bug */
+  skips?: string;
   desc: string;
   attemptsLabel: string;
   /** 次数留空时的默认值，用于占位符 */
@@ -50,7 +54,10 @@ export const RETRY_LAYERS = {
   connect: {
     title: "建连重试",
     where: "SDK · 拿到 200 之前",
-    desc: "连接重置 / 超时 / 429 / 5xx 等在流开始前的失败，原样重发请求。流一旦开始，中途断流不归这层管。",
+    trigger:
+      "连不上或还没拿到 200：连接重置 / 读写超时 / DNS 失败等网络层错误，以及 HTTP 408、429、500、502、503、504。",
+    skips: "其余状态码（400 / 401 / 403 / 404 / 413 / 422 等）都是确定性拒绝，重发也一样失败，直接上抛。",
+    desc: "原样重发同一个请求。流一旦开始（已经拿到 200），中途断开就不归这层管了。",
     attemptsLabel: "重试次数",
     defAttempts: 3,
     defInterval: "0.5s→1s→2s 指数（封顶 8s）",
@@ -59,7 +66,10 @@ export const RETRY_LAYERS = {
   empty: {
     title: "空响应重试",
     where: "SDK · 仅 openai 格式",
-    desc: "请求正常完成、但一个内容块都没有（正常 stop 且无输出）时重发整个 prompt。max_tokens 截断不算，不会重试。",
+    trigger:
+      "HTTP 200、finish_reason 是正常 stop，但整条响应一个内容块都没有——网关空帧、思考字段丢帧、采样打嗝都会长这样。",
+    skips: "因 max_tokens 截断而没有内容的不算（那要靠调高输出上限解决，重发只会再撞一次）。",
+    desc: "重发整个 prompt，所以在长上下文上比较贵，次数不宜给大。",
     attemptsLabel: "重试次数",
     defAttempts: 2,
     defInterval: "0.5s→1s→2s 指数（封顶 8s）",
@@ -68,7 +78,11 @@ export const RETRY_LAYERS = {
   stream: {
     title: "同 provider 安全窗口重试",
     where: "本项目 · 未交付输出前",
-    desc: "流中途断开、供应商过载、流内 429——只要一个 token 都还没交给调用方，就在同一个配置上重放，不会重复模型输出或工具执行。额度耗尽、上下文过长、4xx 确定性拒绝不重试。",
+    trigger:
+      "流已经建立（拿到 200）之后才出问题：连接中途断开、供应商 overloaded、流内的 429 / 5xx 错误事件——且一个 token 都还没交给调用方。",
+    skips:
+      "额度耗尽（402 / insufficient_quota，交给轮询换配置）、上下文过长（413 / context length，交给压缩）、400 / 401 / 403 / 404 / 422 确定性拒绝，都不重试。",
+    desc: "在同一个配置上重放同一个请求。因为还没交付任何输出，重放不会重复模型输出或工具执行。",
     attemptsLabel: "重试次数",
     defAttempts: 2,
     defInterval: "0.5s→1s 指数（封顶 4s）",
@@ -77,7 +91,10 @@ export const RETRY_LAYERS = {
   breaker: {
     title: "轮询熔断",
     where: "本项目 · 进程级，全局一份",
-    desc: "某个配置连续失败到阈值就进入冷却，冷却期内轮询直接跳过它。余额不足 / 密钥失效这类确定性失败不看阈值，第一次就熔断。",
+    trigger:
+      "瞬时失败（429、5xx、网络错误）连续累计到阈值时熔断；余额不足（402）、密钥失效（401 / 403）、模型不存在（404）这类确定性失败不看阈值，第一次就熔断。",
+    skips: "成功一次即清零，所以偶尔抽风的配置不会被慢慢攒到熔断。",
+    desc: "熔断后进入冷却，冷却期内轮询直接跳过这个配置。状态落库，重启不丢。",
     attemptsLabel: "连续失败几次熔断",
     defAttempts: 3,
     defInterval: "1min→5min→30min 梯度",
@@ -86,7 +103,10 @@ export const RETRY_LAYERS = {
   intent: {
     title: "意图重跑",
     where: "本项目 · 进程级，全局一份",
-    desc: "worker 以 model_error 收场（provider 故障，内层重试全都用尽）时，整条意图重跑。重跑期间任务被暂停 / 终止 / 进入收尾则立即让位。",
+    trigger:
+      "前面几层都没兜住：worker 以 model_error 收场——内层重试全部用尽，或者流已经开始交付输出后才断掉（那时重放不安全，只能整条重来）。",
+    skips: "额度耗尽已经由轮询换配置处理，不在这里重跑；任务被暂停 / 终止 / 进入收尾时立即让位，不占用退避时间。",
+    desc: "整条意图从头再跑一遍。它是最外层，一次重跑意味着里面几层的次数会再乘一遍。",
     attemptsLabel: "重跑次数",
     defAttempts: 2,
     defInterval: "固定 3s",
@@ -154,7 +174,7 @@ export function RetryRuleFields({
   idPrefix: string;
   value: LLMRetryRule;
   onChange: (r: LLMRetryRule) => void;
-  /** true = 配置抽屉里的紧凑版：只留标题与两个输入 */
+  /** true = 配置抽屉里的紧凑版：省掉展开说明，只留「什么错误会走到这层」这一句 */
   compact?: boolean;
 }) {
   const meta = RETRY_LAYERS[layer];
@@ -166,6 +186,15 @@ export function RetryRuleFields({
           <Label className="text-sm">{meta.title}</Label>
           <span className="text-muted-foreground text-xs">{meta.where}</span>
         </div>
+        {/* 哪些错误会走到这层，具体到状态码——填了旋钮却看不到效果，多半是错误压根不落在这层。 */}
+        <p className="text-muted-foreground text-xs">
+          <span className="font-medium text-foreground">触发</span>：{meta.trigger}
+        </p>
+        {!compact && meta.skips && (
+          <p className="text-muted-foreground text-xs">
+            <span className="font-medium text-foreground">不走这层</span>：{meta.skips}
+          </p>
+        )}
         {!compact && <p className="text-muted-foreground text-xs">{meta.desc}</p>}
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
