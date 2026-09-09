@@ -49,8 +49,12 @@ const intent: Record<string, StatusMeta> = {
   running: { label: "执行中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
   done: { label: "已完成", tone: "green" },
-  blocked: { label: "被拦截", tone: "red" },
-  exhausted: { label: "已穷尽", tone: "violet" },
+  // blocked = 模型/API/网络故障重试用尽，这条意图基本没真正探成（非目标拦截）。
+  blocked: { label: "执行出错", tone: "red" },
+  // exhausted = 达到步数/时间预算被中途掐断、只写回部分结果（非方向已探尽）。
+  exhausted: { label: "预算耗尽", tone: "violet" },
+  // stopped = 用户手动删除/停止了该 work（保留已产出的事实）。
+  stopped: { label: "已停止", tone: "slate" },
 };
 
 const task: Record<string, StatusMeta> = {
