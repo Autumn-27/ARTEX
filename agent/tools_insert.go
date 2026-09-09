@@ -610,13 +610,15 @@ func splitLines(s string) []string {
 // WorkerTools returns the tool set for a work agent.
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.listFindings(), t.listFacts(), t.nodeDetail(),
+		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
+		t.listFindings(),
 		t.addFinding(), t.recordFact(),
-		// cross-work retrieval
-		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
-		t.insertAssets(), t.listAssets(), t.listCompanies(),
+		t.insertAssets(), t.listAssets(),
+		// 以下工具【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
+		// worker 只做单条意图的执行与写回）：list_facts / node_detail / list_companies /
+		// 跨 work 检索 search_all_worker_traces / list_worker_traces / get_worker_trace。
 	}
 }
 

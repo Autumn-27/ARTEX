@@ -450,6 +450,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
+	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
@@ -614,7 +615,7 @@ func (s *Server) reseedPlannerPrompt() {
 // SeedPromptIfEmpty 首插入only,旧库已有版本收不到,故用版本管理【追加一个新版本】并切过去,旧版本仍保留在历史里可找回。
 // settings flag 守卫 → 只做一次。全新库无需处理。与 reseedGoalsPrompt 完全同构。
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_compact_v3"
+	const flag = "worker_prompt_compact_v4"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -635,7 +636,7 @@ func (s *Server) reseedWorkerPrompt() {
 		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
 		return
 	}
-	log.Printf("[prompts] worker 提示词已追加新默认版本(record_fact 删否定结论段+confidence 与穷尽解耦+facts 分条收紧,一次性)")
+	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
 }
 
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：
@@ -756,6 +757,30 @@ func (s *Server) seedCompanyScopeRebind() {
 	if err := s.m.pg.RemoveAgentFromTool("worker", "add_company_scope"); err != nil {
 		log.Printf("[worker] add_company_scope 解绑失败: %v", err)
 		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// seedWorkerReadToolsUnbind strips the read-context / cross-work tools off worker's
+// default binding ONCE on existing DBs (guarded by a settings flag): a worker executes
+// one intent and writes back — reading facts/nodes/companies and pulling other workers'
+// traces is a planning/main concern, not the executor's. Fresh DBs already lack these via
+// WorkerTools(); this only backfills old rows without overriding a user who deliberately
+// re-binds worker. Each RemoveAgentFromTool is per-tool + membership-guarded, so
+// planner/mainagent bindings of the same tool are untouched.
+func (s *Server) seedWorkerReadToolsUnbind() {
+	const flag = "worker_readtools_unbind_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, k := range []string{
+		"list_facts", "node_detail", "list_companies",
+		"search_all_worker_traces", "list_worker_traces", "get_worker_trace",
+	} {
+		if err := s.m.pg.RemoveAgentFromTool("worker", k); err != nil {
+			log.Printf("[worker] %s 从 worker 解绑失败: %v", k, err)
+			return // 出错则不落 flag，下次启动重试
+		}
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 }
