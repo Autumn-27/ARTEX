@@ -810,6 +810,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 	out := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
 		ts := source.Store
+		// §2 cross-task: render the source task's OWN folded view — fold out the
+		// members it has already folded, and surface its cold_digests read-only.
+		hidden := hiddenMembersFor(ts)
 		budget := overviewTextBudget{remaining: perSourceTextBudget}
 		item := map[string]any{
 			"source_task_id": source.Task.TaskID,
@@ -884,6 +887,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		item["recent_findings"] = recentFindings
 		recentFacts := make([]map[string]any, 0, len(facts))
 		for _, fact := range facts {
+			if hidden(fact.ID) {
+				continue // folded into this source's cold_digests — shown there (§2/§6.2)
+			}
 			m := inheritedMap(compactNode(fact), source.Task.TaskID)
 			m["summary"] = budget.take(m["summary"], 400)
 			if from := factFrom[fact.ID]; from > 0 && terminalIntent[from] {
@@ -899,7 +905,14 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		item["recent_facts"] = recentFacts
 
-		recentDone := recentTerminalIntents(ts, relatedOverviewMaxIntentsPerTask)
+		recentDoneRaw := recentTerminalIntents(ts, relatedOverviewMaxIntentsPerTask)
+		recentDone := recentDoneRaw[:0] // in-place filter: drop this source's folded intents (§2)
+		for _, intent := range recentDoneRaw {
+			if hidden(intent.ID) {
+				continue
+			}
+			recentDone = append(recentDone, intent)
+		}
 		for _, intent := range recentDone {
 			intent.Inherited = true
 			intent.SourceTaskID = source.Task.TaskID
@@ -928,6 +941,15 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			}
 		}
 		item["recent_intent_results"] = intentResults
+		// §2 cross-task: the source task's folded cold region, read-only. Members are
+		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
+		if cds := activeDigestBodies(ts); len(cds) > 0 {
+			for _, cd := range cds {
+				cd["inherited"] = true
+				cd["source_task_id"] = source.Task.TaskID
+			}
+			item["cold_digests"] = cds
+		}
 		if statsErr == nil {
 			item["node_stats"] = stats
 		}
