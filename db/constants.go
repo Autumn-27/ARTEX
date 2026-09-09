@@ -8,6 +8,15 @@ const (
 	KindFact    = "fact"    // a worker's exploration result/conclusion (incl. negative results), tied to its intent
 	KindFinding = "finding" // a confirmed vulnerability (report_finding), distinct from a fact
 	KindHint    = "hint"
+	KindDigest  = "digest" // a compressed fold of cold intents/facts (cold-digest-spec §1); lossless — members kept, restorable by id
+)
+
+// Digest node states (kind='digest'). A digest is 'active' while it renders in
+// graph_overview; major compaction retires a merged-away segment to 'superseded'
+// (its covers edges repointed to the new digest) — cold-digest-spec §5.1.
+const (
+	StateDigestActive     = "active"
+	StateDigestSuperseded = "superseded"
 )
 
 // StateOrigin marks the task root fact (KindFact) seeded at task creation — the
@@ -22,4 +31,5 @@ const (
 	RelDerivedFrom = "derived_from"
 	RelYields      = "yields"
 	RelProves      = "proves"
+	RelCovers      = "covers" // digest --covers--> member (cold-digest-spec §1); source of truth for "which digest folds node X"
 )

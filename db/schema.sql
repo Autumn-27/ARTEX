@@ -159,6 +159,10 @@ CREATE TABLE IF NOT EXISTS explorations (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- cold-digest (§2.3): per-task planner round counter — bumped once each time the
+-- planner wakes and processes a round. Drives the ≥R cold-node debounce (measured in
+-- this exploration's own rounds, not global node ids or wall-clock).
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS round_no BIGINT NOT NULL DEFAULT 0;
 DROP TRIGGER IF EXISTS trg_exp_upd ON explorations;
 CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -176,24 +180,46 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
-        (kind='hint'    AND state IN ('active','consumed'))
+        (kind='hint'    AND state IN ('active','consumed')) OR
+        (kind='digest'  AND state IN ('active','superseded'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+-- cold-digest (§2.3/§5.3): content_version bumps on any change that could alter a
+-- digest body (summary/state/confidence); cold_since_round stamps the planner round
+-- a node most recently went from "has a live downstream branch" to none (NULL = hot).
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
+-- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exploration_nodes'::regclass
+          AND conname='ck_node_kind'
+          AND pg_get_constraintdef(oid) NOT LIKE '%digest%'
+    ) THEN
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
+    END IF;
+END $$;
+-- ck_node_state: recreate when it lacks the 'paused' (older) or 'digest' (this rev) branches.
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='exploration_nodes'::regclass
           AND conname='ck_node_state'
-          AND pg_get_constraintdef(oid) NOT LIKE '%paused%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%superseded%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
@@ -202,7 +228,8 @@ BEGIN
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
-            (kind='hint'    AND state IN ('active','consumed'))
+            (kind='hint'    AND state IN ('active','consumed')) OR
+            (kind='digest'  AND state IN ('active','superseded'))
         );
     END IF;
 END $$;
@@ -217,13 +244,29 @@ CREATE TABLE IF NOT EXISTS exploration_edges (
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
     src_id         BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
     dst_id         BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
-    rel            TEXT NOT NULL CHECK (rel IN ('spawns','derived_from','yields','proves')),
+    rel            TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (exploration_id, src_id, rel, dst_id),
-    CONSTRAINT ck_edge_noself CHECK (src_id <> dst_id)
+    CONSTRAINT ck_edge_noself CHECK (src_id <> dst_id),
+    CONSTRAINT ck_edge_rel CHECK (rel IN ('spawns','derived_from','yields','proves','covers'))
 );
 CREATE INDEX IF NOT EXISTS idx_expedges_src ON exploration_edges(src_id, rel);
 CREATE INDEX IF NOT EXISTS idx_expedges_dst ON exploration_edges(dst_id, rel);
+-- cold-digest (§1): the 'covers' relation (digest→member) postdates shipped installs,
+-- whose rel CHECK is an inline auto-named constraint. Find and recreate it as ck_edge_rel.
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname FROM pg_constraint
+     WHERE conrelid='exploration_edges'::regclass AND contype='c'
+       AND pg_get_constraintdef(oid) LIKE '%rel%'
+       AND pg_get_constraintdef(oid) NOT LIKE '%covers%';
+    IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE exploration_edges DROP CONSTRAINT '||quote_ident(cname);
+        ALTER TABLE exploration_edges ADD CONSTRAINT ck_edge_rel
+            CHECK (rel IN ('spawns','derived_from','yields','proves','covers'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS exploration_anchors (
     node_id   BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,

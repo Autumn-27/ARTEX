@@ -414,6 +414,10 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
 	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
+	// cold-digest §7: background cold-node compaction, on the planner's provider/
+	// model (§4 uses the running agent's model). Uses Complete (non-streaming) for
+	// the one-shot body summarization.
+	pl.SetCompactor(agent.NewCompactor(pProv, pCfg.Model))
 	return pl, wk
 }
 
