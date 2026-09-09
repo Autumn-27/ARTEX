@@ -128,11 +128,6 @@ func (w *Worker) SetRunTimeout(run time.Duration) {
 	w.runTimeout = run
 }
 
-// settleHardGrace is how far past the soft wall-clock budget (runTimeout) the hard
-// ctx deadline sits — a backstop for a hung turn; the soft budget handles the
-// normal case at the turn boundary.
-const settleHardGrace = 90 * time.Second
-
 // settleWrapUpPrompt is injected by the SDK settlement phase when a worker hits its
 // turn/time budget: stop probing, write back what was found, then end with a
 // plain-text one-liner (which becomes this run's displayed result).
@@ -489,18 +484,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 
 	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
 	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.
-	// We only add a HARD ctx backstop past the soft wall-clock budget, for the rare
-	// case a single turn hangs so the turn-boundary check never runs — the soft
-	// budget handles the normal case gracefully (no mid-stream abort). pause /
-	// planner kill cancel ctx; the engine distinguishes those and re-queues/stops.
-	// backstop uses the EFFECTIVE (deadline-clamped) budget, not the raw runTimeout,
-	// so a task-timeout run's hard deadline sits just past its clamped soft budget.
-	runCtx := ctx
-	if maxDur > 0 {
-		var runCancel context.CancelFunc
-		runCtx, runCancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
-		defer runCancel()
-	}
-	_, reason, err := captureRunSession(runCtx, s, input, emitWrap)
+	// MaxDuration now interrupts an in-flight tool at the wall-clock deadline and
+	// enters the wrap-up phase on the live ctx, so a run whose tool overran the budget
+	// still settles (no external hard-timeout backstop needed). ctx itself carries only
+	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
+	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
 	return reason, tsx.Writes(), err
 }
