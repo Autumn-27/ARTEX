@@ -427,6 +427,63 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings"] = len(vulnNodes)                   // 确认漏洞数（目标判定看它）
 	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	// findings 是任务里最高价值的产物、单任务通常也不多 → 直接全量带进概览（不像 facts 那样
+	// 只给最近窗口），让 planner 每轮判目标时一眼看全所有确认漏洞，无需再调 list_findings。
+	// 每条只留 {id, summary, evidence?, from_intent?, assets?}：evidence 是 report_finding 的
+	// PoC 文本（payload.evidence.poc）；from_intent 是产生本漏洞的意图；assets 直接给受影响资产
+	// 的可读内容（url/域名/ip:port 等，不再是裸 id）——锚定关系存于 exploration_anchors、经 findings
+	// 表回填。vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
+	var findingMeta map[int64]db.FindingMeta // node_id -> 锚定资产等；仅任务上下文可查
+	assetByID := map[int64]*db.Asset{}
+	if t.as != nil && t.taskID > 0 {
+		findingMeta, _ = t.as.FindingMetaByNodeID(t.taskID)
+		idSet := map[int64]struct{}{}
+		for _, meta := range findingMeta {
+			for _, aid := range meta.AssetIDs {
+				idSet[aid] = struct{}{}
+			}
+		}
+		if len(idSet) > 0 {
+			ids := make([]int64, 0, len(idSet))
+			for aid := range idSet {
+				ids = append(ids, aid)
+			}
+			if assets, err := t.as.GetByIDs(ids); err == nil {
+				for _, a := range assets {
+					assetByID[a.ID] = a
+				}
+			}
+		}
+	}
+	findingList := make([]map[string]any, 0, len(vulnNodes))
+	for _, n := range vulnNodes {
+		var fp map[string]any
+		_ = json.Unmarshal(n.Payload, &fp)
+		m := map[string]any{"id": n.ID, "summary": fp["summary"]}
+		if ev, ok := fp["evidence"].(map[string]any); ok {
+			if poc, ok := ev["poc"].(string); ok && poc != "" {
+				m["evidence"] = poc
+			}
+		}
+		if from := factFrom[n.ID]; from > 0 {
+			m["from_intent"] = from // 本漏洞由哪个意图产生
+		}
+		if meta, ok := findingMeta[n.ID]; ok && len(meta.AssetIDs) > 0 {
+			assets := make([]string, 0, len(meta.AssetIDs))
+			for _, aid := range meta.AssetIDs {
+				if a := assetByID[aid]; a != nil {
+					if v := assetValue(a); v != "" {
+						assets = append(assets, v)
+						continue
+					}
+				}
+				assets = append(assets, fmt.Sprintf("#%d", aid)) // 资产已删/查不到 → 退回 id 标记，别丢信息
+			}
+			m["assets"] = assets // 受影响资产的可读内容
+		}
+		findingList = append(findingList, m)
+	}
+	out["finding_list"] = findingList
 	recentFacts := make([]map[string]any, 0, 20)
 	for _, n := range factNodes {
 		if len(recentFacts) >= 20 {
@@ -851,6 +908,35 @@ func compactNode(n *db.Node) map[string]any {
 		inheritedMap(m, n.SourceTaskID)
 	}
 	return m
+}
+
+// assetValue distills an asset to its most identifying human-readable string
+// (url / domain / ip[:port] / app / service name) so finding_list can show the
+// affected asset's content inline instead of a bare id. Empty when nothing
+// identifying is set (caller falls back to #id).
+func assetValue(a *db.Asset) string {
+	switch {
+	case a.URL != "":
+		if a.Method != "" {
+			return a.Method + " " + a.URL // 接口：带上 HTTP 方法
+		}
+		return a.URL
+	case a.Domain != "":
+		if a.Port != nil {
+			return fmt.Sprintf("%s:%d", a.Domain, *a.Port)
+		}
+		return a.Domain
+	case a.IP != "":
+		if a.Port != nil {
+			return fmt.Sprintf("%s:%d", a.IP, *a.Port)
+		}
+		return a.IP
+	case a.AppName != "":
+		return a.AppName
+	case a.ServiceName != "":
+		return a.ServiceName
+	}
+	return ""
 }
 
 // compactFinding is compactNode plus the vuln-specific vulnclass/severity.

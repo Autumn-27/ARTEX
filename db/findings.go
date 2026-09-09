@@ -743,6 +743,13 @@ type FindingMeta struct {
 }
 
 // FindingMetaByNodeID maps a task's finding node ids to their standalone-row
+// metadata (status + anchored asset ids) via the asset store, so callers holding
+// only an AssetStore (e.g. the agent ToolSet) can reach it without a raw *DB.
+func (a *AssetStore) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
+	return a.db.FindingMetaByNodeID(taskID)
+}
+
+// FindingMetaByNodeID maps a task's finding node ids to their standalone-row
 // metadata, so the per-task view (which reads exploration nodes) can show and
 // edit the same status — and the same anchored assets — as the global 发现 page.
 func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
