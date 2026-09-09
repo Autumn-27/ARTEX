@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-09-09
+
 ### LLM
 
 #### 新增的功能
@@ -457,7 +459,8 @@
 - [@Autumn-27](https://github.com/Autumn-27)
 - [@neouks](https://github.com/neouks)
 
-[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/Autumn-27/ARTEX/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/Autumn-27/ARTEX/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/Autumn-27/ARTEX/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/Autumn-27/ARTEX/compare/v0.3.4...v0.3.5
