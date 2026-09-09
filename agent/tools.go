@@ -425,11 +425,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// only when it is covered AND still cold. covered_members (built from hidden) lets a
 	// parents/yields id pointing into a live fold stay resolvable (§6.5 dangling lineage).
 	covered, _ := t.ts.CoveredMembers()
+	// Hot set at render time serves two §6 needs: (1) a covered member that revived
+	// (now hot) must reappear this round; (2) the 60-cap must never truncate hot
+	// (active-context) nodes — only the cold-but-unfolded region is cappable (§6.3).
+	// Computed every round (cheap for real graph sizes); nil map degrades safely.
 	var hotAtRender map[int64]bool
-	if len(covered) > 0 {
-		if cg, _, err := loadColdGraph(t.ts); err == nil {
-			hotAtRender = cg.hotSet()
-		}
+	if cg, _, err := loadColdGraph(t.ts); err == nil {
+		hotAtRender = cg.hotSet()
 	}
 	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
 	fr, _ := t.ts.Frontier(100)
@@ -448,7 +450,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
-	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	// recent_done_intents is finalized further below (after facts are known) so the
+	// 60-cap can balance the two lists and protect hot nodes (§6.3).
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
 	// 平行命名——后者只是它的最新窗口（≤15）截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
@@ -521,7 +524,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		findingList = append(findingList, m)
 	}
 	out["finding_list"] = findingList
-	recentFacts := make([]map[string]any, 0, len(factNodes))
+	// Build facts, split hot (active context — a fact under a live intent) from cold
+	// (not-yet-folded). Hidden (folded & still cold) ones are surfaced via cold_digests.
+	var recentFactsHot, recentFactsCold []map[string]any
 	for _, n := range factNodes {
 		if hidden(n.ID) {
 			continue // in a cold_digest and still cold — surfaced via cold_digests (§6.2)
@@ -538,22 +543,34 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				m["confidence"] = c
 			}
 		}
-		recentFacts = append(recentFacts, m)
-	}
-	// §6.3 兜底截断：未折的 settled/cold 区（recent_done_intents + recent_facts）总量 >
-	// cap 时按最新优先截——live(open/running) 在独立字段、永不受影响。两边【均衡】保留：
-	// 较少的一侧全留，较多的一侧填剩余额度，各自至少保底 cap/2，绝不把某一侧饿到 0
-	// （深探索链下 hot 的 settled 意图很多，天真的"意图优先"会把 facts 挤没）。正常由压缩
-	// 阈值约束、不触发；触发即标注，说明压缩滞后。
-	const unfoldedCap = 60
-	if doneList, ok := out["recent_done_intents"].([]map[string]any); ok {
-		if keepDone, keepFacts, truncated := balancedCap(len(doneList), len(recentFacts), unfoldedCap); truncated {
-			out["recent_done_intents"] = doneList[:keepDone]
-			recentFacts = recentFacts[:keepFacts]
-			out["unfolded_truncated"] = true // 正常不触发；触发说明压缩滞后
+		if hotAtRender[n.ID] {
+			recentFactsHot = append(recentFactsHot, m)
+		} else {
+			recentFactsCold = append(recentFactsCold, m)
 		}
 	}
-	out["recent_facts"] = recentFacts // 最近事实的 {id, summary, from_intent, confidence?}，详情/证据用 node_detail(id)
+	// Split the settled intents the same way: hot = ancestor of a live intent (active
+	// context); cold = not-yet-folded settled.
+	var doneHot, doneCold []*db.Node
+	for _, n := range recentDone {
+		if hotAtRender[n.ID] {
+			doneHot = append(doneHot, n)
+		} else {
+			doneCold = append(doneCold, n)
+		}
+	}
+	// §6.3 兜底截断：hot（活跃探索上下文——live 前沿的祖先链、live 意图下的新事实）【永不】
+	// 被截；60-cap 只约束【冷但未折】的残余（压缩滞后时才增长）。live(open/running) 另有字段、
+	// 同样不受影响。冷区两侧均衡保留：较少一侧全留、较多一侧填余额，各自保底 cap/2，绝不饿到 0。
+	const unfoldedCap = 60
+	keepColdDone, keepColdFacts, truncated := balancedCap(len(doneCold), len(recentFactsCold), unfoldedCap)
+	if truncated {
+		out["unfolded_truncated"] = true // 正常不触发；触发说明压缩滞后
+	}
+	out["recent_done_intents"] = append(
+		compactIntents(doneHot, parentsOf, yieldsOf),
+		compactIntents(doneCold[:keepColdDone], parentsOf, yieldsOf)...)
+	out["recent_facts"] = append(recentFactsHot, recentFactsCold[:keepColdFacts]...) // {id, summary, from_intent, confidence?}；详情用 node_detail(id)
 	// cold-digest §6.1/§6.2: the folded cold region + the per-asset directory that
 	// collapses independent directions, plus the dangling-lineage resolver map.
 	if cds, cidx := t.coldDigestOverview(); len(cds) > 0 {

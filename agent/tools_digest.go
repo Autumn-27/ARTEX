@@ -48,28 +48,34 @@ func (t *ToolSet) coldDigestOverview() (digests []map[string]any, index []map[st
 		})
 	}
 
-	// index (§6.2): asset → digests touching it. A digest with no anchored asset
-	// falls into the 0 bucket ("(未锚定资产)"). One digest may list under >1 asset.
+	// index (§6.2): asset → digests. Each digest lands in EXACTLY ONE bucket — its
+	// representative asset = the asset anchored on the most of its members (mode;
+	// tie-break lowest id). This is what makes the index converge: bucketing a digest
+	// into every asset its members touch would duplicate it across dozens of buckets
+	// and blow up the top-level count instead of shrinking it (asset_ids are fine-
+	// grained — a real task has ~144 of them). A digest whose members anchor no asset
+	// falls into the 0 bucket ("(未锚定资产)").
 	byAsset := map[int64]map[int64]bool{} // asset id → set of digest ids
 	assetSet := map[int64]bool{}
 	for dID, ms := range memByDigest {
-		touched := map[int64]bool{}
+		counts := map[int64]int{}
 		for _, m := range ms {
 			for _, a := range assetsByNode[m] {
-				touched[a] = true
+				counts[a]++
 			}
 		}
-		if len(touched) == 0 {
-			touched[0] = true
+		rep, best := int64(0), 0
+		for a, c := range counts {
+			if c > best || (c == best && (rep == 0 || a < rep)) {
+				rep, best = a, c
+			}
 		}
-		for a := range touched {
-			if byAsset[a] == nil {
-				byAsset[a] = map[int64]bool{}
-			}
-			byAsset[a][dID] = true
-			if a != 0 {
-				assetSet[a] = true
-			}
+		if byAsset[rep] == nil {
+			byAsset[rep] = map[int64]bool{}
+		}
+		byAsset[rep][dID] = true
+		if rep != 0 {
+			assetSet[rep] = true
 		}
 	}
 	labels := map[int64]string{}
