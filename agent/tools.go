@@ -12,6 +12,28 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
+// balancedCap decides how many done-intents and facts to keep when the combined
+// unfolded settled/cold region exceeds cap (§6.3). The smaller side is kept whole;
+// the larger side takes the remaining budget; neither is starved below cap/2.
+// Returns the keep counts and whether truncation applied. Newest-first slices, so
+// callers keep the head.
+func balancedCap(done, facts, cap int) (keepDone, keepFacts int, truncated bool) {
+	if done+facts <= cap {
+		return done, facts, false
+	}
+	half := cap / 2
+	keepDone, keepFacts = done, facts
+	switch {
+	case done > half && facts > half:
+		keepDone, keepFacts = half, cap-half
+	case done > half:
+		keepDone = cap - facts // facts fit in ≤half; intents take the rest
+	default:
+		keepFacts = cap - done // intents fit in ≤half; facts take the rest
+	}
+	return keepDone, keepFacts, true
+}
+
 // compactIntents distills intents to {id, summary, state, asset_ids, parents,
 // yields} so the planner sees both the direction and its LINEAGE — parents (the
 // upstream nodes it derived from: facts/intents/findings) and yields (the facts/
@@ -396,6 +418,20 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			factFrom[e.To] = e.From
 		}
 	}
+	// cold-digest §6: members folded into an active digest are shown via cold_digests
+	// (below), not the flat recent_* lists. `covered` maps member id → its digest id.
+	// §6 render-time revival check: a covered member that has become hot again (a new
+	// intent derived from it) must reappear this round — so `hidden` folds a member out
+	// only when it is covered AND still cold. covered_members (built from hidden) lets a
+	// parents/yields id pointing into a live fold stay resolvable (§6.5 dangling lineage).
+	covered, _ := t.ts.CoveredMembers()
+	var hotAtRender map[int64]bool
+	if len(covered) > 0 {
+		if cg, _, err := loadColdGraph(t.ts); err == nil {
+			hotAtRender = cg.hotSet()
+		}
+	}
+	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
 	fr, _ := t.ts.Frontier(100)
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
@@ -405,9 +441,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		case "running":
 			running = append(running, n)
 		case "done", "blocked", "exhausted":
-			if len(recentDone) < 15 {
-				recentDone = append(recentDone, n)
+			if hidden(n.ID) {
+				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
 			}
+			recentDone = append(recentDone, n) // §6: no 15-cap; folded ones are gone, cap applied below
 		}
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
@@ -484,10 +521,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		findingList = append(findingList, m)
 	}
 	out["finding_list"] = findingList
-	recentFacts := make([]map[string]any, 0, 20)
+	recentFacts := make([]map[string]any, 0, len(factNodes))
 	for _, n := range factNodes {
-		if len(recentFacts) >= 20 {
-			break
+		if hidden(n.ID) {
+			continue // in a cold_digest and still cold — surfaced via cold_digests (§6.2)
 		}
 		m := compactNode(n)
 		if from := factFrom[n.ID]; from > 0 {
@@ -503,7 +540,38 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 		recentFacts = append(recentFacts, m)
 	}
+	// §6.3 兜底截断：未折的 settled/cold 区（recent_done_intents + recent_facts）总量 >
+	// cap 时按最新优先截——live(open/running) 在独立字段、永不受影响。两边【均衡】保留：
+	// 较少的一侧全留，较多的一侧填剩余额度，各自至少保底 cap/2，绝不把某一侧饿到 0
+	// （深探索链下 hot 的 settled 意图很多，天真的"意图优先"会把 facts 挤没）。正常由压缩
+	// 阈值约束、不触发；触发即标注，说明压缩滞后。
+	const unfoldedCap = 60
+	if doneList, ok := out["recent_done_intents"].([]map[string]any); ok {
+		if keepDone, keepFacts, truncated := balancedCap(len(doneList), len(recentFacts), unfoldedCap); truncated {
+			out["recent_done_intents"] = doneList[:keepDone]
+			recentFacts = recentFacts[:keepFacts]
+			out["unfolded_truncated"] = true // 正常不触发；触发说明压缩滞后
+		}
+	}
 	out["recent_facts"] = recentFacts // 最近事实的 {id, summary, from_intent, confidence?}，详情/证据用 node_detail(id)
+	// cold-digest §6.1/§6.2: the folded cold region + the per-asset directory that
+	// collapses independent directions, plus the dangling-lineage resolver map.
+	if cds, cidx := t.coldDigestOverview(); len(cds) > 0 {
+		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
+		out["cold_index"] = cidx  // [{asset, asset_id, digest_ids}] —— 按资产收敛方向 (§6.2)
+	}
+	if len(covered) > 0 {
+		cm := make(map[string]int64, len(covered))
+		for member, dig := range covered {
+			if hotAtRender[member] {
+				continue // revived → shown live this round, not a dangling folded id
+			}
+			cm[strconv.FormatInt(member, 10)] = dig
+		}
+		if len(cm) > 0 {
+			out["covered_members"] = cm // 悬空血缘 id → 它属于哪个 digest；用 expand_digest 展开 (§6.5)
+		}
+	}
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
 	if description, goal, err := t.ts.Root(); err == nil {
@@ -2026,6 +2094,8 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
+		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
+		t.expandDigest(), t.expandIndex(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。

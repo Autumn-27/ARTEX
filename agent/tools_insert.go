@@ -611,6 +611,8 @@ func splitLines(s string) []string {
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.listFindings(), t.listFacts(), t.nodeDetail(),
+		// cold-digest §6.1: a worker may hit a folded id in lineage — let it expand.
+		t.expandDigest(), t.expandIndex(),
 		t.addFinding(), t.recordFact(),
 		// cross-work retrieval
 		t.searchAllWorkerTraces(), t.listWorkerTraces(), t.getWorkerTrace(),
@@ -624,6 +626,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
+		t.expandDigest(), t.expandIndex(), // cold-digest §6.1
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
 		// steer_work：人可对某条正在运行的意图(work)实时注入纠偏指令（不打断、不丢进展）。
 		t.steerWorkTool(),

@@ -35,6 +35,7 @@ type Planner struct {
 	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -49,6 +50,11 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetCompactor wires the cold-node compactor (cold-digest §7). Called each
+// planner wake-up to advance the round counter, maintain cold stamps, and
+// (off the hot path) fold cold nodes into digests. nil = feature disabled.
+func (p *Planner) SetCompactor(c *Compactor) { p.compactor = c }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default).
@@ -326,6 +332,11 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
+	// cold_since_round stamps, and (if a threshold is hit) kick off background
+	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
+	// runs in a detached goroutine so it never adds latency to this round.
+	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
