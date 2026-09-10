@@ -109,7 +109,24 @@ type PreparedTrafficEvidence struct {
 	Snapshot TrafficEvidenceSnapshot
 }
 
+// Normalize makes the snapshot's text columns safe for PostgreSQL. URL and the
+// head blocks come straight off the wire, so a target answering with a non-UTF-8
+// header (a GBK `Content-Disposition: filename=…`, a NUL byte) would otherwise
+// abort the INSERT and roll back the whole finding — losing a confirmed finding
+// over a malformed response header. Applied before hashing so the ID always
+// matches the bytes that actually land in the table.
+func (s TrafficEvidenceSnapshot) Normalize() TrafficEvidenceSnapshot {
+	s.SourceTrafficID = utf8Clean(s.SourceTrafficID)
+	s.URL = utf8Clean(s.URL)
+	s.Method = utf8Clean(s.Method)
+	s.ContentType = utf8Clean(s.ContentType)
+	s.ReqHead = utf8Clean(s.ReqHead)
+	s.RespHead = utf8Clean(s.RespHead)
+	return s
+}
+
 func TrafficSnapshotID(snapshot TrafficEvidenceSnapshot) string {
+	snapshot = snapshot.Normalize()
 	snapshot.ID = ""
 	snapshot.CreatedAt = time.Time{}
 	raw, _ := json.Marshal(snapshot)
@@ -169,6 +186,10 @@ func InsertEvidenceSnapshotTx(tx *sql.Tx, s TrafficEvidenceSnapshot) error {
 	if s.ID != TrafficSnapshotID(s) {
 		return errors.New("证据快照元数据哈希不匹配")
 	}
+	// The ID was computed over the normalized form; store those same bytes.
+	id := s.ID
+	s = s.Normalize()
+	s.ID = id
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}

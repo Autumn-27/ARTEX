@@ -324,43 +324,45 @@ func (s *Server) getFindingTrafficBody(w http.ResponseWriter, r *http.Request) {
 	}
 	side := r.URL.Query().Get("side")
 	store := s.evidenceStore()
-	started := false
-	err = store.WithBinding(r.Context(), id, bid, func(b db.FindingTrafficBinding) error {
-		if r.URL.Query().Get("download") == "1" {
-			f, length, err := store.OpenBody(b.Snapshot, side)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"evidence-%d-%s.bin\"", bid, side))
-			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-			started = true
-			_, err = io.Copy(w, f)
-			return err
-		}
-		offset, length := int64(0), int64(8192)
-		for name, dst := range map[string]*int64{"offset": &offset, "length": &length} {
-			if raw := r.URL.Query().Get(name); raw != "" {
-				v, err := strconv.ParseInt(raw, 10, 64)
-				if err != nil {
-					return err
-				}
-				*dst = v
-			}
-		}
-		preview, err := readEvidencePreview(store, b.Snapshot, side, offset, length)
-		if err != nil {
-			return err
-		}
-		started = true
-		writeJSON(w, 200, preview)
-		return nil
-	})
-	if err != nil && !started {
+	// Resolve the binding under the evidence lock, then read the blob without it:
+	// both paths below are O(body size) and would otherwise stall every evidence
+	// write for as long as the client takes to receive the data.
+	b, err := store.Binding(r.Context(), id, bid)
+	if err != nil {
 		evidenceError(w, err)
+		return
 	}
+	if r.URL.Query().Get("download") == "1" {
+		f, length, err := store.OpenBody(b.Snapshot, side)
+		if err != nil {
+			evidenceError(w, err)
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"evidence-%d-%s.bin\"", bid, side))
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		_, _ = io.Copy(w, f)
+		return
+	}
+	offset, length := int64(0), int64(8192)
+	for name, dst := range map[string]*int64{"offset": &offset, "length": &length} {
+		if raw := r.URL.Query().Get(name); raw != "" {
+			v, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				evidenceError(w, err)
+				return
+			}
+			*dst = v
+		}
+	}
+	preview, err := readEvidencePreview(store, b.Snapshot, side, offset, length)
+	if err != nil {
+		evidenceError(w, err)
+		return
+	}
+	writeJSON(w, 200, preview)
 }
 
 func (s *Server) toolGetFindingTraffic() actool.CoreTool {

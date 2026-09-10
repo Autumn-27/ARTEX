@@ -166,6 +166,15 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 		if a.Correlation != "exact" {
 			a.ExecutionStatus = "unknown"
 		}
+		// A straight rule/model allow is a routine event, not an approval a human
+		// reviewed: with the fallback judge on, a pentest task emits thousands of
+		// them. Keeping the full snapshot would write 24×8KiB of context plus a
+		// 32KiB prompt per row into intercept_pending — hundreds of MB, which the
+		// task archive (SELECT *) then carries along. Decision metadata and the
+		// execution result still land; only the bulky replay snapshot is dropped.
+		// The ask path builds its audit in HandleAsk and is unaffected.
+		a.UserMessage, a.UserTruncated = "", false
+		a.Context, a.ContextTruncated = nil, false
 	}
 	if status == "denied" {
 		a.EffectiveAction, a.ExecutionStatus = "deny", "not_executed"

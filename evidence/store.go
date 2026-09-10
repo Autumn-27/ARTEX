@@ -169,6 +169,9 @@ func (s *Store) prepare(ctx context.Context, refs []db.TrafficRef) ([]db.Prepare
 		}
 		v := db.TrafficEvidenceSnapshot{SourceTrafficID: e.ID, CapturedAt: e.TS, URL: e.URL, Method: e.Method, Status: e.Status, ContentType: e.ContentType,
 			ReqHead: e.ReqHead, RespHead: e.RespHead, ReqHash: rh, RespHash: ph, ReqLen: e.ReqLen, RespLen: e.RespLen}
+		// Raw wire bytes: normalize once here so the ID, the stored row and every
+		// downstream consumer (archive, API responses) all see the same text.
+		v = v.Normalize()
 		v.ID = db.TrafficSnapshotID(v)
 		out = append(out, db.PreparedTrafficEvidence{Ref: byID[e.ID], Snapshot: v})
 		return nil
@@ -224,8 +227,23 @@ func (s *Store) WithBinding(ctx context.Context, findingID, bindingID int64, fn 
 	})
 }
 
-// OpenBody must be called while holding WithEvidenceTx/WithBinding, and the
-// returned file closed before that callback returns.
+// Binding resolves one binding's metadata under the evidence lock and releases
+// the lock before returning. Callers that then stream a body to a client must
+// use this instead of WithBinding: verifyFile+io.Copy is O(body size), so a
+// large download (or a slow client) holding WithEvidenceTx would block every
+// evidence write process-wide. Reading the blob afterwards is safe — blobs are
+// content-addressed and GC only reaps unreferenced files after a 24h grace
+// period, and an already-open fd survives an unlink regardless.
+func (s *Store) Binding(ctx context.Context, findingID, bindingID int64) (db.FindingTrafficBinding, error) {
+	var out db.FindingTrafficBinding
+	err := s.WithBinding(ctx, findingID, bindingID, func(b db.FindingTrafficBinding) error {
+		out = b
+		return nil
+	})
+	return out, err
+}
+
+// OpenBody may be called without holding the evidence lock; see Binding.
 func (s *Store) OpenBody(snapshot db.TrafficEvidenceSnapshot, side string) (*os.File, int64, error) {
 	hash, length := snapshot.ReqHash, snapshot.ReqLen
 	if side == "response" {

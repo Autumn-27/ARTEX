@@ -19,8 +19,6 @@ func findingTrafficBindingEnabled() bool {
 	return FindingTrafficBindingEnabled != nil && FindingTrafficBindingEnabled()
 }
 
-const findingTrafficDisabled = "Agent 自动绑定流量已关闭；请在系统设置开启后重试，或使用页面人工绑定。未登记本次携带流量的漏洞。无流量上报可省略 traffic_refs / evidence_hint_id。"
-
 // Applied after ToolResolve: user descriptions and prompts remain intact, while
 // all actual reporters (including Planner and custom chat agents) see the same
 // API contract. Disabled/unbound tools are never reintroduced here.

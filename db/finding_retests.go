@@ -157,6 +157,18 @@ func (d *DB) FindingRetestForConversation(ctx context.Context, conversationID in
 	return r, err
 }
 
+// FailPendingRetestForConversation seals a conversation's unfinished retest when
+// the runner could not even load it — the retest ID is unknown on that path, so
+// the conversation ID is the only handle. Without it a transient read error
+// leaves the row 'pending' forever: the findings list keeps showing 复测中 and
+// every later 发起复测 is deduped against a run that is not happening, with only
+// a process restart (RecoverFindingRetests) able to clear it.
+func (d *DB) FailPendingRetestForConversation(conversationID int64, reason string) error {
+	_, err := d.Exec(`UPDATE finding_retests SET status='failed', error=$2, finished_at=now()
+		WHERE conversation_id=$1 AND status IN ('pending','running')`, conversationID, reason)
+	return err
+}
+
 func (d *DB) StartFindingRetest(ctx context.Context, id int64) (bool, error) {
 	res, err := d.ExecContext(ctx, `UPDATE finding_retests SET status='running', started_at=now() WHERE id=$1 AND status='pending'`, id)
 	if err != nil {

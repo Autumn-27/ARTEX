@@ -1393,8 +1393,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if t.ts == nil {
 			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
 		}
-		if !findingTrafficBindingEnabled() && (len(a.TrafficRefs) > 0 || pid(a.EvidenceHintID) > 0) {
-			return actool.Errorf(findingTrafficDisabled), nil
+		// Auto-binding off: ignore the evidence params instead of rejecting the call.
+		// stripTrafficParameters already removes them from the advertised schema, but
+		// models routinely emit fields anyway — failing here would discard a confirmed
+		// finding over a stray parameter. The success path below reports evidence_status
+		// "not_bound" with the "已关闭，可在页面人工关联" note, which is what the caller needs.
+		if !findingTrafficBindingEnabled() {
+			a.TrafficRefs, a.EvidenceHintID = nil, nil
 		}
 		if len(a.EvidenceHintID) > 0 && pid(a.EvidenceHintID) <= 0 {
 			return actool.Errorf("evidence_hint_id 必须为有效的提示节点 ID；无交接提示时省略"), nil

@@ -496,7 +496,12 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		// Read without the run cancellation so an immediate stop still seals pending.
 		r, err := s.m.pg.FindingRetestForConversation(context.Background(), c.ID)
 		if err != nil {
+			// The sealing defer below needs r.ID, which we do not have here. Seal by
+			// conversation instead, otherwise the row stays 'pending' forever.
 			log.Printf("[conv %d] load retest: %v", c.ID, err)
+			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复测状态读取失败，请重新发起"); err != nil {
+				log.Printf("[conv %d] seal retest: %v", c.ID, err)
+			}
 			return
 		}
 		if r != nil && r.Status == "pending" {

@@ -463,12 +463,13 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()       // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt()   // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()     // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()      // worker 提示词:加否定结论证据门槛(一次性)
-	s.seedReporterAgent()       // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
-	s.seedFindingTrafficTools() // 增加可选证据参数及只读证据工具，保留用户配置
+	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedMainAgentPrompt()         // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
+	s.reseedPlannerPrompt()           // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
+	s.reseedWorkerPrompt()            // worker 提示词:加否定结论证据门槛(一次性)
+	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
+	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
@@ -651,6 +652,50 @@ func (s *Server) reseedWorkerPrompt() {
 	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
 }
 
+// reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
+// 该工具是只读的、「不依赖捕获开关」,自动绑定关不关都能读到人工绑定的证据。若这里
+// 写成「启用自动绑定才读」,默认关闭配置下 reporter 就不会传 evidence_version,
+// SetFindingReportVersionByNodeID 便按 legacy 语义写 -1,漏洞详情与 Markdown 导出
+// 从此常驻「证据已变更，报告待更新」,而 UI 上没有任何入口能把它清掉。
+const reporterToolCallMessage = "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
+	"先用 get_finding_traffic(finding_id) 读取当前证据清单及其 version（空清单是正常情况，照常写报告）；" +
+	"若运行指引启用自动绑定，在读取前先核实并关联本次漏洞的流量。节点详情使用 finding_node_id。" +
+	"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存，" +
+	"evidence_version 必须传，否则报告会被永久标记为待更新。不要混用两种编号。"
+
+// 旧版触发消息(0.3.8 及更早)。只有仍与它逐字相同的记录才会被迁移覆盖，用户改过的保持原样。
+const reporterToolCallMessageV1 = "上面刚有一个漏洞被 report_finding 登记。请从触发上下文里取出 finding_id" +
+	"（工具返回 \"finding recorded: <id>\" 里的数字）与任务 id，按你的职责撰写该漏洞的详细报告，" +
+	"最后调用 update_finding_report(finding_id, report) 保存。"
+
+// upgradeReporterTriggerMessage 把老库里仍是默认文案的 reporter 触发消息刷成新版本。
+// seedReporterAgent 受 reporter_agent_seed_v1 守卫且只在新建 agent 时写触发器，所以
+// 升级上来的库拿不到新文案 —— 工具 schema 由 seedFindingTrafficTools 补齐了
+// evidence_version，但没有任何东西告诉 reporter 去用它。一次性，且只覆盖未被改动的文案。
+func (s *Server) upgradeReporterTriggerMessage() {
+	const flag = "reporter_trigger_evidence_version_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }() // 只尝试一次
+	triggers, err := s.m.pg.ListTriggersFor("reporter")
+	if err != nil {
+		log.Printf("[reporter] 读取触发器失败: %v", err)
+		return
+	}
+	for _, t := range triggers {
+		if !t.OnToolCall || t.ToolCallMessage != reporterToolCallMessageV1 {
+			continue // 用户改过或不是 finding 触发器，不动。
+		}
+		t.ToolCallMessage = reporterToolCallMessage
+		if err := s.m.pg.UpdateTrigger(t); err != nil {
+			log.Printf("[reporter] 升级触发消息失败: %v", err)
+			return
+		}
+		log.Printf("[reporter] 触发消息已升级为读取并回传 evidence_version")
+	}
+}
+
 // seedReporterAgent 预置一个「报告撰写」自定义 agent(builtin=false，可在 UI 编辑/删除)：
 // 绑定 update_finding_report + 任务查询工具，并挂一个「report_finding 被调用即触发」的
 // 触发器 —— 每登记一个漏洞就唤起它写详细报告。一次性(settings flag 守卫)：用户删掉后不再重建。
@@ -691,13 +736,11 @@ func (s *Server) seedReporterAgent() {
 	// 触发器：report_finding 被调用即触发（工具返回 "finding recorded: <id>" 带上 finding_id，
 	// 任务 id 也在触发消息里）。
 	if _, err := s.m.pg.CreateTrigger(&db.AgentTrigger{
-		AgentKey:   "reporter",
-		Enabled:    true,
-		OnToolCall: true,
-		ToolNames:  []string{"report_finding"},
-		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
-			"若运行指引启用自动绑定，先核实并关联本次漏洞的流量，再用 get_finding_traffic(finding_id) 读取最新证据；节点详情使用 finding_node_id。" +
-			"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存。不要混用两种编号。",
+		AgentKey:        "reporter",
+		Enabled:         true,
+		OnToolCall:      true,
+		ToolNames:       []string{"report_finding"},
+		ToolCallMessage: reporterToolCallMessage,
 	}); err != nil {
 		log.Printf("[reporter] 创建触发器失败: %v", err)
 	}
