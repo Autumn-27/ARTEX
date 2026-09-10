@@ -39,6 +39,7 @@ const FINDING_STATUSES: FindingStatus[] = [
   "in_progress",
   "confirmed",
   "resolved",
+  "fixed",
   "false_positive",
   "ignored",
   "duplicate",

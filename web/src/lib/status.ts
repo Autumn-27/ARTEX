@@ -79,6 +79,7 @@ const finding: Record<string, StatusMeta> = {
   in_progress: { label: "处理中", tone: "blue" },
   confirmed: { label: "已确认", tone: "red" },
   resolved: { label: "已处理", tone: "green" },
+  fixed: { label: "已修复", tone: "green" },
   false_positive: { label: "误报", tone: "slate" },
   ignored: { label: "忽略", tone: "neutral" },
   duplicate: { label: "重复", tone: "neutral" },

@@ -6,6 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+  ActiveFindingRetest,
   Activity,
   Agent,
   AgentDetail,
@@ -33,6 +34,7 @@ import type {
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
+  FindingRetest,
   FindingStats,
   FindingStatus,
   FindingsPage,
@@ -538,6 +540,12 @@ export const api = {
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // 删除漏洞:移除 findings 记录 + 来源探索节点(从发现列表/任务发现 Tab/探索图一并消失)。
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
+  findingRetests: (id: string) =>
+    get<{ retests: FindingRetest[] }>(`/exploration/findings/${encodeURIComponent(id)}/retests`).then((r) => arr(r.retests)),
+  activeFindingRetests: () =>
+    get<{ retests: ActiveFindingRetest[] }>("/exploration/findings/retests/active").then((r) => arr(r.retests)),
+  startFindingRetest: (id: string, notes: string) =>
+    post<{ retest: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/retests`, { notes }),
   deepenFinding: (id: string, description: string) =>
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),

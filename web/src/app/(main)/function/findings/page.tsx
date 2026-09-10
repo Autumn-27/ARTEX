@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { FindingRetestDialog } from "@/components/finding-retest-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { Button } from "@/components/ui/button";
@@ -40,7 +41,15 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingAssetNode, FindingGroup, FindingStats, FindingStatus, Severity } from "@/lib/types";
+import type {
+  ActiveFindingRetest,
+  Finding,
+  FindingAssetNode,
+  FindingGroup,
+  FindingStats,
+  FindingStatus,
+  Severity,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
@@ -145,11 +154,43 @@ export default function FindingsPage() {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
   const [deepenFinding, setDeepenFinding] = React.useState<Finding | null>(null);
+  const [retestFinding, setRetestFinding] = React.useState<Finding | null>(null);
+  const [activeRetests, setActiveRetests] = React.useState<Record<string, ActiveFindingRetest>>({});
+  const activeRetestFingerprint = Object.values(activeRetests)
+    .map((item) => item.id)
+    .join(",");
+  const retestRefreshVersion = React.useRef(0);
   const [deepenDescription, setDeepenDescription] = React.useState("");
   const [deepening, setDeepening] = React.useState(false);
   const filterFingerprint = JSON.stringify([severity, status, vulnclass, task, sort, query]);
   const activeFilterFingerprint = React.useRef(filterFingerprint);
   activeFilterFingerprint.current = filterFingerprint;
+
+  // 一个轻量请求覆盖所有行/视图，避免逐行拉取完整复测历史；等待上一轮完成再轮询。
+  React.useEffect(() => {
+    let disposed = false;
+    let failed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refreshRetests() {
+      const version = retestRefreshVersion.current;
+      try {
+        const rows = await api.activeFindingRetests();
+        if (disposed || version !== retestRefreshVersion.current) return;
+        setActiveRetests(Object.fromEntries(rows.map((item) => [item.finding_id, item])));
+        failed = false;
+      } catch (error) {
+        if (!disposed && !failed) toast.error(`加载复测状态失败：${(error as Error).message}`);
+        failed = true;
+      } finally {
+        if (!disposed) timer = setTimeout(() => void refreshRetests(), 3000);
+      }
+    }
+    void refreshRetests();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, []);
 
   React.useEffect(() => {
     const raw = getLocalStorageValue(FINDING_LIST_PREFERENCE_KEY);
@@ -482,14 +523,16 @@ export default function FindingsPage() {
   // refreshAfterMutation 主动重拉),不做轮询。
   React.useEffect(() => {
     if (!preferencesHydrated || view !== "asset") return;
+    void activeRetestFingerprint; // 复测结束可能改变状态筛选下的资产计数。
     void loadAssetTree();
-  }, [loadAssetTree, preferencesHydrated, view]);
+  }, [activeRetestFingerprint, loadAssetTree, preferencesHydrated, view]);
 
   // 只轮询当前视图:平铺视图刷当前页,分组视图刷组头与每个已展开的组(其分页彼此独立)。
   // 资产视图只查一次(见下面的 return),它的左树是导航结构,没必要每 5 秒重算。
   // 等偏好水合后再发首个请求,否则会先按默认视图/筛选白拉一次。
   React.useEffect(() => {
     if (!preferencesHydrated) return;
+    void activeRetestFingerprint; // 包括不定时轮询的资产视图，也在复测结束后刷新处置状态。
     const refresh = () => {
       if (view === "flat" || view === "asset") {
         if (!flatStateRef.current.loading) void loadFlat();
@@ -506,7 +549,7 @@ export default function FindingsPage() {
     if (view === "asset") return;
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
-  }, [loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
+  }, [activeRetestFingerprint, loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
 
   React.useEffect(() => {
     const lastPage = Math.max(1, Math.ceil(groupTotal / pageSize));
@@ -737,6 +780,8 @@ export default function FindingsPage() {
     saving,
     onSave: saveEdit,
     onStatusChange: updateStatus,
+    onRetest: setRetestFinding,
+    activeRetests,
     onDeepen: openDeepen,
     onDelete: deleteFinding,
   };
@@ -1082,6 +1127,27 @@ export default function FindingsPage() {
           </div>
         )}
       </div>
+
+      {retestFinding?.finding_id ? (
+        <FindingRetestDialog
+          key={retestFinding.finding_id}
+          findingId={retestFinding.finding_id}
+          findingName={retestFinding.name || retestFinding.vulnclass || retestFinding.summary}
+          onStarted={(retest) => {
+            const findingId = retestFinding.finding_id;
+            if (!findingId || retest.conversation_id == null || !["pending", "running"].includes(retest.status)) return;
+            retestRefreshVersion.current++;
+            const active: ActiveFindingRetest = {
+              id: retest.id,
+              finding_id: findingId,
+              conversation_id: retest.conversation_id,
+              status: retest.status === "pending" ? "pending" : "running",
+            };
+            setActiveRetests((current) => ({ ...current, [findingId]: active }));
+          }}
+          onClose={() => setRetestFinding(null)}
+        />
+      ) : null}
 
       <Dialog
         open={deepenFinding !== null}

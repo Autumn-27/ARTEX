@@ -1046,7 +1046,7 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence    TEXT NOT NULL DEFAULT '',
     worker      TEXT NOT NULL DEFAULT '',
     asset_ids   JSONB NOT NULL DEFAULT '[]',
-    -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 /
+    -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 / fixed 已修复 /
     -- false_positive 误报 / ignored 忽略 / duplicate 重复 / risk_accepted 风险接受。
     -- 取值不加 CHECK：旧库靠下面的 ALTER 补列,CHECK 无法回填,统一由 server 侧白名单校验。
     status      TEXT NOT NULL DEFAULT 'pending',
@@ -1062,6 +1062,38 @@ CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
 -- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
 CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
+
+-- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
+CREATE TABLE IF NOT EXISTS finding_retests (
+    id BIGSERIAL PRIMARY KEY,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    conversation_id BIGINT UNIQUE REFERENCES conversations(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','stopped')),
+    verdict TEXT NOT NULL DEFAULT '' CHECK (verdict IN ('','reproduced','fixed','inconclusive')),
+    notes TEXT NOT NULL DEFAULT '',
+    snapshot JSONB NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_finding_retests_history ON finding_retests(finding_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_retests_active ON finding_retests(finding_id)
+    WHERE status IN ('pending','running');
+
+-- 删除会话保留复测记录，同时解除尚未结束的复测占用。
+CREATE OR REPLACE FUNCTION stop_deleted_conversation_retest() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE finding_retests SET status='stopped', error='复测会话已删除', finished_at=now()
+    WHERE conversation_id=OLD.id AND status IN ('pending','running');
+    RETURN OLD;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_conversation_retest_delete ON conversations;
+CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION stop_deleted_conversation_retest();
 
 -- =====================================================================
 -- M. 后端日志持久化

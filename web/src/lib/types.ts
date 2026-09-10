@@ -443,12 +443,13 @@ export interface TaskConstraint {
 // ---- Findings ----
 export type Severity = "critical" | "high" | "medium" | "low";
 
-// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 误报 / 忽略 / 重复 / 风险接受。
+// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受。
 export type FindingStatus =
   | "pending"
   | "in_progress"
   | "confirmed"
   | "resolved"
+  | "fixed"
   | "false_positive"
   | "ignored"
   | "duplicate"
@@ -681,8 +682,31 @@ export interface AgentTrigger {
 }
 
 // ---- Conversations (chat page) ----
+export interface ActiveFindingRetest {
+  id: number;
+  finding_id: string;
+  conversation_id: number;
+  status: "pending" | "running";
+}
+
+export interface FindingRetest {
+  id: number;
+  finding_id: number;
+  conversation_id: number | null;
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
+  verdict: "" | "reproduced" | "fixed" | "inconclusive";
+  notes: string;
+  summary: string;
+  evidence: string;
+  error: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Conversation {
   id: number;
+  running?: boolean; // live server state, returned with the conversation list
   agent_key: string;
   title: string;
   llm_profile_id?: number;

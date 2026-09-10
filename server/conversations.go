@@ -45,6 +45,11 @@ func decodeConversationRequest(w http.ResponseWriter, r *http.Request, value any
 // conversation_activities and the browser POLLS ?since=cursor for live updates
 // (no per-conversation SSE broadcaster needed).
 
+type conversationListItem struct {
+	*db.Conversation
+	Running bool `json:"running"`
+}
+
 func (s *Server) pgListConversations(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -55,7 +60,13 @@ func (s *Server) pgListConversations(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"conversations": cs})
+	items := make([]conversationListItem, 0, len(cs))
+	s.chatMu.Lock()
+	for _, c := range cs {
+		items = append(items, conversationListItem{Conversation: c, Running: s.chatBusy[s.convBusyKey(c.ID)]})
+	}
+	s.chatMu.Unlock()
+	writeJSON(w, 200, map[string]any{"conversations": items})
 }
 
 func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +456,8 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
 func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
-	go s.runConversationSync(c, msg, busyKey)
+	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
+	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 
 // runConversationSync runs ONE agent turn on a conversation and BLOCKS until the
@@ -453,12 +465,23 @@ func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
 // fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
 // for completion before starting the next queued fire for the same agent.
 func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
+	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
+	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+}
+
+// Register cancellation before returning 202, so an immediate stop/delete cannot
+// miss a background goroutine which has not started yet.
+func (s *Server) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, c.ID))
+	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
 	s.chatMu.Unlock()
+	return ctx, cancel
+}
+
+func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -466,9 +489,43 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 		delete(s.chatCancel, busyKey)
 		s.chatMu.Unlock()
 	}()
+	// Only the first turn executes a historical retest. Follow-up conversation
+	// turns may explain the sealed result; the result tool refuses to overwrite it.
+	finishStatus, finishReason := "failed", "复测未能启动"
+	if c.AgentKey == db.FindingRetestAgentKey {
+		// Read without the run cancellation so an immediate stop still seals pending.
+		r, err := s.m.pg.FindingRetestForConversation(context.Background(), c.ID)
+		if err != nil {
+			log.Printf("[conv %d] load retest: %v", c.ID, err)
+			return
+		}
+		if r != nil && r.Status == "pending" {
+			defer func() {
+				if ctx.Err() != nil {
+					finishStatus, finishReason = "stopped", "复测已停止或服务已关闭"
+				}
+				s.finishRetest(r.ID, finishStatus, finishReason)
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			started, err := s.m.pg.StartFindingRetest(ctx, r.ID)
+			if err != nil {
+				finishReason = err.Error()
+				return
+			}
+			if !started {
+				return
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	// precedence: the conversation agent's own binding → this conversation's pin → global.
 	ca := s.resolveChatAgent(c)
 	if ca == nil {
+		finishReason = s.chatUnavailableReason()
 		return
 	}
 	pg := s.m.pg
@@ -486,9 +543,14 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
-	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil && ctx.Err() == nil {
-		_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
-			Summary: "（出错：" + err.Error() + "）", Detail: err.Error()})
+	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
+		finishReason = err.Error()
+		if ctx.Err() == nil {
+			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
+				Summary: "（出错：" + err.Error() + "）", Detail: err.Error()})
+		}
+	} else {
+		finishStatus, finishReason = "completed", ""
 	}
 	_ = pg.TouchConversation(c.ID)
 }

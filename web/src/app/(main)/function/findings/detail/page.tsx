@@ -22,6 +22,7 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
+import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingLineageView } from "./lineage";
 import { statusMeta } from "@/lib/status";
 import { api } from "@/lib/api";
@@ -33,6 +34,7 @@ const FINDING_STATUSES: FindingStatus[] = [
   "in_progress",
   "confirmed",
   "resolved",
+  "fixed",
   "false_positive",
   "ignored",
   "duplicate",
@@ -193,6 +195,7 @@ function FindingDetailInner() {
                   </p>
                 </CardContent>
               </Card>
+              <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>
