@@ -24,11 +24,14 @@ const findingTrafficDisabled = "Agent 自动绑定流量已关闭；请在系统
 // Applied after ToolResolve: user descriptions and prompts remain intact, while
 // all actual reporters (including Planner and custom chat agents) see the same
 // API contract. Disabled/unbound tools are never reintroduced here.
-func findingWorkflowTools(tools []actool.CoreTool) ([]actool.CoreTool, string) {
+func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, string) {
 	if !findingTrafficBindingEnabled() {
 		out := make([]actool.CoreTool, 0, len(tools))
 		for _, tool := range tools {
 			if tool.Name() == "bind_finding_traffic" {
+				continue
+			}
+			if agentKey == "reporter" && (tool.Name() == "traffic_search" || tool.Name() == "traffic_get" || tool.Name() == "traffic_blob") {
 				continue
 			}
 			switch tool.Name() {
@@ -52,7 +55,7 @@ func findingWorkflowTools(tools []actool.CoreTool) ([]actool.CoreTool, string) {
 		note := ""
 		switch tool.Name() {
 		case "report_finding":
-			note = findingTrafficGuidance + "\n已有对应的、经核实的 HTTP 流量时，随本次上报提交 traffic_refs。代为上报时保留交接中的引用，或传 evidence_hint_id 读取本任务指定 hint 的结构化 traffic_refs；不要只复制文字结论。无数据包仍可上报。返回 finding_id 与 finding_node_id 分别表示独立记录和探索节点。"
+			note = "\n默认由报告 Agent 在编写报告前核对并绑定流量。上报者在 evidence 中保留验证命令、关键输出、已有的真实流量 ID 及其用途，供报告 Agent 对照执行记录核实；无需为绑定额外查包。兼容显式即时绑定：traffic_refs 或 evidence_hint_id 可提交已核实的引用，后者读取本任务指定 hint 的结构化引用；任一无效则本次上报全部失败。TCP/无包不需要这些可选参数。返回 finding_id 与 finding_node_id 分别表示独立记录和探索节点。"
 		case "add_hint", "add_task_hint":
 			note = "\n交接已确认漏洞时，在对应提示的 traffic_refs 中保留已核实流量的 ID、用途、说明和顺序（单条放顶层，批量放对应 hints 元素），并在 text 中说明它证明的具体漏洞。调用方不能只交接文字而丢弃已有流量引用。未核实的候选不能作为证据传递。"
 		case "get_finding_traffic", "bind_finding_traffic", "list_findings", "list_task_findings", "node_detail", "get_task_node_detail", "update_finding_report":
@@ -64,19 +67,16 @@ func findingWorkflowTools(tools []actool.CoreTool) ([]actool.CoreTool, string) {
 	}
 	guidance := ""
 	if has["report_finding"] || has["add_task_hint"] || has["add_hint"] {
-		guidance = findingTrafficGuidance + "\n**代上报与交接**：有已核实 HTTP 证据时，报告保存应同时携带 traffic_refs；用 add_hint / add_task_hint 交接时保留结构化引用。收到交接提示后用 evidence_hint_id 明确选择本任务对应 hint，不能混用其他漏洞的证据。若只收到文字，先查已有执行记录或请原执行者交接证据，不要仅为补包重新探测。只有拿到真实 ID 才绑定，TCP 或无包时正常上报。"
-		if has["traffic_search"] && has["traffic_get"] {
-			guidance += "\n可用 traffic_search 筛选，再用 traffic_get 逐条核实请求/响应及真实 ID。"
-		}
+		guidance = "\n\n**流量证据交接（可选）**：自动绑定默认由报告 Agent 在漏洞入库后、编写报告前完成。上报者应在 evidence 保留验证命令、关键输出、已有真实流量 ID 及其用途，任务中带 intent_id，便于报告 Agent 追溯；不必为了绑定额外查包。Auto / Planner 代为上报时不要丢弃执行者已有的引用。add_hint / add_task_hint 可用 traffic_refs 交接；显式即时绑定仍兼容 report_finding 的 traffic_refs / evidence_hint_id。TCP 或无包时正常登记，不能猜测 ID，也不能仅为补包重复探测。"
 		if has["add_task_hint"] && !has["add_hint"] {
 			guidance += "\n平台对话没有任务上下文时，不直接调用 report_finding；通过 add_task_hint 向已有对应任务交接，由任务 Agent 登记，并用 list_task_findings 核对结果。"
 		}
 		if has["prove_goal"] || has["goal_met"] {
 			guidance += "\n判定目标完成前，先完成本次已有证据的上报/交接。不要在证据交接尚未完成时仅因文字漏洞已登记就结束任务、取消 Worker；无包不要求等待或强行抓包。"
 		}
-		if has["bind_finding_traffic"] {
-			guidance += "\n若漏洞已登记而遗漏了已有的真实流量，用 bind_finding_traffic 补绑，不重复创建漏洞。"
-		}
+	}
+	if has["update_finding_report"] && has["bind_finding_traffic"] && has["get_finding_traffic"] {
+		guidance += "\n\n**报告前自动关联流量（已开启）**：你负责为本次触发的漏洞核对并绑定流量，再撰写报告。先从 report_finding 返回 JSON 或 get_task_node_detail / list_task_findings 取得明确的 finding_id 与 finding_node_id。读取漏洞详情、对应意图的执行记录及已有证据清单，优先使用上报者交接的真实 ID。若本次验证为 HTTP 且流量工具可用，用 traffic_search 筛选候选，再用 traffic_get 逐条核实请求/响应确实支持该漏洞；域名和时间只用于筛选，不证明归属。将确认的证据按复现顺序用 bind_finding_traffic(finding_id, traffic_refs) 关联，选择 baseline / proof / verification / supporting 并说明用途。只能操作本次漏洞，不重复创建漏洞或重新探测目标。绑定成功后重新调用 get_finding_traffic 获取最新 version，读取所需正文，再将实际读取的 version 作为 evidence_version 传给 update_finding_report（其 finding_id 参数仍用 finding_node_id）。已有绑定不必重复追加。TCP、未采集、工具不可用或没有确切匹配时，跳过自动绑定，依据文字/命令证据正常写报告并说明原因，不得为凑齐流量而猜测。绑定失败不宣称成功；保留已有证据并在报告说明未绑定原因。"
 	}
 	if guidance != "" || has["get_finding_traffic"] || has["update_finding_report"] {
 		guidance += findingIDGuidance

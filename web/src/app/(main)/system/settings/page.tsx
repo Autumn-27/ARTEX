@@ -281,7 +281,7 @@ export default function SystemSettingsPage() {
               Agent 自动绑定流量
             </CardTitle>
             <CardDescription id="agent-traffic-binding-description">
-              默认关闭。开启后，Agent 会核对已有 HTTP 请求/响应，并在上报漏洞或交接任务时关联对应流量。
+              默认关闭。开启后，漏洞入库时触发的报告 Agent 会核对已有 HTTP 请求/响应，关联对应流量后再编写报告。
               <b>查阅数据包及额外的工具调用会增加 Token 消耗。</b>
               <br />
               TCP、未抓包或没有匹配流量时仍可正常上报。此开关不影响流量捕获、人工绑定及已保存证据的查看。 对下一轮 Agent

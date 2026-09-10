@@ -444,7 +444,11 @@ func (s *Server) seedOrchestrationTools() {
 	autoAgents, _ := json.Marshal([]string{"auto"})
 	for _, t := range s.orchestrationTools() {
 		schema, _ := json.Marshal(t.InputSchema())
-		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, autoAgents)
+		bindings := autoAgents
+		if t.Name() == "bind_finding_traffic" {
+			bindings = json.RawMessage(`["reporter"]`)
+		}
+		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, bindings)
 	}
 	for _, t := range s.platformTools() {
 		schema, _ := json.Marshal(t.InputSchema())
@@ -691,7 +695,7 @@ func (s *Server) seedReporterAgent() {
 		OnToolCall: true,
 		ToolNames:  []string{"report_finding"},
 		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
-			"用 get_finding_traffic(finding_id) 读取证据；节点详情使用 finding_node_id。" +
+			"若运行指引启用自动绑定，先核实并关联本次漏洞的流量，再用 get_finding_traffic(finding_id) 读取最新证据；节点详情使用 finding_node_id。" +
 			"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存。不要混用两种编号。",
 	}); err != nil {
 		log.Printf("[reporter] 创建触发器失败: %v", err)

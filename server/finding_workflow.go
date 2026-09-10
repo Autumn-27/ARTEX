@@ -14,7 +14,7 @@ import (
 )
 
 func (s *Server) seedFindingWorkflowTools() {
-	const flag = "finding_workflow_tools_v1"
+	const flag = "finding_workflow_tools_v2_reporter"
 	if value, _, _ := s.m.pg.GetSetting(flag); value == "true" {
 		return
 	}
@@ -72,24 +72,21 @@ func (s *Server) seedFindingWorkflowTools() {
 	}
 	// Upgrade only the original default binding. Customized lists and enabled
 	// flags survive; the one-time flag also preserves future user unbinding.
-	readers := `["worker","planner","mainagent","auto","pentest"]`
+	readers := `["worker","reporter"]`
 	for _, key := range []string{"traffic_search", "traffic_get", "traffic_blob"} {
-		if _, err := s.m.pg.Exec(`UPDATE tools SET agents=$2::jsonb WHERE key=$1 AND system AND agents='["worker"]'::jsonb`, key, readers); err != nil {
+		if _, err := s.m.pg.Exec(`UPDATE tools SET agents=$2::jsonb WHERE key=$1 AND system AND (agents='["worker"]'::jsonb OR (agents @> '["worker","planner","mainagent","auto","pentest"]'::jsonb AND jsonb_array_length(agents)=5))`, key, readers); err != nil {
 			return
 		}
 	}
 	if _, err := s.m.pg.Exec(`UPDATE tools SET agents=$1::jsonb WHERE key='get_finding_traffic' AND system AND agents @> '["auto","reporter"]'::jsonb AND jsonb_array_length(agents)=2`, `["auto","reporter","worker","planner","mainagent","pentest"]`); err != nil {
 		return
 	}
-	if report, err := s.m.pg.GetTool("report_finding"); err == nil && report != nil {
-		binding, _ := s.m.pg.GetTool("bind_finding_traffic")
-		if binding != nil && binding.System {
-			for _, key := range report.Agents {
-				if err := s.m.pg.AddAgentToToolBinding(key, []string{"bind_finding_traffic"}); err != nil {
-					return
-				}
-			}
-		}
+	// Replace the previous code default only; preserve customized binding lists.
+	if _, err := s.m.pg.Exec(`UPDATE tools SET agents='["reporter"]'::jsonb WHERE key='bind_finding_traffic' AND system AND agents @> '["worker","planner","mainagent","auto","pentest"]'::jsonb AND jsonb_array_length(agents)=5`); err != nil {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("reporter", []string{"bind_finding_traffic"}); err != nil {
+		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 }

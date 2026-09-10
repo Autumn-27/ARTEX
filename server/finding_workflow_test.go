@@ -211,7 +211,7 @@ func TestFindingWorkflowMigrationPreservesUserConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := pg.SetSetting("finding_workflow_tools_v1", "false"); err != nil {
+	if err := pg.SetSetting("finding_workflow_tools_v2_reporter", "false"); err != nil {
 		t.Fatal(err)
 	}
 	s.seedFindingWorkflowTools()
@@ -233,15 +233,80 @@ func TestFindingWorkflowMigrationPreservesUserConfiguration(t *testing.T) {
 	}
 	search, _ := pg.GetTool("traffic_search")
 	get, _ := pg.GetTool("traffic_get")
-	if search.Enabled || !contains(search.Agents, "planner") || get.Enabled || len(get.Agents) != 1 || get.Agents[0] != "custom-agent" {
+	if search.Enabled || !contains(search.Agents, "reporter") || get.Enabled || len(get.Agents) != 1 || get.Agents[0] != "custom-agent" {
 		t.Fatal("default/custom reader binding migration incorrect")
 	}
-	if err := pg.RemoveAgentFromTool("planner", "traffic_search"); err != nil {
+	if err := pg.RemoveAgentFromTool("reporter", "traffic_search"); err != nil {
 		t.Fatal(err)
 	}
 	s.seedFindingWorkflowTools()
 	search, _ = pg.GetTool("traffic_search")
-	if contains(search.Agents, "planner") {
+	if contains(search.Agents, "reporter") {
 		t.Fatal("one-time migration undid later unbinding")
 	}
+}
+
+func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
+	s, f, request := trafficEvidenceServer(t)
+	pg := s.m.pg
+	ctx := context.Background()
+	if err := pg.SetBool(settingAgentTrafficBinding, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pg.SetBool(settingAgentTrafficBinding, false); s.m.SetTrafficEnabled(false) })
+	if err := s.m.SetTrafficEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	seedServerEvidenceFlow(t, s, "reporter-proof", []byte("local proof payload"))
+	seedServerEvidenceFlow(t, s, "reporter-baseline", []byte("local normal response"))
+	tools, def, cleanup := agent.AugmentTools(ctx, "reporter", nil)
+	defer cleanup()
+	if !strings.Contains(def.FindingGuidance, "报告前自动关联流量") || !strings.Contains(def.FindingGuidance, "绑定成功后重新调用") {
+		t.Fatal("reporter did not receive binding workflow")
+	}
+	for _, name := range []string{"traffic_search", "traffic_get", "get_task_worker_trace", "get_task_node_detail", "bind_finding_traffic", "get_finding_traffic", "update_finding_report"} {
+		workflowTool(t, tools, name)
+	}
+	finding, _ := pg.GetFinding(f.FindingID)
+	detail := workflowCall(t, ctx, workflowTool(t, tools, "get_task_node_detail"), map[string]any{"task_id": fmt.Sprint(*finding.TaskID), "id": f.NodeID}, false)
+	if !strings.Contains(detail, `"finding_id"`) || !strings.Contains(detail, `"finding_node_id"`) {
+		t.Fatal("reporter lacks explicit ID mapping")
+	}
+	workflowCall(t, ctx, workflowTool(t, tools, "traffic_search"), map[string]any{"host": "evidence.local"}, false)
+	for _, id := range []string{"reporter-baseline", "reporter-proof"} {
+		packet := workflowCall(t, ctx, workflowTool(t, tools, "traffic_get"), map[string]any{"id": id}, false)
+		if !strings.Contains(packet, "local") {
+			t.Fatal("reporter cannot inspect packet", packet)
+		}
+	}
+	refs := []db.TrafficRef{{TrafficID: "reporter-baseline", Role: "baseline"}, {TrafficID: "reporter-proof", Role: "proof", Note: "confirmed from recorded response"}}
+	workflowCall(t, ctx, workflowTool(t, tools, "bind_finding_traffic"), map[string]any{"finding_id": f.FindingID, "traffic_refs": refs}, false)
+	list := workflowCall(t, ctx, workflowTool(t, tools, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
+	var summary struct {
+		Version int64 `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(list), &summary); err != nil || summary.Version != 1 {
+		t.Fatal(list, err)
+	}
+	workflowCall(t, ctx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "## Local report\n\nVerified baseline and proof using saved evidence."}, false)
+	updated, err := pg.GetFinding(f.FindingID)
+	if err != nil || updated.ReportEvidenceVersion != summary.Version || updated.EvidenceVersion != summary.Version {
+		t.Fatal("report did not cover post-binding version", updated, err)
+	}
+	// Disabling automatic binding still lets Reporter read manually bound snapshots.
+	if r := request("PUT", "/api/settings", `{"agent_traffic_binding":false}`); r.Code != 200 {
+		t.Fatal(r.Code, r.Body)
+	}
+	off, offDef, closeOff := agent.AugmentTools(ctx, "reporter", nil)
+	defer closeOff()
+	if offDef.FindingGuidance != "" {
+		t.Fatal("off reporter still receives auto-binding guidance")
+	}
+	for _, tool := range off {
+		if tool.Name() == "traffic_search" || tool.Name() == "traffic_get" || tool.Name() == "traffic_blob" || tool.Name() == "bind_finding_traffic" {
+			t.Fatal("auto-binding tool exposed while off", tool.Name())
+		}
+	}
+	workflowCall(t, ctx, workflowTool(t, off, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
+	workflowTool(t, off, "update_finding_report")
 }

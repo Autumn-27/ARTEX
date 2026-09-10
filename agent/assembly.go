@@ -56,6 +56,6 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	if ToolResolve != nil {
 		out = ToolResolve(ctx, agentKey, out)
 	}
-	out, def.FindingGuidance = findingWorkflowTools(out)
+	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
 	return out, def, cleanup
 }
