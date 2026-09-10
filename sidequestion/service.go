@@ -8,8 +8,9 @@ import (
 	"github.com/Autumn-27/norma/llm"
 )
 
-// SideQuestionService performs exactly one provider completion. It deliberately
-// has no harness, tool executor, transcript writer, or model failover chain.
+// SideQuestionService has no harness, tool executor, transcript writer or model
+// failover chain. Answer is one completion; Respond adds bounded preparation
+// and at most one context-overflow recovery around that completion.
 type SideQuestionService struct{ Provider llm.Provider }
 
 type Answer struct {

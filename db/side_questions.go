@@ -77,7 +77,7 @@ func (d *DB) SideSnapshot(ctx context.Context, key string) (*sidequestion.Snapsh
 	return &s, err
 }
 
-const sideCols = `id,ordinal,session_key,generation,client_id,question,answer,status,error,model,snapshot_at,created_at,sequence,usage`
+const sideCols = `id,ordinal,session_key,generation,client_id,question,answer,status,error,model,snapshot_at,created_at,sequence,usage,context_info`
 
 func (d *DB) ExistingSideRequest(ctx context.Context, key, client string) (*sidequestion.Exchange, error) {
 	e, err := scanSide(d.QueryRowContext(ctx, `SELECT `+sideCols+` FROM side_question_requests WHERE session_key=$1 AND client_id=$2 AND generation=(SELECT generation FROM side_question_sessions WHERE session_key=$1)`, key, client))
@@ -89,12 +89,15 @@ func (d *DB) ExistingSideRequest(ctx context.Context, key, client string) (*side
 
 func scanSide(row interface{ Scan(...any) error }) (sidequestion.Exchange, error) {
 	var e sidequestion.Exchange
-	var model, usage []byte
-	err := row.Scan(&e.ID, &e.Ordinal, &e.SessionKey, &e.Generation, &e.ClientID, &e.Question, &e.Answer, &e.Status, &e.Error, &model, &e.SnapshotAt, &e.CreatedAt, &e.Sequence, &usage)
+	var model, usage, info []byte
+	err := row.Scan(&e.ID, &e.Ordinal, &e.SessionKey, &e.Generation, &e.ClientID, &e.Question, &e.Answer, &e.Status, &e.Error, &model, &e.SnapshotAt, &e.CreatedAt, &e.Sequence, &usage, &info)
 	if err != nil {
 		return e, err
 	}
 	if err = json.Unmarshal(model, &e.Model); err != nil {
+		return e, err
+	}
+	if err = json.Unmarshal(info, &e.Context); err != nil {
 		return e, err
 	}
 	err = json.Unmarshal(usage, &e.Usage)
@@ -202,8 +205,12 @@ func (d *DB) UpdateSideRequest(ctx context.Context, e sidequestion.Exchange) (bo
 	if err != nil {
 		return false, err
 	}
-	r, err := d.ExecContext(ctx, `UPDATE side_question_requests r SET answer=$2,status=$3,error=$4,sequence=$5,usage=$6
-WHERE r.id=$1 AND r.status='running' AND r.sequence<$5 AND EXISTS(SELECT 1 FROM side_question_sessions s WHERE s.session_key=r.session_key AND s.generation=r.generation)`, e.ID, e.Answer, e.Status, e.Error, e.Sequence, string(usage))
+	info, err := json.Marshal(e.Context)
+	if err != nil {
+		return false, err
+	}
+	r, err := d.ExecContext(ctx, `UPDATE side_question_requests r SET answer=$2,status=$3,error=$4,sequence=$5,usage=$6,context_info=$7
+WHERE r.id=$1 AND r.status='running' AND r.sequence<$5 AND EXISTS(SELECT 1 FROM side_question_sessions s WHERE s.session_key=r.session_key AND s.generation=r.generation)`, e.ID, e.Answer, e.Status, e.Error, e.Sequence, string(usage), string(info))
 	if err != nil {
 		return false, err
 	}
@@ -217,13 +224,62 @@ func (d *DB) ClearSideHistory(ctx context.Context, key string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `UPDATE side_question_sessions SET generation=generation+1 WHERE session_key=$1`, key); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE side_question_sessions SET generation=generation+1,memory='{}' WHERE session_key=$1`, key); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM side_question_requests WHERE session_key=$1`, key); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (d *DB) SideMemory(ctx context.Context, e sidequestion.Exchange) (sidequestion.Memory, error) {
+	var memory sidequestion.Memory
+	var raw []byte
+	err := d.QueryRowContext(ctx, `SELECT s.memory FROM side_question_sessions s JOIN side_question_requests r ON r.session_key=s.session_key
+WHERE r.id=$1 AND r.generation=s.generation AND s.generation=$2 AND r.status='running'`, e.ID, e.Generation).Scan(&raw)
+	if err != nil {
+		return memory, err
+	}
+	err = json.Unmarshal(raw, &memory)
+	return memory, err
+}
+
+// Unlike SideReplay's UI-era 20-row window, this cursor visits all unsummarized
+// successful exchanges, in bounded pages and only before the admitted request.
+func (d *DB) SideReplayPage(ctx context.Context, e sidequestion.Exchange, after int64) ([]sidequestion.Exchange, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+sideCols+` FROM side_question_requests WHERE session_key=$1 AND generation=$2
+AND status='completed' AND ordinal>$3 AND ordinal<$4 ORDER BY ordinal LIMIT 20`, e.SessionKey, e.Generation, after, e.Ordinal)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sidequestion.Exchange
+	for rows.Next() {
+		item, err := scanSide(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SaveSideMemory(ctx context.Context, e sidequestion.Exchange, memory sidequestion.Memory) error {
+	raw, err := json.Marshal(memory)
+	if err != nil {
+		return err
+	}
+	result, err := d.ExecContext(ctx, `UPDATE side_question_sessions s SET memory=$3 WHERE s.session_key=$1 AND s.generation=$2
+AND EXISTS(SELECT 1 FROM side_question_requests r WHERE r.id=$4 AND r.session_key=s.session_key AND r.generation=s.generation AND r.status='running')`, e.SessionKey, e.Generation, string(raw), e.ID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err == nil && n == 0 {
+		return ErrSideParentGone
+	}
+	return err
 }
 
 func (d *DB) InterruptSideRequests(ctx context.Context) error {

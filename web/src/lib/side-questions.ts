@@ -18,6 +18,16 @@ export interface SideExchange {
   snapshot_at: string;
   created_at: string;
   sequence: number;
+  context?: {
+    phase?: "preparing" | "summarizing_history" | "compressing_snapshot" | "retrying" | "answering";
+    recent_exchanges: number;
+    history_summarized: boolean;
+    snapshot_summarized: boolean;
+    estimated_input_tokens?: number;
+    input_budget?: number;
+    output_tokens?: number;
+    overflow_retried?: boolean;
+  };
 }
 export interface SideHistory {
   items: SideExchange[];

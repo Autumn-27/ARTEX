@@ -145,7 +145,7 @@ func TestBuildRequestCompactionToolPairingAndBudget(t *testing.T) {
 			}
 		}
 	}
-	s.Model.WindowTokens = 1600
+	s.Model.WindowTokens = 1000
 	r, err = BuildRequest(s, history, "current question")
 	if err != nil {
 		t.Fatal(err)

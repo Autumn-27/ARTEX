@@ -24,6 +24,7 @@ import (
 type sideHTTPProvider struct {
 	started chan llm.CompletionRequest
 	release chan struct{}
+	summary func(context.Context, llm.CompletionRequest) (llm.Message, llm.Usage, error)
 }
 
 func (p *sideHTTPProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
@@ -44,12 +45,89 @@ func (p *sideHTTPProvider) Stream(ctx context.Context, req llm.CompletionRequest
 	}
 }
 func (p *sideHTTPProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	if req.Thinking == "disabled" && p.summary != nil {
+		msg, usage, err := p.summary(ctx, req)
+		return msg, "end_turn", usage, err
+	}
 	for _, err := range p.Stream(ctx, req) {
 		if err != nil {
 			return llm.Message{}, "", llm.Usage{}, err
 		}
 	}
 	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("atomic answer")}}, "end_turn", llm.Usage{InputTokens: 19}, nil
+}
+
+func TestSideHTTPPreparationCancellationAndClear(t *testing.T) {
+	for _, clear := range []bool{false, true} {
+		t.Run(fmt.Sprint(clear), func(t *testing.T) {
+			f := newSideHTTPFixture(t)
+			p, path := f.conversation(t)
+			snap := f.checkpoint(t, p)
+			for i := 0; i < 21; i++ {
+				e, _, err := f.m.pg.StartSideRequest(t.Context(), snap, fmt.Sprint(i), "past question")
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.Answer = "old answer"
+				e.Sequence = 1
+				e.Status = "completed"
+				if _, err = f.m.pg.UpdateSideRequest(t.Context(), *e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			started := make(chan struct{})
+			f.provider.summary = func(ctx context.Context, req llm.CompletionRequest) (llm.Message, llm.Usage, error) {
+				if len(req.Tools) != 0 {
+					t.Error("summary has tools")
+				}
+				close(started)
+				<-ctx.Done()
+				return llm.UserText("late summary"), llm.Usage{InputTokens: 17}, nil
+			}
+			e := decodeSide(t, f.call(t, "POST", path, map[string]string{"question": "follow-up", "client_request_id": "new"}, 202))
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("summary did not start")
+			}
+			row, err := f.m.pg.SideRequest(t.Context(), e.ID)
+			if err != nil || row.Context.Phase != "summarizing_history" {
+				t.Fatalf("phase not persisted: %+v %v", row, err)
+			}
+			// A blocked summary must not hold the global admission/clear mutex.
+			other, otherPath := f.conversation(t)
+			f.checkpoint(t, other)
+			f.call(t, "POST", otherPath, map[string]string{"question": "other session", "client_request_id": "independent"}, 202)
+			f.s.side.mu.Lock()
+			done := f.s.side.runs[e.ID].done
+			f.s.side.mu.Unlock()
+			if clear {
+				f.call(t, "DELETE", path, nil, 200)
+			} else {
+				f.call(t, "POST", "/api/side-questions/"+e.ID+"/cancel", nil, 200)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("summary cancellation did not settle")
+			}
+			row, err = f.m.pg.SideRequest(t.Context(), e.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if clear {
+				if row != nil {
+					t.Fatal("cleared request reappeared")
+				}
+			} else if row.Status != "cancelled" || row.Usage.InputTokens != 17 {
+				t.Fatalf("cancel usage: %+v", row)
+			}
+			var memory string
+			if err = f.m.pg.QueryRow(`SELECT memory::text FROM side_question_sessions WHERE session_key=$1`, p.Key()).Scan(&memory); err != nil || memory != "{}" {
+				t.Fatalf("late summary saved: %s %v", memory, err)
+			}
+		})
+	}
 }
 
 type sideHTTPFixture struct {
@@ -225,11 +303,11 @@ func TestSideHTTPBusyIsolationClearAndReconnect(t *testing.T) {
 func TestSideHTTPGlobalLimitTaskWorkerAndDeletion(t *testing.T) {
 	f := newSideHTTPFixture(t)
 	var requests []sidequestion.Exchange
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 20; i++ {
 		p, path := f.conversation(t)
 		f.checkpoint(t, p)
 		want := 202
-		if i == 4 {
+		if i >= 4 {
 			want = 429
 		}
 		w := f.call(t, "POST", path, map[string]string{"question": "blocked", "client_request_id": "id"}, want)

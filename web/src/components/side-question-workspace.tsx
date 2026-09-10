@@ -25,6 +25,17 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { SideQuestions } from "@/hooks/use-side-questions";
+import { cn } from "@/lib/utils";
+
+type ComposerLayout = "inline" | "stacked";
+
+const preparationLabels = {
+  preparing: "正在准备上下文…",
+  summarizing_history: "正在整理早期旁路问答…",
+  compressing_snapshot: "正在压缩旁路上下文副本…",
+  retrying: "模型上下文超限，正在缩减后重试…",
+  answering: "正在回答…",
+};
 
 export function SideQuestionButton({ side }: { side: SideQuestions }) {
   if (!side.enabled) return null;
@@ -36,7 +47,16 @@ export function SideQuestionButton({ side }: { side: SideQuestions }) {
   );
 }
 
-function SidePanel({ side, label }: { side: SideQuestions; label: string }) {
+function SidePanel({
+  side,
+  label,
+  composerLayout,
+}: {
+  side: SideQuestions;
+  label: string;
+  composerLayout: ComposerLayout;
+}) {
+  const inlineComposer = composerLayout === "inline";
   const [confirm, setConfirm] = useState(false);
   const viewport = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -111,10 +131,17 @@ function SidePanel({ side, label }: { side: SideQuestions; label: string }) {
                   上下文 {new Date(item.snapshot_at).toLocaleTimeString()}
                 </time>
               </div>
+              {item.context?.estimated_input_tokens != null && (
+                <p className="text-muted-foreground text-xs">
+                  最近 {item.context.recent_exchanges} 组问答原文
+                  {item.context.history_summarized && " · 含早期问答摘要"}
+                  {item.context.snapshot_summarized && " · 使用主上下文摘要"}
+                </p>
+              )}
               {item.answer && <Markdown text={item.answer} />}
               {!item.answer && item.status === "running" && (
                 <p role="status" className="text-muted-foreground text-sm">
-                  正在回答…
+                  {preparationLabels[item.context?.phase ?? "answering"]}
                 </p>
               )}
               {item.error && (
@@ -126,14 +153,16 @@ function SidePanel({ side, label }: { side: SideQuestions; label: string }) {
           ))}
         </div>
       </div>
-      {(side.error || side.snapshot?.reason) && (
-        <Alert variant="destructive">
-          <AlertDescription>{side.error || side.snapshot?.reason}</AlertDescription>
-        </Alert>
-      )}
-      <div className="border-t p-3">
-        <InputGroup>
+      <div className="shrink-0 border-t p-3">
+        {(side.error || side.snapshot?.reason) && (
+          <Alert variant="destructive" className="mb-2">
+            <AlertDescription>{side.error || side.snapshot?.reason}</AlertDescription>
+          </Alert>
+        )}
+        <InputGroup className={inlineComposer ? "min-h-10" : "min-h-9"}>
           <InputGroupTextarea
+            rows={1}
+            className={cn("overflow-y-auto", inlineComposer ? "max-h-40 min-h-0" : "max-h-36 min-h-9")}
             aria-label="旁路问题"
             placeholder="询问当前上下文…"
             value={side.draft}
@@ -147,8 +176,8 @@ function SidePanel({ side, label }: { side: SideQuestions; label: string }) {
               }
             }}
           />
-          <InputGroupAddon align="block-end">
-            <span className="text-muted-foreground text-xs">独立问答 · 无工具执行</span>
+          <InputGroupAddon align={inlineComposer ? "inline-end" : "block-end"}>
+            {!inlineComposer && <span className="text-muted-foreground text-xs">独立问答 · 无工具执行</span>}
             {side.running ? (
               <InputGroupButton
                 className="ml-auto"
@@ -174,6 +203,9 @@ function SidePanel({ side, label }: { side: SideQuestions; label: string }) {
           </InputGroupAddon>
         </InputGroup>
       </div>
+      {inlineComposer && (
+        <div className="shrink-0 truncate px-3 pt-0.5 pb-1 text-muted-foreground text-xs">独立问答 · 无工具执行</div>
+      )}
       <AlertDialog open={confirm} onOpenChange={setConfirm}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -196,10 +228,12 @@ export function SideQuestionWorkspace({
   side,
   label,
   children,
+  composerLayout = "stacked",
 }: {
   side: SideQuestions;
   label: string;
   children: ReactNode;
+  composerLayout?: ComposerLayout;
 }) {
   const mobile = useIsMobile();
   return (
@@ -212,7 +246,7 @@ export function SideQuestionWorkspace({
           <>
             <ResizableHandle withHandle />
             <ResizablePanel id="side-question" defaultSize="38%" minSize="280px" maxSize="65%">
-              <SidePanel side={side} label={label} />
+              <SidePanel side={side} label={label} composerLayout={composerLayout} />
             </ResizablePanel>
           </>
         )}
@@ -223,7 +257,7 @@ export function SideQuestionWorkspace({
             <DrawerTitle>旁路提问</DrawerTitle>
             <DrawerDescription>{label} 的独立问答</DrawerDescription>
           </DrawerHeader>
-          <SidePanel side={side} label={label} />
+          <SidePanel side={side} label={label} composerLayout={composerLayout} />
         </DrawerContent>
       </Drawer>
     </>

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -101,6 +102,162 @@ func TestSideHistoryIdempotencyPagingAndRecovery(t *testing.T) {
 	}
 }
 
+func TestSideMemoryPagingClearAndRestart(t *testing.T) {
+	d, s := sideFixture(t)
+	ctx := t.Context()
+	var ordinal int64
+	for i := 0; i < 50; i++ {
+		e, _, err := d.StartSideRequest(ctx, s, fmt.Sprint(i), "history")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Status = "completed"
+		e.Sequence = 1
+		e.Answer = "saved"
+		if i == 2 {
+			e.Status = "failed"
+		}
+		if _, err = d.UpdateSideRequest(ctx, *e); err != nil {
+			t.Fatal(err)
+		}
+		if i == 29 {
+			ordinal = e.Ordinal
+		}
+	}
+	e, _, err := d.StartSideRequest(ctx, s, "admitted", "question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := sidequestion.Memory{History: "old decision", Through: ordinal, SnapshotKey: "snapshot", SnapshotSummary: "main evidence", TailStart: 3}
+	if err = d.SaveSideMemory(ctx, *e, memory); err != nil {
+		t.Fatal(err)
+	}
+	var all []sidequestion.Exchange
+	for after := int64(0); ; {
+		page, err := d.SideReplayPage(ctx, *e, after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		if len(page) > 20 {
+			t.Fatal("unbounded page")
+		}
+		all = append(all, page...)
+		after = page[len(page)-1].Ordinal
+	}
+	if len(all) != 49 {
+		t.Fatalf("history missing/duplicated: %d", len(all))
+	}
+	if err = d.InterruptSideRequests(ctx); err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := d.StartSideRequest(ctx, s, "restart", "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.SideMemory(ctx, *next)
+	if err != nil || got != memory {
+		t.Fatalf("memory after restart: %+v %v", got, err)
+	}
+	page, err := d.SideReplayPage(ctx, *next, memory.Through)
+	if err != nil || len(page) != 20 || page[0].Ordinal <= ordinal {
+		t.Fatalf("summary cursor: %+v %v", page, err)
+	}
+	if err = d.ClearSideHistory(ctx, s.Parent.Key()); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.SaveSideMemory(ctx, *next, memory); !errors.Is(err, ErrSideParentGone) {
+		t.Fatalf("late memory resurrected: %v", err)
+	}
+	fresh, _, err := d.StartSideRequest(ctx, s, "after-clear", "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.SideMemory(ctx, *fresh)
+	if err != nil || got != (sidequestion.Memory{}) {
+		t.Fatalf("memory survived clear: %+v %v", got, err)
+	}
+	if snapshot, err := d.SideSnapshot(ctx, s.Parent.Key()); err != nil || snapshot.Request.Messages[0].Text() != "main-only" {
+		t.Fatal("memory changed main snapshot")
+	}
+}
+
+func TestSideMemoryClearRace(t *testing.T) {
+	d, s := sideFixture(t)
+	for i := 0; i < 10; i++ {
+		e, _, err := d.StartSideRequest(t.Context(), s, "race", "question")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := d.ClearSideHistory(t.Context(), s.Parent.Key()); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			err := d.SaveSideMemory(t.Context(), *e, sidequestion.Memory{History: "late", Through: e.Ordinal - 1})
+			if err != nil && !errors.Is(err, ErrSideParentGone) {
+				t.Error(err)
+			}
+		}()
+		wg.Wait()
+		var raw []byte
+		if err = d.QueryRow(`SELECT memory FROM side_question_sessions WHERE session_key=$1`, s.Parent.Key()).Scan(&raw); err != nil || string(raw) != "{}" {
+			t.Fatalf("late cache write: %s %v", raw, err)
+		}
+	}
+}
+
+func TestSideArchiveRowsWithoutNewFields(t *testing.T) {
+	d, s := sideFixture(t)
+	e, _, err := d.StartSideRequest(t.Context(), s, "legacy", "legacy question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	rows := map[string]json.RawMessage{}
+	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
+		var raw []byte
+		if err = tx.QueryRow(`SELECT json_agg(t) FROM `+table+` t WHERE session_key=$1`, s.Parent.Key()).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var items []map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &items); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range items {
+			delete(item, "memory")
+			delete(item, "context_info")
+		}
+		rows[table], err = json.Marshal(items)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec(`DELETE FROM side_question_sessions WHERE session_key=$1`, s.Parent.Key()); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
+		if err = insertArchiveRows(tx, table, rows[table]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var info, memory []byte
+	if err = tx.QueryRow(`SELECT context_info,memory FROM side_question_requests r JOIN side_question_sessions s USING(session_key) WHERE r.id=$1`, e.ID).Scan(&info, &memory); err != nil || string(info) != "{}" || string(memory) != "{}" {
+		t.Fatalf("legacy defaults: %s %s %v", info, memory, err)
+	}
+}
+
 func TestSideClearLateWritersAndDeletedParent(t *testing.T) {
 	d, s := sideFixture(t)
 	ctx := t.Context()
@@ -187,6 +344,8 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			var snapshots []sidequestion.Snapshot
+			memories := make(map[string]sidequestion.Memory)
+			contextInfo := sidequestion.ContextInfo{Phase: "answering", RecentExchanges: 20, HistorySummarized: true, SnapshotSummarized: true, EstimatedInputTokens: 12000, InputBudget: 16000, OutputTokens: 2048}
 			for _, intent := range []int64{0, iid} {
 				s := sidequestion.Snapshot{Parent: sidequestion.Parent{TaskID: task.ID, ExplorationID: task.ExplorationID, IntentID: intent}, RunID: 1, Version: 2, CapturedAt: time.Now().UTC(), Request: llm.CompletionRequest{Messages: []llm.Message{llm.UserText("archived main context")}}}
 				if err = d.SaveSideSnapshot(t.Context(), s); err != nil {
@@ -196,9 +355,15 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				memory := sidequestion.Memory{History: "archived early decision", Through: e.Ordinal, SnapshotKey: s.Parent.Key(), SnapshotSummary: "archived evidence", TailStart: 1}
+				if err = d.SaveSideMemory(t.Context(), *e, memory); err != nil {
+					t.Fatal(err)
+				}
+				memories[s.Parent.Key()] = memory
 				e.Answer = "archive answer"
 				e.Sequence = 1
 				e.Status = "completed"
+				e.Context = contextInfo
 				if _, err = d.UpdateSideRequest(t.Context(), *e); err != nil {
 					t.Fatal(err)
 				}
@@ -262,6 +427,17 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 					history, err := d.SideHistory(t.Context(), s.Parent.Key(), 0, 20)
 					if err != nil || len(history) != 1 || history[0].Answer != "archive answer" {
 						t.Fatalf("restored history %+v %v", history, err)
+					}
+					if history[0].Context != contextInfo {
+						t.Fatalf("restored context metadata: %+v", history[0].Context)
+					}
+					next, _, err := d.StartSideRequest(t.Context(), *got, "after-restore", "continue")
+					if err != nil {
+						t.Fatal(err)
+					}
+					memory, err := d.SideMemory(t.Context(), *next)
+					if err != nil || memory != memories[s.Parent.Key()] {
+						t.Fatalf("restored summary cache: %+v %v", memory, err)
 					}
 				}
 			}

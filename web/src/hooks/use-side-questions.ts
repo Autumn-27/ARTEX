@@ -26,13 +26,26 @@ export function useSideQuestions(parent: string | null) {
   const [loading, setLoading] = useState(false);
   const [nextCursor, setNextCursor] = useState(0);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const epoch = useRef(0);
   const [streamEpoch, setStreamEpoch] = useState(0);
   const cursor = useRef(0);
   const submitting = useRef(false);
   const retry = useRef<{ question: string; id: string } | null>(null);
+  const accepted = useRef<{ id: string; question: string } | null>(null);
   const running = current ? items.find((item) => item.status === "running") : undefined;
   const runningID = running?.id;
+
+  const restoreFailedDraft = useCallback((incoming: SideExchange[]) => {
+    const pending = accepted.current;
+    if (!pending) return;
+    const item = incoming.find((entry) => entry.id === pending.id);
+    if (!item || item.status === "running") return;
+    accepted.current = null;
+    if (item.status === "failed" || item.status === "interrupted") {
+      setDraft((old) => old || pending.question);
+    }
+  }, []);
 
   const load = useCallback(
     async (before = 0) => {
@@ -42,17 +55,18 @@ export function useSideQuestions(parent: string | null) {
         const data = await sideAPI.history(parent, before);
         if (version !== epoch.current) return;
         setItems((old) => merge(old, data.items));
+        restoreFailedDraft(data.items);
         setSnapshot(data.snapshot);
-        setError("");
+        setLoadError("");
         if (before || !cursor.current) {
           cursor.current = data.next_cursor;
           setNextCursor(data.next_cursor);
         }
       } catch (err) {
-        if (version === epoch.current) setError((err as Error).message);
+        if (version === epoch.current) setLoadError((err as Error).message);
       }
     },
-    [parent],
+    [parent, restoreFailedDraft],
   );
 
   useEffect(() => {
@@ -63,9 +77,11 @@ export function useSideQuestions(parent: string | null) {
     setNextCursor(0);
     setDraft("");
     setError("");
+    setLoadError("");
     setBusy(false);
     submitting.current = false;
     retry.current = null;
+    accepted.current = null;
     cursor.current = 0;
     if (!parent) {
       setOpen(false);
@@ -112,6 +128,7 @@ export function useSideQuestions(parent: string | null) {
         const item = JSON.parse((event as MessageEvent).data) as SideExchange;
         if (item.id !== runningID) return;
         setItems((old) => merge(old, [item]));
+        restoreFailedDraft([item]);
         if (item.status !== "running") stream.close();
       } catch {
         setError("旁路数据解析失败，请重新打开面板");
@@ -122,7 +139,7 @@ export function useSideQuestions(parent: string | null) {
       if (version === epoch.current) setItems([]);
     });
     return () => stream.close();
-  }, [runningID, streamEpoch]);
+  }, [runningID, streamEpoch, restoreFailedDraft]);
 
   const ask = async (input: string) => {
     const question = input.trim();
@@ -130,6 +147,7 @@ export function useSideQuestions(parent: string | null) {
     const version = epoch.current;
     submitting.current = true;
     setBusy(true);
+    setError("");
     setDraft(question);
     setOpen(true);
     if (retry.current?.question !== question) retry.current = { question, id: crypto.randomUUID() };
@@ -137,6 +155,7 @@ export function useSideQuestions(parent: string | null) {
       const item = await sideAPI.ask(parent, question, retry.current.id);
       if (version !== epoch.current) return;
       setItems((old) => merge(old, [item]));
+      accepted.current = { id: item.id, question };
       setDraft("");
       setError("");
       retry.current = null;
@@ -144,7 +163,6 @@ export function useSideQuestions(parent: string | null) {
     } catch (err) {
       if (version === epoch.current) {
         setError((err as Error).message);
-        toast.error((err as Error).message);
       }
     } finally {
       if (version === epoch.current) {
@@ -179,6 +197,7 @@ export function useSideQuestions(parent: string | null) {
       cursor.current = 0;
       setError("");
       retry.current = null;
+      accepted.current = null;
     } catch (err) {
       if (version === epoch.current) toast.error((err as Error).message);
     } finally {
@@ -209,7 +228,7 @@ export function useSideQuestions(parent: string | null) {
     setDraft,
     busy: current && busy,
     loading: !current || loading,
-    error: current ? error : "",
+    error: current ? error || loadError : "",
     running,
     nextCursor: current ? nextCursor : 0,
     load,

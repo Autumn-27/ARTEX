@@ -355,6 +355,28 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 }
 
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
+	// json_populate_recordset inserts NULL for absent columns, bypassing SQL
+	// defaults. Preserve compatibility with v3 archives predating side memory.
+	if (table == "side_question_sessions" || table == "side_question_requests") && len(raw) > 0 {
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return err
+		}
+		field := "memory"
+		if table == "side_question_requests" {
+			field = "context_info"
+		}
+		for _, row := range rows {
+			if len(row[field]) == 0 || string(row[field]) == "null" {
+				row[field] = json.RawMessage(`{}`)
+			}
+		}
+		var err error
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+	}
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,

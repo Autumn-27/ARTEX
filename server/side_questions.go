@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,13 +30,14 @@ type sideRun struct {
 	done   chan struct{}
 }
 type sideQuestionState struct {
-	mu       sync.Mutex
-	commands sync.Mutex // short admission / clear operations only, never inference
-	pending  map[string]sidequestion.Snapshot
-	latest   map[string]sidequestion.Snapshot
-	seen     map[string][2]int64
-	runs     map[string]sideRun
-	done     chan struct{}
+	mu           sync.Mutex
+	commands     sync.Mutex // short admission / clear operations only, never inference
+	pending      map[string]sidequestion.Snapshot
+	latest       map[string]sidequestion.Snapshot
+	seen         map[string][2]int64
+	runs         map[string]sideRun
+	done         chan struct{}
+	outputTokens int
 }
 
 func sideModel(cfg agent.Config, id int64, name string) sidequestion.Model {
@@ -50,6 +52,9 @@ func bindSideProvider(p llm.Provider, cfg agent.Config, id int64, name string) l
 
 func (s *Server) initSideQuestions() {
 	s.side = &sideQuestionState{pending: map[string]sidequestion.Snapshot{}, latest: map[string]sidequestion.Snapshot{}, seen: map[string][2]int64{}, runs: map[string]sideRun{}, done: make(chan struct{})}
+	if n, err := strconv.Atoi(os.Getenv("ARTEX_BTW_MAX_OUTPUT_TOKENS")); err == nil && n >= 256 && n <= 32768 {
+		s.side.outputTokens = n
+	}
 	if s.m.pg == nil {
 		close(s.side.done)
 		return
@@ -394,16 +399,6 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		writeErr(w, 500, err.Error())
 		return
 	}
-	history, err := s.m.pg.SideReplay(r.Context(), key)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	req, err := sidequestion.BuildRequest(*snap, history, in.Question)
-	if err != nil {
-		writeErr(w, 409, err.Error())
-		return
-	}
 	e, created, err := s.m.pg.StartSideRequest(r.Context(), *snap, in.ClientID, in.Question)
 	if err != nil {
 		writeErr(w, 409, err.Error())
@@ -414,12 +409,12 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		s.side.mu.Lock()
 		s.side.runs[e.ID] = sideRun{key: key, parent: p, cancel: cancel, done: make(chan struct{})}
 		s.side.mu.Unlock()
-		go s.runSide(ctx, cancel, *e, p, provider, req)
+		go s.runSide(ctx, cancel, *e, p, provider, *snap)
 	}
 	writeJSON(w, 202, e)
 }
 
-func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sidequestion.Exchange, parent sidequestion.Parent, provider llm.Provider, req llm.CompletionRequest) {
+func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sidequestion.Exchange, parent sidequestion.Parent, provider llm.Provider, snapshot sidequestion.Snapshot) {
 	defer cancel()
 	defer func() {
 		s.side.mu.Lock()
@@ -463,15 +458,28 @@ func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sideq
 		}
 		return ok, nil
 	}
-	answer, runErr := (sidequestion.SideQuestionService{Provider: provider}).Answer(ctx, req, e.Model.Streaming, func(a sidequestion.Answer) {
-		e.Answer, e.Usage = a.Text, a.Usage
-		if time.Since(lastSave) >= 250*time.Millisecond {
-			lastSave = time.Now()
-			if ok, _ := persist(); !ok {
-				cancel()
+	memory, runErr := s.m.pg.SideMemory(ctx, e)
+	var answer sidequestion.Answer
+	if runErr == nil {
+		answer, e.Context, runErr = (sidequestion.SideQuestionService{Provider: provider}).Respond(ctx, snapshot, e.Question, sidequestion.Replay{
+			Memory: memory,
+			Load: func(ctx context.Context, after int64) ([]sidequestion.Exchange, error) {
+				return s.m.pg.SideReplayPage(ctx, e, after)
+			},
+			Save: func(ctx context.Context, memory sidequestion.Memory) error {
+				return s.m.pg.SaveSideMemory(ctx, e, memory)
+			},
+		}, sidequestion.ContextOptions{OutputTokens: s.side.outputTokens}, func(a sidequestion.Answer, info sidequestion.ContextInfo) {
+			phaseChanged := e.Context.Phase != info.Phase
+			e.Answer, e.Usage, e.Context = a.Text, a.Usage, info
+			if phaseChanged || time.Since(lastSave) >= 250*time.Millisecond {
+				lastSave = time.Now()
+				if ok, _ := persist(); !ok {
+					cancel()
+				}
 			}
-		}
-	})
+		})
+	}
 	e.Answer, e.Usage = answer.Text, answer.Usage
 	e.Status = "completed"
 	if ctx.Err() != nil {

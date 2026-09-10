@@ -253,15 +253,17 @@ function LLMProfileRow({
   const label = current ? current.name : `默认${activeDefault ? `（${activeDefault.name}）` : ""}`;
 
   return (
-    <div className="flex items-center gap-1 px-1 pb-1 pt-0.5">
+    <div className="flex min-w-0 shrink-0 items-center gap-1 px-1 pt-0.5 pb-1">
       <ZapIcon className="text-muted-foreground/50 size-3 shrink-0" />
-      <span className="text-muted-foreground/70 text-xs">{label}</span>
+      <span className="truncate text-muted-foreground/70 text-xs" title={label}>
+        {label}
+      </span>
       <Popover open={open} onOpenChange={disabled ? undefined : setOpen}>
         <PopoverTrigger asChild>
           <button
             type="button"
             disabled={disabled}
-            className="text-primary flex items-center gap-0.5 text-xs hover:underline disabled:pointer-events-none disabled:opacity-40"
+            className="flex shrink-0 items-center gap-0.5 text-primary text-xs hover:underline disabled:pointer-events-none disabled:opacity-40"
           >
             更换
             <ChevronDownIcon className="size-3" />
@@ -689,7 +691,7 @@ function ChatView({
   }
 
   return (
-    <SideQuestionWorkspace side={side} label={agent?.name ?? conv.agent_key}>
+    <SideQuestionWorkspace side={side} label={agent?.name ?? conv.agent_key} composerLayout="inline">
       {/* header: which agent + live + token meta */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <Bot className="text-muted-foreground size-4 shrink-0" />
