@@ -3450,6 +3450,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
+		Seg         *int             `json:"seg,omitempty"`         // 目标主会话分段;缺省=最新段
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3474,10 +3475,16 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	s.chatCancel[t.ID] = cancel
 	s.chatMu.Unlock()
 
-	// The whole turn belongs to the current main-agent segment. Read it once (chatBusy
-	// serializes turns, so it can't change under us) and stamp every mainagent row with
-	// it, so this turn's transcript + activity land in the segment the user is viewing.
-	mainSeg, _ := t.Store.CurrentMainSeg()
+	// The turn belongs to whichever main-agent segment the user is chatting in (any
+	// segment is interactive, like the top-level chat conversations). Stamp every
+	// mainagent row with it so this turn's transcript + activity land in that segment.
+	// Missing seg (older clients) falls back to the newest segment.
+	mainSeg := 0
+	if req.Seg != nil && *req.Seg >= 0 {
+		mainSeg = *req.Seg
+	} else {
+		mainSeg, _ = t.Store.CurrentMainSeg()
+	}
 	segPtr := &mainSeg
 
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
