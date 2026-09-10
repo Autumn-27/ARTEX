@@ -831,7 +831,6 @@ export interface Session {
   source_task_id?: string;
   inherited?: boolean;
   seg?: number; // main-agent session: which conversation segment (0 = original)
-  isCurrentMain?: boolean; // main-agent session: the writable current segment
 }
 
 // ---- Security ----

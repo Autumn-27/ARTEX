@@ -721,8 +721,8 @@ export const api = {
     if (!r.ok) throw new Error(`report: ${r.status}`);
     return r.text();
   },
-  chat: (message: string, task?: string, attachments?: ChatAttachment[]) =>
-    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments }),
+  chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
+    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {

@@ -252,7 +252,6 @@ const MAIN_SESSION: Session = {
   live: true,
   last_activity: "",
   seg: 0,
-  isCurrentMain: true,
 };
 
 // The planner session is, like the main-agent session, a fixed UI affordance with
@@ -398,16 +397,6 @@ function SessionItem({
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
-        {s.role === "mainagent" && s.isCurrentMain && !s.live && (
-          <span className="inline-flex shrink-0 items-center rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-            当前
-          </span>
-        )}
-        {s.role === "mainagent" && !s.isCurrentMain && (
-          <span className="inline-flex shrink-0 items-center rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-            历史
-          </span>
-        )}
         {s.live && (
           <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
             <span className="size-1 animate-pulse rounded-full bg-blue-500" />
@@ -1164,11 +1153,34 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     [store],
   );
   const currentMainKey = mainSessionKey(currentSeg);
-  const mainLive = sending || (mainChatRunning ?? recentLive(currentMainKey));
   const plannerLive = recentLive("plan");
 
-  // One switchable session per main-agent segment (newest-first). Only the current
-  // (highest) segment is live/writable; older ones are read-only history.
+  // Which main segment is streaming RIGHT NOW. A main turn is serialized per task, so at
+  // most one segment is live. Gate on the real running flag (sending / mainChatRunning)
+  // rather than "recent activity", and drop it the moment the turn's terminal record
+  // (kind='result', or an error) lands — otherwise the badge lingers for STREAM_WINDOW_MS
+  // after the agent already finished. null = nothing running.
+  const liveMainSeg = React.useMemo<number | null>(() => {
+    if (!(sending || mainChatRunning)) return null;
+    // the streaming segment is the one with the freshest activity (incl. the just-sent turn)
+    let seg = currentSeg;
+    let bestTs = -1;
+    for (const m of mainSegs) {
+      const raw = store[mainSessionKey(m.seq)]?.lastTs;
+      const ts = raw ? Date.parse(raw) : -1;
+      if (ts > bestTs) {
+        bestTs = ts;
+        seg = m.seq;
+      }
+    }
+    const items = store[mainSessionKey(seg)]?.items ?? [];
+    const last = items[items.length - 1];
+    if (last && (last.kind === "result" || (last.kind === "text" && last.is_error))) return null;
+    return seg;
+  }, [sending, mainChatRunning, mainSegs, store, currentSeg]);
+
+  // Every main-agent segment is an independent, interactive session (like the top-level
+  // chat conversations) — you can talk in any of them, newest-first.
   const mainSessions = React.useMemo<Session[]>(
     () =>
       mainSegs.map((m) => ({
@@ -1176,12 +1188,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         role: "mainagent",
         title: mainSessionTitle(m.seq),
         status: "running",
-        live: m.seq === currentSeg && mainLive,
+        live: m.seq === liveMainSeg,
         last_activity: m.created_at,
         seg: m.seq,
-        isCurrentMain: m.seq === currentSeg,
       })),
-    [mainSegs, currentSeg, mainLive],
+    [mainSegs, liveMainSeg],
   );
 
   const sessions = React.useMemo(
@@ -1198,11 +1209,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
   const isMain = active.role === "mainagent";
-  const isMainCurrent = isMain && (active.seg ?? 0) === currentSeg; // only the current segment is writable
   const isPlanner = active.role === "planner";
   const isSystem = active.role === "system";
   const activeKey = keyForSession(active);
   const activeState = store[activeKey];
+  // A main turn is serialized per task (chat lock), so "busy" is task-wide: while any
+  // main segment is mid-turn the active composer is disabled. Clear it the moment the
+  // active session's terminal record (kind='result', or an error) lands, so the input
+  // re-enables immediately instead of waiting for the next chat-status poll.
+  const activeItems = activeState?.items ?? [];
+  const activeLast = activeItems[activeItems.length - 1];
+  const activeSettled =
+    !!activeLast && (activeLast.kind === "result" || (activeLast.kind === "text" && activeLast.is_error));
+  const mainBusy = isMain && (sending || (!activeSettled && (mainChatRunning ?? recentLive(activeKey))));
   // 折叠态（手机端）标题栏要替代整张列表：显示当前会话名 + 其它会话的未读合计，
   // 否则收起后既不知道自己在看哪个会话，也看不到别处有新消息。
   const activeDisplayTitle = (active.role === "worker" ? sessionMeta.get(active.id)?.title : "") || active.title;
@@ -1400,7 +1419,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setSending(true);
     chatStatusRequestRef.current++;
     api
-      .chat(text, taskId, atts.length > 0 ? atts : undefined)
+      .chat(text, taskId, atts.length > 0 ? atts : undefined, active.seg ?? 0)
       .then(({ mode }) => {
         chatStatusRequestRef.current++;
         setMainChatRunning(mode === "llm");
@@ -1770,30 +1789,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
               ) : (
                 <div className="pl-9 text-xs text-muted-foreground">
-                  {isMainCurrent ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
+                  {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
                 </div>
               )}
             </div>
           </ScrollArea>
-          {isMain && !isMainCurrent ? (
-            <div className="flex flex-col items-center gap-2 border-t p-3 text-center text-xs text-muted-foreground">
-              <span>这是历史会话（只读）。切回当前会话或新建会话以继续对话。</span>
-              <div className="flex items-center gap-2">
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setActiveId(mainSessionId(currentSeg))}>
-                  回到当前会话
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 text-xs"
-                  onClick={() => setConfirmNewMain(true)}
-                  disabled={creatingMain}
-                >
-                  新建会话
-                </Button>
-              </div>
-            </div>
-          ) : isMain ? (
+          {isMain ? (
             <div className="border-t p-3">
               {attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-1.5">
@@ -1835,9 +1836,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   onKeyDown={(e) => {
                     if (!shouldSubmitOnKey(e, sendMode)) return;
                     e.preventDefault();
-                    if (!mainLive) send();
+                    if (!mainBusy) send();
                   }}
-                  disabled={mainLive}
+                  disabled={mainBusy}
                   className="max-h-36 min-h-9 overflow-y-auto"
                 />
                 <InputGroupAddon align="block-end">
@@ -1845,13 +1846,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     size="icon-xs"
                     variant="ghost"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={mainLive || uploading}
+                    disabled={mainBusy || uploading}
                     title="上传文件"
                     aria-label="上传文件"
                   >
                     {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
                   </InputGroupButton>
-                  {mainLive ? (
+                  {mainBusy ? (
                     <InputGroupButton
                       className="ml-auto"
                       size="icon-xs"
