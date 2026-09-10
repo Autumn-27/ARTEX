@@ -78,3 +78,29 @@ func (e *Engine) modelErrorRetryPolicy() (retries int, backoff time.Duration) {
 	}
 	return retries, backoff
 }
+
+// emptyTurnNudgeLimit resolves how many empty-turn continuations one work may
+// inject (see steerHooks.Stop). It deliberately reuses layer ②'s knob —— 「空响应
+// 重试次数」:两者是同一件事的两种手段。SDK 那层管「一个内容块都没有」，手段是把
+// 同一个请求原样重发;这里管「只有思考、既无正文也无工具」，手段是追加一条指令让
+// 模型带着已有思考接着做(原样重发对这种由上下文形状决定的空转没有意义)。判空口径
+// 不同是因为 SDK 以「有没有 yield 过事件」为准，而思考增量本身就是事件——但用户配
+// 「空响应重试几次」时想表达的是「模型没产出实质内容就再来一次」，两层共用一个次数
+// 才对得上这个心智。
+//
+// 读全局策略而不是某个 profile 的覆盖:一个 run 中途可能因故障转移换 profile，而这
+// 是整条意图的总量闸，不该跟着换端点而变。语义与 SDK 的 emptyRetries() 同构:
+// 0 = 默认 defaultEmptyTurnNudges;-1(负) = 关闭空转续跑;>0 = 用该值。
+func (e *Engine) emptyTurnNudgeLimit() int {
+	if e == nil || e.m == nil || e.m.pg == nil {
+		return defaultEmptyTurnNudges
+	}
+	switch n := e.m.pg.LLMRetryPolicy().Empty.Attempts; {
+	case n == 0:
+		return defaultEmptyTurnNudges
+	case n < 0:
+		return 0
+	default:
+		return n
+	}
+}
