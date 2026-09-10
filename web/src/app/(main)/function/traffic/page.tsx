@@ -5,19 +5,18 @@ import * as React from "react";
 import {
   ArrowDownWideNarrowIcon,
   ArrowUpNarrowWideIcon,
-  CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  CopyIcon,
   ListChecksIcon,
   Loader2Icon,
   RadioTowerIcon,
   SearchIcon,
   Trash2Icon,
-  WrapTextIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { HttpCodeBlock } from "@/components/http-code-block";
+import { LinkTrafficDialog } from "@/components/link-traffic-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,7 +40,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
-import { cn, copyText } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -90,205 +89,6 @@ function requestWithHost(raw: string, exchange: TrafficExchange): string {
   return `${raw.slice(0, firstLineEnd + newline.length)}Host: ${host}${newline}${raw.slice(firstLineEnd + newline.length)}`;
 }
 
-function StartLine({ line }: { line: string }) {
-  const response = /^(HTTP\/\S+)(\s+)(\d{3})(.*)$/.exec(line);
-  if (response) {
-    return (
-      <>
-        <span className="text-muted-foreground">{response[1]}</span>
-        {response[2]}
-        <span className={statusTone(Number(response[3]))}>{response[3]}</span>
-        {response[4]}
-      </>
-    );
-  }
-
-  const request = /^([A-Z]+)(\s+)(\S+)(\s+)(HTTP\/\S+)$/.exec(line);
-  if (request) {
-    return (
-      <>
-        <span className="font-semibold text-primary">{request[1]}</span>
-        {request[2]}
-        <span className="text-chart-2">{request[3]}</span>
-        {request[4]}
-        <span className="text-muted-foreground">{request[5]}</span>
-      </>
-    );
-  }
-
-  return line;
-}
-
-function HeaderLine({ line }: { line: string }) {
-  const separator = line.indexOf(":");
-  if (separator <= 0) return line;
-  return (
-    <>
-      <span className="text-primary">{line.slice(0, separator)}</span>
-      <span className="text-muted-foreground">:</span>
-      <span className="text-chart-2">{line.slice(separator + 1)}</span>
-    </>
-  );
-}
-
-function JsonBody({ body }: { body: string }) {
-  const parts: React.ReactNode[] = [];
-  const tokens = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
-  let cursor = 0;
-  for (const match of body.matchAll(tokens)) {
-    const index = match.index ?? 0;
-    if (index > cursor) parts.push(body.slice(cursor, index));
-    let className = "text-chart-4";
-    if (match[1]) className = match[2] ? "text-primary" : "text-chart-2";
-    else if (match[3]) className = "text-chart-3";
-    parts.push(
-      <span key={`${index}-${match[0].length}`} className={className}>
-        {match[0]}
-      </span>,
-    );
-    cursor = index + match[0].length;
-  }
-  if (cursor < body.length) parts.push(body.slice(cursor));
-  return parts;
-}
-
-function MarkupBody({ body }: { body: string }) {
-  const parts: React.ReactNode[] = [];
-  const tags = /<\/?[A-Za-z][^>]*>|<!--[\s\S]*?-->/g;
-  let cursor = 0;
-  for (const match of body.matchAll(tags)) {
-    const index = match.index ?? 0;
-    if (index > cursor) parts.push(body.slice(cursor, index));
-    parts.push(
-      <span key={`${index}-${match[0].length}`} className="text-primary">
-        {match[0]}
-      </span>,
-    );
-    cursor = index + match[0].length;
-  }
-  if (cursor < body.length) parts.push(body.slice(cursor));
-  return parts;
-}
-
-type BodyFormat = "json" | "markup" | "plain";
-
-function detectBodyFormat(body: string): BodyFormat {
-  const trimmed = body.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return "json";
-  if (trimmed.startsWith("<")) return "markup";
-  return "plain";
-}
-
-function HighlightedBody({ body, format }: { body: string; format: BodyFormat }) {
-  if (format === "json") return <JsonBody body={body} />;
-  if (format === "markup") return <MarkupBody body={body} />;
-  return body;
-}
-
-function HttpCodeBlock({ raw }: { raw: string }) {
-  const [wrapLines, setWrapLines] = React.useState(true);
-  const [copied, setCopied] = React.useState(false);
-  const value = raw || "（空）";
-  const lines = value.replaceAll("\r\n", "\n").split("\n");
-  const separator = lines.indexOf("");
-  const body = separator >= 0 ? lines.slice(separator + 1).join("\n") : "";
-  const bodyFormat = detectBodyFormat(body);
-
-  React.useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1500);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-
-  const copyPacket = async () => {
-    const ok = await copyText(value);
-    if (ok) {
-      setCopied(true);
-      return;
-    }
-    toast.error("复制失败，请使用 Ctrl/Cmd+A 后复制");
-  };
-
-  const renderLine = (line: string, index: number) => {
-    if (index === 0) return <StartLine line={line} />;
-    if (separator < 0 || index < separator) return <HeaderLine line={line} />;
-    if (index === separator) return null;
-    return <HighlightedBody body={line} format={bodyFormat} />;
-  };
-
-  return (
-    <div className="relative mx-3 my-4 overflow-hidden rounded-md border bg-background shadow-xs">
-      <div className="absolute top-2 right-2 flex items-center gap-0.5 rounded-md border bg-background/95 p-0.5 shadow-xs">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label={wrapLines ? "关闭自动换行" : "开启自动换行"}
-              aria-pressed={wrapLines}
-              onClick={() => setWrapLines((current) => !current)}
-            >
-              <WrapTextIcon />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">{wrapLines ? "关闭自动换行" : "开启自动换行"}</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label={copied ? "已复制报文" : "复制报文"}
-              onClick={() => void copyPacket()}
-            >
-              {copied ? <CheckIcon /> : <CopyIcon />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">{copied ? "已复制" : "复制报文"}</TooltipContent>
-        </Tooltip>
-      </div>
-      {/* biome-ignore lint/a11y/useSemanticElements: textarea cannot preserve line numbers and syntax-highlighting markup. */}
-      <div
-        role="textbox"
-        aria-label="HTTP 报文代码"
-        aria-multiline="true"
-        aria-readonly="true"
-        tabIndex={0}
-        className="max-h-[calc(100vh-15rem)] min-w-0 overflow-auto bg-background py-3 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        onKeyDown={(event) => {
-          if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "a") return;
-          event.preventDefault();
-          const selection = window.getSelection();
-          if (!selection) return;
-          const range = document.createRange();
-          range.selectNodeContents(event.currentTarget);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        }}
-      >
-        {lines.map((line, index) => (
-          <div
-            key={`${index}-${line}`}
-            data-line={index + 1}
-            className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] leading-relaxed before:sticky before:left-0 before:self-stretch before:border-r before:bg-muted/20 before:px-1 before:text-right before:text-muted-foreground/60 before:content-[attr(data-line)]"
-          >
-            <code
-              className={cn(
-                "min-h-[1lh] min-w-0 pr-16 pl-1.5 [tab-size:4]",
-                wrapLines ? "break-words whitespace-pre-wrap" : "whitespace-pre",
-              )}
-            >
-              {renderLine(line, index)}
-            </code>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // Fixed method set (server filters exact-match); avoids deriving options from a
 // single page, which would only ever list the methods on that page.
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
@@ -296,6 +96,8 @@ const PAGE_SIZES = [25, 50, 100, 200];
 type HostCountSortDirection = "asc" | "desc";
 
 export default function TrafficPage() {
+  const [selectedFlows, setSelectedFlows] = React.useState<Set<string>>(() => new Set());
+  const [linking, setLinking] = React.useState(false);
   const [page, setPage] = React.useState(0);
   const [size, setSize] = React.useState(50);
   const [host, setHost] = React.useState(""); // raw host input
@@ -623,6 +425,17 @@ export default function TrafficPage() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted-foreground">已选 {selectedFlows.size} 条流量</span>
+        <Button variant="outline" size="sm" disabled={selectedFlows.size === 0} onClick={() => setLinking(true)}>
+          关联到漏洞
+        </Button>
+        {selectedFlows.size > 0 ? (
+          <Button variant="ghost" size="sm" onClick={() => setSelectedFlows(new Set())}>
+            清空选择
+          </Button>
+        ) : null}
+      </div>
       {/* History table */}
       <div className="flex h-[calc(100vh-15rem)] min-h-0 flex-col">
         <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
@@ -630,6 +443,22 @@ export default function TrafficPage() {
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      aria-label="选择本页流量"
+                      checked={exchanges.length > 0 && exchanges.every((e) => selectedFlows.has(e.id))}
+                      onCheckedChange={(checked) =>
+                        setSelectedFlows((previous) => {
+                          const next = new Set(previous);
+                          for (const e of exchanges) {
+                            if (checked === true) next.add(e.id);
+                            else next.delete(e.id);
+                          }
+                          return next;
+                        })
+                      }
+                    />
+                  </TableHead>
                   <TableHead className="w-36">时间</TableHead>
                   <TableHead className="w-44">host</TableHead>
                   <TableHead className="w-20">方法</TableHead>
@@ -646,6 +475,21 @@ export default function TrafficPage() {
                     className={cn("cursor-pointer", selected?.id === e.id && "bg-accent hover:bg-accent")}
                     onClick={() => setSelected(e)}
                   >
+                    <TableCell>
+                      <Checkbox
+                        aria-label={`选择流量 ${e.id}`}
+                        checked={selectedFlows.has(e.id)}
+                        onClick={(event) => event.stopPropagation()}
+                        onCheckedChange={(checked) =>
+                          setSelectedFlows((previous) => {
+                            const next = new Set(previous);
+                            if (checked === true) next.add(e.id);
+                            else next.delete(e.id);
+                            return next;
+                          })
+                        }
+                      />
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(e.ts)}</TableCell>
                     <TableCell className="font-mono text-xs">{e.host}</TableCell>
                     <TableCell>
@@ -665,7 +509,7 @@ export default function TrafficPage() {
                 ))}
                 {exchanges.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-12 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
                       {traffic === null ? "加载中…" : "没有匹配的流量。"}
                     </TableCell>
                   </TableRow>
@@ -676,6 +520,13 @@ export default function TrafficPage() {
         </Card>
       </div>
 
+      {linking ? (
+        <LinkTrafficDialog
+          trafficIds={[...selectedFlows]}
+          onClose={() => setLinking(false)}
+          onBound={() => setSelectedFlows(new Set())}
+        />
+      ) : null}
       <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
         <SheetContent className="w-full! max-w-none! gap-0 p-0 sm:w-[48rem]! sm:max-w-[48rem]!">
           {selected && (

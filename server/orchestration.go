@@ -75,6 +75,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolSearchWorkerTraces(),
 		s.toolGetTaskNodeDetail(),
 		s.toolUpdateFindingReport(),
+		s.toolGetFindingTraffic(),
 	}
 }
 
@@ -392,20 +393,22 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
 		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
 		objSchema(map[string]any{
-			"finding_id": map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
-			"report":     strParam("详细报告全文,Markdown 格式"),
+			"finding_id":       map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
+			"report":           strParam("详细报告全文,Markdown 格式"),
+			"evidence_version": map[string]any{"type": "integer", "description": "get_finding_traffic 返回的证据 version；用于防止报告覆盖新的证据变更"},
 		}, "finding_id", "report"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				FindingID json.RawMessage `json:"finding_id"`
-				Report    string          `json:"report"`
+				EvidenceVersion *int64          `json:"evidence_version"`
+				FindingID       json.RawMessage `json:"finding_id"`
+				Report          string          `json:"report"`
 			}
 			_ = json.Unmarshal(in, &a)
 			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
 			}
-			n, err := s.m.pg.SetFindingReportByNodeID(nodeID, a.Report)
+			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -453,11 +456,12 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt() // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()   // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()    // worker 提示词:加否定结论证据门槛(一次性)
-	s.seedReporterAgent()     // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.reseedGoalsPrompt()       // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedMainAgentPrompt()   // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
+	s.reseedPlannerPrompt()     // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
+	s.reseedWorkerPrompt()      // worker 提示词:加否定结论证据门槛(一次性)
+	s.seedReporterAgent()       // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.seedFindingTrafficTools() // 增加可选证据参数及只读证据工具，保留用户配置
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。

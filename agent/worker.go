@@ -41,17 +41,18 @@ type WebSearchOpts struct {
 }
 
 type Worker struct {
-	prov        llm.Provider
-	model       string
-	workDir     string
-	proxyAddr   string
-	proxyCACert string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
-	webSearch   WebSearchOpts     // web_search tool backend selection (off by default)
-	mem         *memory.Store     // cross-engagement tradecraft memory (G4)
-	tx          *transcript.Store // raw LLM conversation persistence (nil = off)
-	window      int               // context window in tokens (for compaction)
-	windowFn    func() int        // optional dynamic task-chain minimum
-	maxTurns    int               // max agent turns per run (0 = unlimited)
+	findingRecorder FindingRecorder
+	prov            llm.Provider
+	model           string
+	workDir         string
+	proxyAddr       string
+	proxyCACert     string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	webSearch       WebSearchOpts     // web_search tool backend selection (off by default)
+	mem             *memory.Store     // cross-engagement tradecraft memory (G4)
+	tx              *transcript.Store // raw LLM conversation persistence (nil = off)
+	window          int               // context window in tokens (for compaction)
+	windowFn        func() int        // optional dynamic task-chain minimum
+	maxTurns        int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
@@ -204,7 +205,9 @@ const workerDefaultTmpl = `你是一个 ARTEX 平台授权渗透测试系统的"
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **新资产/资源 → insert_assets（资产图）**：子域 / service / endpoint / 指纹 / 凭据 等一切资产【本身】。**这里只登记资产；探索结论/判断不写这里，用 record_fact。**
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
-- **确认漏洞 → report_finding（探索图，含 PoC，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
+- **确认漏洞 → report_finding（探索图，含 PoC，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。有对应录制流量时，先用 traffic_search / traffic_get 核对真实 ID，再用 traffic_refs 按复现顺序绑定多条请求/响应；域名和时间只用于候选筛选，不推定任务归属。
+
+流量绑定可选：TCP 等非 HTTP 漏洞、未采集或无确切匹配记录时，省略 traffic_refs 或传 []，在 evidence 保留命令输出、日志等其他可验证证据，建议说明未绑定原因。不要猜测 ID，也不要仅为补包重复探测。
 
 完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
 
@@ -255,7 +258,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + workerTrafficBlock(caCert != "") + findingTrafficGuidance + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -325,6 +328,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
+	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)

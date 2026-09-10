@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,11 @@ import (
 // DBFinding is a row in the standalone findings table. It persists across task
 // deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
+	TrafficCount          int
+	EvidenceVersion       int64
+	ReportEvidenceVersion int64
+	TrafficBindings       []FindingTrafficBinding // populated only for export
+
 	ID              int64
 	TaskID          *int64
 	NodeID          *int64
@@ -97,7 +103,8 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 // list query selects, so scanFinding stays in sync across callers.
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
-	       COALESCE(t.description, '') AS task_description`
+	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
+ (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -110,7 +117,7 @@ func scanFindings(rows interface {
 		f := &DBFinding{}
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -503,7 +510,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.Report); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -631,7 +638,7 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.Report)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -647,20 +654,27 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 // list, the per-task 发现 Tab, and the exploration graph alike. Deleting the node
 // cascades its edges + node_assets and nulls any activity referencing it. Returns
 // rows affected (0 = no finding with that id).
-func (d *DB) DeleteFinding(id int64) (int64, error) {
-	var nodeID *int64
-	err := d.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	if nodeID != nil {
-		// best-effort: the finding is already gone; a stray node must not fail the op.
-		_, _ = d.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, *nodeID)
-	}
-	return 1, nil
+func (d *DB) DeleteFinding(id int64) (n int64, err error) {
+	err = d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := LockFindingEvidenceTx(tx, id, nil); err != nil {
+			if errors.Is(err, ErrFindingNotFound) {
+				return nil
+			}
+			return err
+		}
+		var nodeID sql.NullInt64
+		if err := tx.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID); err != nil {
+			return err
+		}
+		if nodeID.Valid {
+			if _, err := tx.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, nodeID.Int64); err != nil {
+				return err
+			}
+		}
+		n = 1
+		return nil
+	})
+	return
 }
 
 // DeleteFindingsByTask removes all findings rows of a task. The originating
@@ -687,11 +701,7 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 // whose node_id matches — report_finding returns that node id, so an agent tool
 // can address the finding it just created. Returns rows affected (0 when no row).
 func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error) {
-	res, err := d.Exec(`UPDATE findings SET report=$1 WHERE node_id=$2`, report, nodeID)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return d.SetFindingReportVersionByNodeID(context.Background(), nodeID, report, nil)
 }
 
 // setFindingCol updates one text column on the standalone finding row AND mirrors
@@ -737,6 +747,8 @@ func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the
 // per-task view grafts onto its exploration-node findings.
 type FindingMeta struct {
+	TrafficCount int
+
 	ID       int64
 	Status   string
 	AssetIDs []int64
@@ -757,7 +769,7 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	if taskID <= 0 {
 		return out, nil
 	}
-	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), asset_ids FROM findings
+	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), asset_ids, (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=findings.id) FROM findings
 		WHERE task_id=$1 AND node_id IS NOT NULL`, taskID)
 	if err != nil {
 		return out, err
@@ -767,7 +779,7 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 		var nid int64
 		var m FindingMeta
 		var aidsJSON string
-		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON); err != nil {
+		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount); err != nil {
 			return out, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &m.AssetIDs)

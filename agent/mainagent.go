@@ -17,19 +17,20 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	prov           llm.Provider
-	model          string
-	tx             *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window         int                                    // context window in tokens (for compaction)
-	windowFn       func() int                             // optional dynamic task-chain minimum
-	maxTurns       int                                    // max agent turns per run (0 = unlimited)
-	proxyAddr      string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert    string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch      WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
-	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	findingRecorder FindingRecorder
+	prov            llm.Provider
+	model           string
+	tx              *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window          int                                    // context window in tokens (for compaction)
+	windowFn        func() int                             // optional dynamic task-chain minimum
+	maxTurns        int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr       string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert     string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch       WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir         string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork       func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
@@ -103,6 +104,7 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 // worker/planner sessions — not just the final answer.
 func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
+	tsx.SetFindingRecorder(m.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -149,7 +151,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    m.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx

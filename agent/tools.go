@@ -73,11 +73,12 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
-	as     *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs     *db.CompanyStore // company store (optional)
-	ts     *db.ExplorationStore
-	worker string
-	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	findingRecorder FindingRecorder
+	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	cs              *db.CompanyStore // company store (optional)
+	ts              *db.ExplorationStore
+	worker          string
+	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -1358,67 +1359,59 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "[重要]发现漏洞时必须调用该工具进行记录!记录一个确认的漏洞发现。在任务上下文中 intent_id 必填（当前正在执行的意图 id）；在会话上下文中 intent_id 可不填。",
-		obj(map[string]any{
-			"vulnclass": str("漏洞类（分类，如 SQL Injection / IDOR / XSS）"),
-			"name":      str("漏洞名称（具体可读的标题，如『用户中心订单接口存在越权访问』；建议填写，留空时前端回退展示 vulnclass）"),
-			"severity":  str("critical|high|medium|low（严重/高/中/低）"),
-			"summary":   str("发现摘要"),
-			"intent_id": idp("产生本发现的意图 id（任务上下文必填；会话上下文可不填）"),
-			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "【存在时尽量填写，否则在摘要中必须要写清楚漏洞位置】受影响资产 id（可选，0/1/多个）：参数/端点/站点等。一个漏洞影响多处可全填，纯观察可不填。"},
-			"evidence":  str("证据/PoC 文本"),
-		}, "vulnclass", "severity", "summary"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				VulnClass, Name, Severity, Summary, Evidence string
-				IntentID                                     json.RawMessage   `json:"intent_id"`
-				AssetIDs                                     []json.RawMessage `json:"asset_ids"`
+	return writeTool("report_finding", "记录确认的漏洞。可选 traffic_refs 绑定多条真实 HTTP 请求/响应：先用 traffic_search / traffic_get 核对 ID；提交的流量必须全部绑定成功。TCP 等非 HTTP 漏洞、未采集或无确切匹配记录时可省略 traffic_refs 或传空数组，仍用 evidence 提供命令输出、日志等可验证证据，建议说明未绑定原因。任务上下文传当前 intent_id。", obj(map[string]any{
+		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
+		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"evidence": str("证据/PoC 文本"),
+		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
+			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
+	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+		var a struct {
+			VulnClass, Name, Severity, Summary, Evidence string
+			IntentID                                     json.RawMessage   `json:"intent_id"`
+			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
+			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
+		}
+		if err := json.Unmarshal(in, &a); err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if t.ts == nil {
+			return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
+		}
+		refs, err := db.NormalizeTrafficRefs(a.TrafficRefs)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		var recorded *db.RecordedFinding
+		if t.findingRecorder != nil {
+			recorded, err = t.findingRecorder.Record(ctx, input, refs)
+		} else if len(refs) > 0 {
+			return actool.Errorf("流量证据存储不可用；未登记漏洞"), nil
+		} else {
+			recorded, err = t.ts.RecordFinding(ctx, input)
+		}
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if t.notifyFinding != nil {
+			iid := input.IntentID
+			if iid <= 0 {
+				iid = t.ownerNode
 			}
-			_ = json.Unmarshal(in, &a)
-			payload := map[string]any{"vulnclass": a.VulnClass, "name": a.Name, "severity": a.Severity, "summary": a.Summary,
-				"evidence": map[string]any{"by": t.worker, "poc": a.Evidence}}
-			var anchors []int64
-			for _, raw := range a.AssetIDs {
-				if p := pid(raw); p > 0 {
-					anchors = append(anchors, p)
-				}
-			}
-			var id int64
-			if t.ts != nil {
-				intent := pid(a.IntentID)
-				if intent > 0 {
-					node, err := t.ts.GetNode(intent)
-					if err != nil || node == nil || node.Kind != db.KindIntent {
-						return actool.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）"), nil
-					}
-				}
-				var err error
-				id, err = t.ts.AddNode(db.KindFinding, payload, 9, "confirmed", t.worker, anchors)
-				if err != nil {
-					return actool.Errorf(err.Error()), nil
-				}
-				if intent > 0 {
-					_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> finding
-				}
-				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Name, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
-				// 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）。
-				// 优先带上下文(哪个意图+finding摘要);intent 用工具参数,缺省回退到 owner 意图。
-				if t.notifyFinding != nil {
-					iid := pid(a.IntentID)
-					if iid <= 0 {
-						iid = t.ownerNode
-					}
-					t.notifyFinding(iid, a.Summary)
-				} else if t.notify != nil {
-					t.notify()
-				}
-			} else {
-				// conversation context: no exploration store available, cannot record finding
-				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
-			}
-			t.writes.Findings++
-			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
-		})
+			t.notifyFinding(iid, a.Summary)
+		} else if t.notify != nil {
+			t.notify()
+		}
+		t.writes.Findings++
+		// Keep the first line's node-ID contract for existing reporter triggers.
+		for i := range recorded.Traffic.Bindings {
+			recorded.Traffic.Bindings[i].Snapshot.ReqHead = ""
+			recorded.Traffic.Bindings[i].Snapshot.RespHead = ""
+		}
+		raw, _ := json.Marshal(recorded)
+		return actool.Text(fmt.Sprintf("finding recorded: %d\n%s", recorded.NodeID, raw)), nil
+	})
 }
 
 // recordFact writes a general exploration RESULT/conclusion (not a vuln, not a
