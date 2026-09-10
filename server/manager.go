@@ -249,12 +249,13 @@ type Manager struct {
 
 // Settings keys the UI toggles at runtime.
 const (
-	settingTrafficCapture   = "traffic_capture"
-	settingWebSearchOn      = "web_search_enabled"
-	settingWebSearchBackend = "web_search_backend"
-	settingBraveKey         = "brave_search_api_key"
-	settingTavilyKey        = "tavily_search_api_key"
-	settingWebSearchProxy   = "web_search_proxy"
+	settingTrafficCapture      = "traffic_capture"
+	settingAgentTrafficBinding = "agent_traffic_binding"
+	settingWebSearchOn         = "web_search_enabled"
+	settingWebSearchBackend    = "web_search_backend"
+	settingBraveKey            = "brave_search_api_key"
+	settingTavilyKey           = "tavily_search_api_key"
+	settingWebSearchProxy      = "web_search_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.

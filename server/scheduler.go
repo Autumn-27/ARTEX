@@ -305,6 +305,11 @@ func (sc *Scheduler) fireToolCalls(triggers []*db.AgentTrigger) {
 		if len(want) == 0 {
 			continue
 		}
+		// A failed finding write has no committed finding to report. Keep other
+		// tool-error triggers available for user-defined automation.
+		if e.ToolIsErr && e.Tool == "report_finding" {
+			continue
+		}
 		errTag := ""
 		if e.ToolIsErr {
 			errTag = "[error] "

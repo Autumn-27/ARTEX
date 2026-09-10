@@ -17,6 +17,7 @@ import type { Settings } from "@/lib/types";
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
+  const [agentTrafficBinding, setAgentTrafficBinding] = React.useState(false);
   const [webSearch, setWebSearch] = React.useState(false);
   const [backend, setBackend] = React.useState("ddgs");
   const [braveKeySet, setBraveKeySet] = React.useState(false);
@@ -43,13 +44,14 @@ export default function SystemSettingsPage() {
 
   const apply = React.useCallback((s: Settings) => {
     setTrafficCapture(!!s.traffic_capture);
+    setAgentTrafficBinding(!!s.agent_traffic_binding);
     setWebSearch(!!s.web_search_enabled);
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
-    setProxyInput(s.web_search_proxy || "");
-    setGlobalProxyInput(s.global_proxy || "");
-    setPyInterp(s.python_interpreter || "");
+    setProxyInput(s.web_search_proxy ?? "");
+    setGlobalProxyInput(s.global_proxy ?? "");
+    setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
@@ -116,6 +118,22 @@ export default function SystemSettingsPage() {
       .setSettings({ constraints_inject_planner: v })
       .then(apply)
       .catch(() => setInjectPlanner(!v)); // revert on failure
+  };
+
+  const toggleAgentTrafficBinding = (v: boolean) => {
+    setAgentTrafficBinding(v);
+    setSaving(true);
+    api
+      .setSettings({ agent_traffic_binding: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v ? "已开启 Agent 自动绑定流量" : "已关闭 Agent 自动绑定流量");
+      })
+      .catch((e) => {
+        setAgentTrafficBinding(!v);
+        toast.error(`保存失败：${(e as Error).message}`);
+      })
+      .finally(() => setSaving(false));
   };
 
   const toggleInjectWorker = (v: boolean) => {
@@ -260,6 +278,34 @@ export default function SystemSettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <RadioTowerIcon className="size-4" />
+              Agent 自动绑定流量
+            </CardTitle>
+            <CardDescription id="agent-traffic-binding-description">
+              默认关闭。开启后，漏洞入库时触发的报告 Agent 会核对已有 HTTP 请求/响应，关联对应流量后再编写报告。
+              <b>查阅数据包及额外的工具调用会增加 Token 消耗。</b>
+              <br />
+              TCP、未抓包或没有匹配流量时仍可正常上报。此开关不影响流量捕获、人工绑定及已保存证据的查看。 对下一轮 Agent
+              生效；关闭后会立即拒绝新的自动绑定。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="agent-traffic-binding" className="text-sm font-normal text-muted-foreground">
+              {agentTrafficBinding ? "已开启 · 会增加 Token 消耗" : "已关闭 · 可继续人工绑定"}
+            </Label>
+            <Switch
+              id="agent-traffic-binding"
+              aria-describedby="agent-traffic-binding-description"
+              checked={agentTrafficBinding}
+              disabled={!loaded || saving}
+              onCheckedChange={toggleAgentTrafficBinding}
+            />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
               全局代理
             </CardTitle>
             <CardDescription>
@@ -269,8 +315,9 @@ export default function SystemSettingsPage() {
               开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>（流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入
               Agent 的 bash / WebFetch 出网。与网络搜索代理、LLM 代理相互独立。
               <br />
-              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl 可用，部分工具可能忽略）；
-              若主要用 socks5，建议开启流量捕获——此路径由 MITM 亲自拨号，工具无感知、稳定生效。
+              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl
+              可用，部分工具可能忽略）； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
+              亲自拨号，工具无感知、稳定生效。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -291,9 +338,7 @@ export default function SystemSettingsPage() {
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim()
-                ? "已配置 · 所有目标流量经此代理出网"
-                : "未配置 · 目标流量直连出网"}
+              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
             </p>
           </CardContent>
         </Card>
@@ -308,8 +353,8 @@ export default function SystemSettingsPage() {
               开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny 条目）拼进对应 Agent
               的系统提示，用来框定探索边界（如「仅测当前端口」「禁止爆破」）。
               <br />
-              可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>；默认都开。切换即时生效（下一轮读取），无需重建
-              Agent。关闭后该 Agent 不再看到约束。
+              可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>
+              ；默认都开。切换即时生效（下一轮读取），无需重建 Agent。关闭后该 Agent 不再看到约束。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">

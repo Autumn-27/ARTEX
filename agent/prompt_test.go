@@ -57,6 +57,9 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	if !strings.Contains(recording, "traffic_search") {
 		t.Fatalf("worker while recording should inject trafficTool: %q", recording)
 	}
+	if strings.Contains(recording, "traffic_refs") {
+		t.Fatalf("worker bypassed shared optional evidence policy: %q", recording)
+	}
 	if !strings.Contains(recording, "中间产物输出规约") {
 		t.Fatalf("worker missing artifact tail: %q", recording)
 	}

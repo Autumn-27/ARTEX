@@ -84,6 +84,7 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			b.WriteString(rep)
 			b.WriteString("\n\n")
 		}
+		b.WriteString(findingTrafficMarkdown(f, false))
 		b.WriteString("---\n\n")
 	}
 	return b.String()
@@ -114,6 +115,7 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		b.WriteString(rep)
 		b.WriteString("\n")
 	}
+	b.WriteString(findingTrafficMarkdown(f, true))
 	return b.String()
 }
 
@@ -147,7 +149,7 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述"})
+	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
 	for _, f := range items {
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
@@ -158,8 +160,41 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 			f.TaskDescription,
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
 			strings.TrimSpace(f.Summary),
+			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
 		})
 	}
 	w.Flush()
 	return buf.Bytes()
+}
+
+func findingTrafficIDs(f *db.DBFinding) string {
+	ids := make([]string, 0, len(f.TrafficBindings))
+	for _, b := range f.TrafficBindings {
+		ids = append(ids, fmt.Sprint(b.ID))
+	}
+	return strings.Join(ids, ",")
+}
+
+func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
+	stale := f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion
+	if len(f.TrafficBindings) == 0 && !stale {
+		return ""
+	}
+	var out strings.Builder
+	out.WriteString("\n## 关联流量证据\n\n")
+	fmt.Fprintf(&out, "证据版本：%d；绑定数量：%d。\n\n", f.EvidenceVersion, len(f.TrafficBindings))
+	if stale {
+		out.WriteString("证据已变更，详细报告待更新。\n\n")
+	}
+	for i, b := range f.TrafficBindings {
+		fmt.Fprintf(&out, "%d. **证据 #%d · %s** — `%s %s`，状态码 %d\n", i+1, b.ID, b.Role, b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
+		if b.Note != "" {
+			fmt.Fprintf(&out, "   %s\n", strings.ReplaceAll(b.Note, "\n", "\n   "))
+		}
+		if attachments {
+			fmt.Fprintf(&out, "   [请求报文](evidence/%d/%d/request.http) · [响应报文](evidence/%d/%d/response.http)\n", f.ID, b.ID, f.ID, b.ID)
+		}
+	}
+	out.WriteString("\n")
+	return out.String()
 }

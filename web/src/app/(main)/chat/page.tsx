@@ -925,6 +925,7 @@ export default function ChatPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [convs, setConvs] = React.useState<Conversation[]>([]);
+  const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
@@ -1015,17 +1016,44 @@ export default function ChatPage() {
 
   const selected = React.useMemo(() => convs.find((c) => c.id === selectedId) ?? null, [convs, selectedId]);
   const agentByKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
+  const filteredConversations = React.useMemo(
+    () => (agentFilter === null ? convs : convs.filter((conversation) => conversation.agent_key === agentFilter)),
+    [convs, agentFilter],
+  );
   const visibleConversations = React.useMemo(
-    () => convs.slice(0, visibleConversationCount),
-    [convs, visibleConversationCount],
+    () => filteredConversations.slice(0, visibleConversationCount),
+    [filteredConversations, visibleConversationCount],
   );
   // conversation agents: custom agents + conversational built-ins (role=assistant,
   // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
   // are task-specific and stay hidden from the chat page.
   const chatAgents = React.useMemo(() => agents.filter((a) => !a.builtin || a.role === "assistant"), [agents]);
+  const agentFilterOptions = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const conversation of convs) {
+      counts.set(conversation.agent_key, (counts.get(conversation.agent_key) ?? 0) + 1);
+    }
+    // Include historical sources even if their Agent has since been disabled or deleted.
+    const keys = new Set([...chatAgents.map((agent) => agent.key), ...counts.keys()]);
+    if (agentFilter !== null) keys.add(agentFilter);
+    return [...keys]
+      .map((key) => ({ key, name: agentByKey.get(key)?.name || key, count: counts.get(key) ?? 0 }))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  }, [convs, chatAgents, agentByKey, agentFilter]);
+  const conversationCountLabel =
+    agentFilter === null ? `共 ${convs.length} 个` : `${filteredConversations.length} / ${convs.length} 个`;
+
+  function changeAgentFilter(key: string | null) {
+    setAgentFilter(key);
+    setVisibleConversationCount(CONVERSATION_LIST_PAGE);
+    setSelectedConversationIds(new Set());
+    setBulkDeleteOpen(false);
+    setRenamingId(null);
+  }
 
   const selectedConversationCount = selectedConversationIds.size;
-  const allConversationsSelected = convs.length > 0 && selectedConversationCount === convs.length;
+  const allConversationsSelected =
+    filteredConversations.length > 0 && selectedConversationCount === filteredConversations.length;
   const someConversationsSelected = selectedConversationCount > 0 && !allConversationsSelected;
   let conversationHeaderChecked: boolean | "indeterminate" = false;
   if (allConversationsSelected) conversationHeaderChecked = true;
@@ -1041,7 +1069,9 @@ export default function ChatPage() {
   }, []);
 
   function toggleAllConversations(checked: boolean) {
-    setSelectedConversationIds(checked ? new Set(convs.map((conversation) => conversation.id)) : new Set());
+    setSelectedConversationIds(
+      checked ? new Set(filteredConversations.map((conversation) => conversation.id)) : new Set(),
+    );
   }
 
   function exitSelectionMode() {
@@ -1154,16 +1184,37 @@ export default function ChatPage() {
             <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
               <PlusIcon /> 新建对话
             </Button>
+            <Select
+              value={agentFilter === null ? "all" : `agent:${agentFilter}`}
+              onValueChange={(value) => changeAgentFilter(value === "all" ? null : value.slice(6))}
+              disabled={bulkDeleting}
+            >
+              <SelectTrigger size="sm" className="w-full min-w-0" aria-label="按 Agent 筛选对话">
+                <Bot />
+                <SelectValue placeholder="全部 Agent" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">全部 Agent</SelectItem>
+                  {agentFilterOptions.map((agent) => (
+                    <SelectItem key={agent.key} value={`agent:${agent.key}`}>
+                      {agent.name}（{agent.count}）
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             {convs.length > 0 &&
               (selectionMode ? (
                 <div className="flex items-center gap-2 px-1">
                   <Checkbox
                     checked={conversationHeaderChecked}
                     onCheckedChange={(checked) => toggleAllConversations(checked === true)}
-                    aria-label="选择全部对话"
+                    aria-label="选择当前筛选的全部对话"
+                    disabled={filteredConversations.length === 0 || bulkDeleting}
                   />
                   <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
-                    {selectedConversationCount > 0 ? `已选 ${selectedConversationCount} 个` : `共 ${convs.length} 个`}
+                    {selectedConversationCount > 0 ? `已选 ${selectedConversationCount} 个` : conversationCountLabel}
                   </span>
                   {selectedConversationCount > 0 && (
                     <Button
@@ -1183,13 +1234,14 @@ export default function ChatPage() {
               ) : (
                 <div className="flex items-center gap-2 px-1">
                   <span className="text-muted-foreground min-w-0 flex-1 text-xs tabular-nums">
-                    共 {convs.length} 个
+                    {conversationCountLabel}
                   </span>
                   <Button
                     size="sm"
                     variant="ghost"
                     className="text-muted-foreground"
                     onClick={() => setSelectionMode(true)}
+                    disabled={filteredConversations.length === 0}
                   >
                     <ListChecksIcon data-icon="inline-start" />
                     多选
@@ -1197,9 +1249,17 @@ export default function ChatPage() {
                 </div>
               ))}
           </div>
-          <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+          <ScrollArea
+            key={agentFilter === null ? "all" : `agent:${agentFilter}`}
+            type="auto"
+            className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+          >
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
-              {convs.length === 0 && <p className="text-muted-foreground px-2 py-6 text-center text-xs">暂无对话</p>}
+              {filteredConversations.length === 0 && (
+                <p className="text-muted-foreground px-2 py-6 text-center text-xs">
+                  {agentFilter === null ? "暂无对话" : "该 Agent 暂无对话"}
+                </p>
+              )}
               {visibleConversations.map((c) => (
                 <ConversationItem
                   key={c.id}
@@ -1220,7 +1280,7 @@ export default function ChatPage() {
                   onSelectedForDeleteChange={toggleConversationSelected}
                 />
               ))}
-              {visibleConversationCount < convs.length && (
+              {visibleConversationCount < filteredConversations.length && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -1252,6 +1312,7 @@ export default function ChatPage() {
               agents={chatAgents}
               profiles={profiles}
               onStarted={(c, pending) => {
+                if (agentFilter !== null && agentFilter !== c.agent_key) changeAgentFilter(null);
                 // Insert the new conversation immediately so `selected` resolves to
                 // it on this render (switching to ChatView right away, before the
                 // async reloadConvs lands); reloadConvs then reconciles titles etc.

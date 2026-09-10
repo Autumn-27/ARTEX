@@ -463,6 +463,10 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  traffic_count?: number;
+  evidence_version?: number;
+  report_evidence_version?: number;
+  report_stale?: boolean;
   id: string;
   finding_id?: string; // 独立 findings 表的行 id,状态更新的句柄(任务内旧节点可能缺失)
   vulnclass: string;
@@ -878,6 +882,7 @@ export interface TrafficHost {
 // ---- App settings (runtime toggles) ----
 export interface Settings {
   traffic_capture: boolean;
+  agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
   llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
@@ -1298,4 +1303,55 @@ export interface InterceptAudit {
 }
 export interface InterceptDetail extends InterceptApprovalRow {
   audit: InterceptAudit | null;
+}
+
+export type TrafficEvidenceRole = "baseline" | "proof" | "verification" | "supporting";
+export interface TrafficEvidenceRef {
+  traffic_id: string;
+  role?: TrafficEvidenceRole;
+  note?: string;
+}
+export interface TrafficEvidenceSnapshot {
+  id: string;
+  source_traffic_id: string;
+  captured_at: number;
+  url: string;
+  method: string;
+  status: number;
+  content_type: string;
+  req_head?: string;
+  resp_head?: string;
+  req_hash: string;
+  resp_hash: string;
+  req_len: number;
+  resp_len: number;
+}
+export interface FindingTrafficBinding {
+  id: string;
+  finding_id: string;
+  snapshot_id: string;
+  role: TrafficEvidenceRole;
+  note: string;
+  position: number;
+  created_at: string;
+  snapshot: TrafficEvidenceSnapshot;
+}
+export interface FindingTraffic {
+  finding_id: string;
+  version: number;
+  report_version: number;
+  bindings: FindingTrafficBinding[];
+}
+export interface EvidenceBodyPreview {
+  content: string;
+  offset: number;
+  total: number;
+  next_offset: number;
+  truncated: boolean;
+  binary: boolean;
+}
+export interface FindingTrafficDetail {
+  binding: FindingTrafficBinding;
+  request: EvidenceBodyPreview;
+  response: EvidenceBodyPreview;
 }

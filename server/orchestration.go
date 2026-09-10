@@ -76,6 +76,8 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolSearchWorkerTraces(),
 		s.toolGetTaskNodeDetail(),
 		s.toolUpdateFindingReport(),
+		s.toolGetFindingTraffic(),
+		s.toolBindFindingTraffic(),
 	}
 }
 
@@ -334,10 +336,11 @@ func (s *Server) toolAddHint() actool.CoreTool {
 	return wrTool("add_task_hint", "给指定任务注入战略提示(该任务的 planner 下轮生成意图时会读到)。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
 		objSchema(map[string]any{
-			"task_id":   strParam("任务 id"),
-			"hints":     map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids）。", "items": map[string]any{"type": "object"}},
-			"text":      strParam("[单条] 提示内容"),
-			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
+			"task_id":      strParam("任务 id"),
+			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
+			"text":         strParam("[单条] 提示内容"),
+			"traffic_refs": agent.HintTrafficSchema(),
+			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
@@ -393,20 +396,22 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
 		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
 		objSchema(map[string]any{
-			"finding_id": map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
-			"report":     strParam("详细报告全文,Markdown 格式"),
+			"finding_id":       map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
+			"report":           strParam("详细报告全文,Markdown 格式"),
+			"evidence_version": map[string]any{"type": "integer", "description": "get_finding_traffic 返回的证据 version；用于防止报告覆盖新的证据变更"},
 		}, "finding_id", "report"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				FindingID json.RawMessage `json:"finding_id"`
-				Report    string          `json:"report"`
+				EvidenceVersion *int64          `json:"evidence_version"`
+				FindingID       json.RawMessage `json:"finding_id"`
+				Report          string          `json:"report"`
 			}
 			_ = json.Unmarshal(in, &a)
 			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
 			}
-			n, err := s.m.pg.SetFindingReportByNodeID(nodeID, a.Report)
+			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -440,7 +445,11 @@ func (s *Server) seedOrchestrationTools() {
 	autoAgents, _ := json.Marshal([]string{"auto"})
 	for _, t := range s.orchestrationTools() {
 		schema, _ := json.Marshal(t.InputSchema())
-		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, autoAgents)
+		bindings := autoAgents
+		if t.Name() == "bind_finding_traffic" {
+			bindings = json.RawMessage(`["reporter"]`)
+		}
+		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, bindings)
 	}
 	for _, t := range s.platformTools() {
 		schema, _ := json.Marshal(t.InputSchema())
@@ -454,11 +463,13 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt() // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()   // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()    // worker 提示词:加否定结论证据门槛(一次性)
-	s.seedReporterAgent()     // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.reseedGoalsPrompt()       // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedMainAgentPrompt()   // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
+	s.reseedPlannerPrompt()     // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
+	s.reseedWorkerPrompt()      // worker 提示词:加否定结论证据门槛(一次性)
+	s.seedReporterAgent()       // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.seedFindingTrafficTools() // 增加可选证据参数及只读证据工具，保留用户配置
+	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -684,9 +695,9 @@ func (s *Server) seedReporterAgent() {
 		Enabled:    true,
 		OnToolCall: true,
 		ToolNames:  []string{"report_finding"},
-		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请从触发上下文里取出 finding_id" +
-			"（工具返回 \"finding recorded: <id>\" 里的数字）与任务 id，按你的职责撰写该漏洞的详细报告，" +
-			"最后调用 update_finding_report(finding_id, report) 保存。",
+		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
+			"若运行指引启用自动绑定，先核实并关联本次漏洞的流量，再用 get_finding_traffic(finding_id) 读取最新证据；节点详情使用 finding_node_id。" +
+			"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存。不要混用两种编号。",
 	}); err != nil {
 		log.Printf("[reporter] 创建触发器失败: %v", err)
 	}
