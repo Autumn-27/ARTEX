@@ -131,6 +131,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if err := s.waitTaskQuiescent(drainCtx, taskID); err != nil {
 		return errors.New("任务仍有运行中的 Agent，请先暂停后重试归档")
 	}
+	if err := s.drainTaskSideQuestions(drainCtx, taskID); err != nil {
+		return err
+	}
 	task, err := s.m.pg.GetTask(job.TaskID)
 	if err != nil {
 		return err

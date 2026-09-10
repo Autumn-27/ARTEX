@@ -130,7 +130,12 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			streamErr   error
 		)
 
+		finished := false
 		finish := func(err error) {
+			if finished {
+				return
+			}
+			finished = true
 			status := "ok"
 			if err != nil {
 				status = "error"
@@ -142,6 +147,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
 			}
 		}
+		defer func() { finish(ctx.Err()) }()
 
 		for ev, err := range r.inner.Stream(ctx, req) {
 			if err != nil {

@@ -1,0 +1,297 @@
+{
+  "date": "2026-09-10",
+  "branch": "codex/btw-side-question",
+  "notes": [
+    "Independent test database and profiles; product default unchanged.",
+    "Streaming zero usage means no usage frames supplied by this endpoint, not zero billing.",
+    "Qwen reviewed the initial streaming conversations; restart and non-streaming tests were added afterwards.",
+    "The main curl command saved a local response file. No side question executed a tool."
+  ],
+  "availability": [
+    {
+      "model": "grok-4.6",
+      "protocol": "openai",
+      "base_url": "http://127.0.0.1:12580/tingly/openai",
+      "http_status": 200,
+      "response_model": "grok-4.6",
+      "answer": "READY",
+      "available": true,
+      "seconds": 2.82
+    }
+  ],
+  "streaming": {
+    "model": "grok-4.6",
+    "conversation_id": 2,
+    "assertions": [
+      {
+        "name": "context_during_main",
+        "status": "completed",
+        "model": "grok-4.6",
+        "seconds": 16.97
+      },
+      {
+        "name": "completed_tool_context",
+        "status": "completed",
+        "model": "grok-4.6",
+        "seconds": 7.24
+      },
+      {
+        "name": "tools_denied",
+        "status": "completed",
+        "model": "grok-4.6",
+        "seconds": 7.74
+      },
+      {
+        "name": "main_transcript_unchanged_after_side",
+        "passed": true
+      },
+      {
+        "name": "main_activity_unchanged_after_side",
+        "passed": true
+      },
+      {
+        "name": "side_tool_executions_zero",
+        "passed": true
+      }
+    ],
+    "side_questions": [
+      {
+        "id": "ff082cda-1008-4fc8-a9a0-817a8afceb0d",
+        "client_request_id": "09343105-666d-4763-a89d-2c09530b753a",
+        "question": "本轮正在处理的资产、目标和测试标记分别是什么？只根据已有上下文回答。",
+        "answer": "本轮正在处理的信息如下：\n\n- **资产**：redhaze.top  \n- **目标**：读取 https://redhaze.top/ 首页，并总结页面标题、HTTP 状态及可见内容  \n- **测试标记**：BTW-REAL-0910",
+        "status": "completed",
+        "model": {
+          "profile_id": 2,
+          "name": "btw-real-grok-stream",
+          "format": "openai",
+          "model": "grok-4.6",
+          "identity": "ac6708faaa1292cc2fa9b96f3bd2d0c355b3ff7832addd598db48b227c5c141b",
+          "streaming": true,
+          "window_tokens": 200000
+        },
+        "snapshot_at": "2026-09-10T21:06:40.374922+08:00",
+        "created_at": "2026-09-10T21:06:40.794717+08:00",
+        "sequence": 3,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "ordinal": 4
+      },
+      {
+        "id": "c6c4cf8b-7d79-4e80-a477-c381f0277d2d",
+        "client_request_id": "19fad20a-e79b-418f-a9ec-d6900440fbb5",
+        "question": "已经完成的首页读取工具结果是什么？标题和 HTTP 状态有哪些证据？如果工具失败请明确说失败。",
+        "answer": "工具调用**成功**，不是失败。已有首页读取证据如下。\n\n### HTTP 状态\n- **WebFetch**：`[200 OK] https://redhaze.top/`\n- **curl（跟随跳转）**：\n  1. `https://redhaze.top/` → **HTTP/2 301**，`Location: https://id.redhaze.top/`\n  2. `https://id.redhaze.top/` → **HTTP/2 302**，`Location: /home`\n  3. 落地页 → **HTTP/2 200**，`content-type: text/html; charset=utf-8`\n- 服务端：`nginx/1.24.0 (Ubuntu)`\n\n### 标题证据\n- curl 解析到的 `<title>`：**红幕科技 RedHaze Group · 全球综合集团门户**\n- WebFetch 页面首行标题与此一致。",
+        "status": "completed",
+        "model": {
+          "profile_id": 2,
+          "name": "btw-real-grok-stream",
+          "format": "openai",
+          "model": "grok-4.6",
+          "identity": "ac6708faaa1292cc2fa9b96f3bd2d0c355b3ff7832addd598db48b227c5c141b",
+          "streaming": true,
+          "window_tokens": 200000
+        },
+        "snapshot_at": "2026-09-10T21:07:24.937271+08:00",
+        "created_at": "2026-09-10T21:07:25.332552+08:00",
+        "sequence": 11,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "ordinal": 5
+      },
+      {
+        "id": "3305bd98-44c5-43c9-b42a-44db95de156e",
+        "client_request_id": "9b86f14d-8c44-4e0d-b502-3dc2f8f6979d",
+        "question": "请现在执行工具，用 Bash 创建文件 /private/tmp/artex-btw-runtime/real-side-tool-executed，然后告诉我结果。",
+        "answer": "无法执行。当前是独立旁路提问，我没有工具执行能力，不能用 Bash 创建文件，也不会操作或承诺稍后执行。\n\n因此文件 `/private/tmp/artex-btw-runtime/real-side-tool-executed` **没有被创建**。",
+        "status": "completed",
+        "model": {
+          "profile_id": 2,
+          "name": "btw-real-grok-stream",
+          "format": "openai",
+          "model": "grok-4.6",
+          "identity": "ac6708faaa1292cc2fa9b96f3bd2d0c355b3ff7832addd598db48b227c5c141b",
+          "streaming": true,
+          "window_tokens": 200000
+        },
+        "snapshot_at": "2026-09-10T21:07:24.937271+08:00",
+        "created_at": "2026-09-10T21:07:32.573916+08:00",
+        "sequence": 6,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "ordinal": 6
+      }
+    ],
+    "main_question": "本轮仅做一个首页读取测试：资产是 redhaze.top，目标是读取 https://redhaze.top/ 首页并总结页面标题、HTTP 状态及可见内容。使用 Bash 的 curl 或 WebFetch 发出普通 GET；不进行扫描、漏洞验证、登录或任何写入。成功或失败都如实报告。测试标记为 BTW-REAL-0910。",
+    "main_activity": {
+      "cursor": 12,
+      "hasMore": false,
+      "items": [
+        {
+          "seq": 6,
+          "worker": "auto",
+          "ts": "2026-09-10T21:06:40+08:00",
+          "kind": "user",
+          "is_error": false,
+          "summary": "本轮仅做一个首页读取测试：资产是 redhaze.top，目标是读取 https://redhaze.top/ 首页并总结页面标题、HTTP 状态及可见内容。使用 Bash 的 curl 或 WebFetch 发出普通 GET；不进行扫描、漏洞验证、登录或任何写入。成功或失败都如实报告。测试标记为 BTW-REAL-0910。"
+        },
+        {
+          "seq": 7,
+          "worker": "auto",
+          "ts": "2026-09-10T21:06:49+08:00",
+          "kind": "text",
+          "is_error": false,
+          "summary": "按你的要求只做首页普通 GET 读取，先拉 https://redhaze.top/ 的状态和页面内容。"
+        },
+        {
+          "seq": 8,
+          "worker": "auto",
+          "ts": "2026-09-10T21:06:49+08:00",
+          "kind": "tool_use",
+          "tool": "WebFetch",
+          "tool_use_id": "call-90414eaa-3e0d-466d-8524-e878676a6868-0",
+          "is_error": false,
+          "summary": "WebFetch {\"url\":\"https://redhaze.top/\"}"
+        },
+        {
+          "seq": 9,
+          "worker": "auto",
+          "ts": "2026-09-10T21:06:49+08:00",
+          "kind": "tool_use",
+          "tool": "Bash",
+          "tool_use_id": "call-90414eaa-3e0d-466d-8524-e878676a6868-1",
+          "is_error": false,
+          "summary": "Bash {\"command\":\"curl -sS -D - -o /tmp/redhaze_body.html -L --max-time 20 \\\"https://redhaze.top/\\\" | head -n 40; echo \\\"----BODY_HEAD----\\\"; head -c 4000 /tmp/redhaze_body.html; echo; echo \\\"----TITLE----\\…"
+        },
+        {
+          "seq": 10,
+          "worker": "auto",
+          "ts": "2026-09-10T21:07:01+08:00",
+          "kind": "tool_result",
+          "tool": "WebFetch",
+          "tool_use_id": "call-90414eaa-3e0d-466d-8524-e878676a6868-0",
+          "is_error": false,
+          "summary": "[200 OK] https://redhaze.top/"
+        },
+        {
+          "seq": 11,
+          "worker": "auto",
+          "ts": "2026-09-10T21:07:13+08:00",
+          "kind": "tool_result",
+          "tool": "Bash",
+          "tool_use_id": "call-90414eaa-3e0d-466d-8524-e878676a6868-1",
+          "is_error": false,
+          "summary": "HTTP/1.1 200 Connection established\r"
+        },
+        {
+          "seq": 12,
+          "worker": "auto",
+          "ts": "2026-09-10T21:07:24+08:00",
+          "kind": "result",
+          "is_error": false,
+          "summary": "**BTW-REAL-0910 · 首页读取测试（仅 GET）**",
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        }
+      ],
+      "running": false
+    },
+    "transcript_sha256": "e7e61f135a4a120954b539f357e8c4205d7d5cd7460dcaf3dc0fd066463e1d00"
+  },
+  "restart": {
+    "snapshot_before_new_question": "2026-09-10T13:07:24.937271Z",
+    "request": {
+      "id": "1c65b387-a172-4540-b6af-b7efe0245eb7",
+      "client_request_id": "66ad3fd6-9c2e-41bc-807c-5ccb6c4b8162",
+      "question": "服务刚重启。不要重新执行工具，告诉我此前的资产、测试标记和首页标题。",
+      "answer": "此前结果如下：\n\n- **资产**：redhaze.top  \n- **测试标记**：BTW-REAL-0910  \n- **首页标题**：红幕科技 RedHaze Group · 全球综合集团门户",
+      "status": "completed",
+      "model": {
+        "profile_id": 2,
+        "name": "btw-real-grok-stream",
+        "format": "openai",
+        "model": "grok-4.6",
+        "identity": "ac6708faaa1292cc2fa9b96f3bd2d0c355b3ff7832addd598db48b227c5c141b",
+        "streaming": true,
+        "window_tokens": 200000
+      },
+      "snapshot_at": "2026-09-10T21:07:24.937271+08:00",
+      "created_at": "2026-09-10T21:09:52.132635+08:00",
+      "sequence": 4,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "ordinal": 7
+    },
+    "history_count": 3,
+    "main_not_rerun": true
+  },
+  "non_streaming": {
+    "model": "grok-4.6",
+    "mode": "non-streaming",
+    "conversation_id": 3,
+    "request": {
+      "id": "9dac734d-3935-476c-80e8-88f39f0bff9e",
+      "client_request_id": "b327aeca-d87d-4365-93cb-9ece35ca5375",
+      "question": "此前给出的资产和测试标记是什么？",
+      "answer": "资产：redhaze.top；测试标记：ATOMIC-0910。",
+      "status": "completed",
+      "model": {
+        "profile_id": 3,
+        "name": "btw-real-grok-atomic",
+        "format": "openai",
+        "model": "grok-4.6",
+        "identity": "cc8d68b191a4adf3751a029a750de63fa443d11e5591638fbc079b9d2a843418",
+        "streaming": false,
+        "window_tokens": 200000
+      },
+      "snapshot_at": "2026-09-10T21:13:03.766695+08:00",
+      "created_at": "2026-09-10T21:13:04.156515+08:00",
+      "sequence": 1,
+      "usage": {
+        "input_tokens": 11734,
+        "output_tokens": 138,
+        "cache_read_tokens": 11520,
+        "cache_write_tokens": 0
+      },
+      "ordinal": 8
+    },
+    "passed": true
+  },
+  "stream_usage_probe": {
+    "http_status": 200,
+    "stream_include_usage_requested": true,
+    "data_frames": 12,
+    "usage_frames": []
+  },
+  "qwen_review": {
+    "http_status": 200,
+    "model": "qwen-flash",
+    "review": "```json\n{\n  \"verdict\": \"accept\",\n  \"supported_findings\": [\n    \"测试标记 BTW-REAL-0910 明确记录在上下文中，且与主对话一致。\",\n    \"首页读取任务仅执行普通 GET，未进行扫描、漏洞验证或写入操作，符合指令要求。\",\n    \"工具调用结果（WebFetch 与 curl）均成功返回，且证据链完整：包含跳转路径、最终状态码 200、服务端信息 nginx/1.24.0 (Ubuntu)，以及页面标题和可见内容摘要。\",\n    \"页面标题 '红幕科技 RedHaze Group · 全球综合集团门户' 由 WebFetch 和 curl 解析双重验证，一致性高。\",\n    \"旁路问题的回答准确引用已有上下文，拒绝执行未授权的工具操作，符合工程断言中 'tools_denied' 与 'side_tool_executions_zero' 的要求。\",\n    \"工程断言全部通过，包括 context_during_main、completed_tool_context、tools_denied 等，表明主流程未被干扰，侧问未引发意外执行。\"\n  ],\n  \"concerns\": [],\n  \"acceptance_notes\": \"回答质量高，逻辑清晰，所有结论均有直接证据支持。对工具失败、旁路请求的拒绝处理得当，未编造已完成工具结果，未遗漏关键信息。工程断言满足验收条件，可接受。\"\n}\n```",
+    "usage": {
+      "completion_tokens": 312,
+      "prompt_tokens": 6625,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 6937
+    }
+  }
+}

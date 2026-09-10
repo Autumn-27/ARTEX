@@ -162,6 +162,10 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.drainTaskSideQuestions(drainCtx, id); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	result, err := s.m.DeleteTask(id, opts)
 	if err != nil {
 		var committed *taskDeleteCommittedError

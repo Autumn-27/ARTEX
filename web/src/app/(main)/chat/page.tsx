@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
 import {
@@ -48,8 +49,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useSideQuestions } from "@/hooks/use-side-questions";
 import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
+import { isBtwCommand } from "@/lib/side-questions";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -114,6 +117,7 @@ function Composer({
   onPickFiles,
   onRemoveAttachment,
   uploading,
+  allowBtw,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -129,6 +133,7 @@ function Composer({
   onPickFiles?: (files: FileList | null) => void;
   onRemoveAttachment?: (path: string) => void;
   uploading?: boolean;
+  allowBtw?: boolean;
 }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
@@ -196,10 +201,15 @@ function Composer({
           rows={1}
           placeholder={placeholder}
           value={value}
-          disabled={disabled}
+          disabled={disabled && !allowBtw}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
         />
+        {running && allowBtw && isBtwCommand(value) && (
+          <Button size="icon" onClick={onSend} aria-label="发送旁路问题" title="发送旁路问题">
+            <ArrowUpIcon />
+          </Button>
+        )}
         {running ? (
           // while a run is in flight the send button becomes a stop button —
           // aborts just this session (the trigger queue keeps going).
@@ -451,6 +461,7 @@ function ChatView({
   const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
+  const side = useSideQuestions(`/api/conversations/${conv.id}`);
 
   async function changeProfile(id: number | null) {
     try {
@@ -641,6 +652,7 @@ function ChatView({
   async function send() {
     const msg = input.trim();
     const atts = attachments;
+    if (side.handleCommand(msg, () => setInput(""))) return;
     if ((!msg && atts.length === 0) || sending || running) return;
     setSending(true);
     setInput("");
@@ -677,7 +689,7 @@ function ChatView({
   }
 
   return (
-    <>
+    <SideQuestionWorkspace side={side} label={agent?.name ?? conv.agent_key}>
       {/* header: which agent + live + token meta */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <Bot className="text-muted-foreground size-4 shrink-0" />
@@ -692,6 +704,7 @@ function ChatView({
           <span className="text-muted-foreground min-w-0 truncate text-xs">{agent.description}</span>
         )}
         {running && <LiveBadge />}
+        <SideQuestionButton side={side} />
         <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">
@@ -729,7 +742,8 @@ function ChatView({
         onChange={setInput}
         onSend={send}
         disabled={running}
-        placeholder={running ? "Agent 正在回复…" : "输入消息，Enter 发送，Shift+Enter 换行"}
+        allowBtw
+        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，Enter 发送，Shift+Enter 换行"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}
@@ -745,7 +759,7 @@ function ChatView({
         disabled={running || sending}
         rightSlot={<TodoPopover seq={latestTodoSeq} fetchDetail={fetchDetail} />}
       />
-    </>
+    </SideQuestionWorkspace>
   );
 }
 

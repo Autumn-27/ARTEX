@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/sidequestion"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -119,6 +120,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 		case harness.KindResult:
 			if ev.Terminal != nil {
+				if ev.Terminal.Reason != harness.ReasonAbortedStreaming {
+					sidequestion.Finish(ctx, ev.Terminal.Messages)
+				}
 				finalText = ev.Terminal.Text
 				reason = ev.Terminal.Reason
 				// the buffered tail text usually equals Terminal.Text (final answer);

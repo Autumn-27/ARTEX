@@ -149,12 +149,13 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    m.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx
 		opts.SessionID = fmt.Sprintf("exp%d-main", ts.ID())
 	}
+	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()
 	// reload the prior conversation from the transcript so the agent has context

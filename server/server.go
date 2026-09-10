@@ -55,10 +55,11 @@ type Server struct {
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	// llmProv is the fully-decorated global provider (recorder + failover chain)
 	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
-	llmProv llm.Provider
-	llmCfg  agent.Config // current LLM config (key not exposed)
-	llmOn   bool
-	llmProf string // active LLM profile name (for llmrec tagging)
+	llmProv   llm.Provider
+	llmDirect llm.Provider // concrete global provider, before any failover pool
+	llmCfg    agent.Config // current LLM config (key not exposed)
+	llmOn     bool
+	llmProf   string // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -121,6 +122,7 @@ type Server struct {
 	// channel coalesces enqueue bursts; the database remains the source of truth.
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
+	side        *sideQuestionState
 }
 
 // profBundle is a planner/worker pair built from one LLM profile.
@@ -157,6 +159,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
 	s.applyRetryPolicy()
@@ -243,6 +246,17 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	s.restoreTaskRuntimes()
+	go s.reconcileConcurrency()
+	s.startTaskArchiveWorker()
+	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+	return s
+}
+
+// Restored deadline and worker loops must inherit the same context as new tasks,
+// including the side-question checkpoint publisher installed during startup.
+func (s *Server) restoreTaskRuntimes() {
+	m := s.m
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
@@ -258,7 +272,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
 		if !isTerminalStatus(lifecycle.Status) {
-			s.engine.startDeadlineCoordinator(ctx, t)
+			s.engine.startDeadlineCoordinator(s.ctx, t)
 		}
 	}
 	// Restore every task that had already been admitted before shutdown. Starting
@@ -268,13 +282,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	for _, t := range m.List() {
 		lifecycle := t.lifecycleSnapshot()
 		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
-			s.engine.Run(ctx, t)
+			s.engine.Run(s.ctx, t)
 		}
 	}
-	go s.reconcileConcurrency()
-	s.startTaskArchiveWorker()
-	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
-	return s
 }
 
 // agentMaxTurns returns the configured max_turns for an agent key (0 = unlimited,
@@ -360,7 +370,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
 		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
-		Retry:     retry,
+		Retry: retry,
 	})
 	if err != nil {
 		return err
@@ -464,7 +474,11 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		profName := s.llmProf
 		s.cfgMu.Unlock()
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = bindSideProvider(prov, cfg, 0, profName)
 	}
+	s.cfgMu.Lock()
+	s.llmDirect = prov
+	s.cfgMu.Unlock()
 	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
 	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
 	// 默认仍然独占该配置(见 poolForBinding)。关闭或无备选时返回原 provider,行为不变。
@@ -598,6 +612,7 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = bindSideProvider(prov, cfg, id, p.Name)
 	}
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
@@ -716,6 +731,7 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerSideRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)

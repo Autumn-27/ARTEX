@@ -78,6 +78,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
@@ -245,6 +248,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
+	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
+		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
+	}
 	if warning, err := restoreTaskScopes(tx, remappedTables["task_scope"]); err != nil {
 		return nil, err
 	} else {
@@ -351,6 +359,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
+		"side_question_sessions": true, "side_question_requests": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)

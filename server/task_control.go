@@ -204,6 +204,7 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		if _, err := t.Store.StopIntentWithReason(iid, reason, "user"); err != nil {
 			return out, err
 		}
+		s.cancelWorkerSide(t.ID, t.ExpID, iid)
 		t.NotifyCancelled(iid, reason)
 		out.State = "stopped"
 	default:
