@@ -19,11 +19,16 @@ export default function LoginPage() {
 
   useEffect(() => {
     // 已登录直接进主界面（静态导出下无 middleware 代劳这层跳转）。
-    if (auth.getToken()) {
-      router.replace("/function/tasks");
+    const token = auth.getToken();
+    if (token) {
+      // localStorage 可能仍有凭据但 cookie 已丢失。先同步，再发起全新请求，
+      // 避免服务端守卫或路由缓存把跳转送回仍处于 checking 状态的登录页。
+      auth.setToken(token);
+      window.location.replace("/function/tasks");
       return;
     }
-    api.authStatus()
+    api
+      .authStatus()
       .then(({ initialized }) => {
         if (!initialized) router.replace("/setup");
       })
@@ -38,7 +43,7 @@ export default function LoginPage() {
     try {
       const { token } = await api.login("ARTEX", password);
       auth.setToken(token);
-      router.replace("/function/tasks");
+      window.location.replace("/function/tasks");
     } catch {
       setError("用户名或密码错误");
     } finally {
@@ -46,7 +51,13 @@ export default function LoginPage() {
     }
   }
 
-  if (checking) return null;
+  if (checking) {
+    return (
+      <div role="status" className="flex min-h-dvh items-center justify-center text-muted-foreground">
+        正在检查登录状态…
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-dvh">
@@ -57,13 +68,7 @@ export default function LoginPage() {
           <div className="absolute size-60 rounded-full border border-primary-foreground/15" />
           <div className="absolute size-40 rounded-full border border-primary-foreground/20" />
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/logo.png"
-            alt="ARTEX"
-            width={160}
-            height={160}
-            className="relative brightness-0 invert"
-          />
+          <img src="/logo.png" alt="ARTEX" width={160} height={160} className="relative brightness-0 invert" />
         </div>
       </div>
 
