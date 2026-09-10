@@ -377,21 +377,8 @@ func (s *Server) toolGetFindingTraffic() actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 			id, bid := parseProfileID(a.FindingID), parseProfileID(a.BindingID)
-			if id <= 0 {
-				return actool.Errorf("finding_id 无效"), nil
-			}
-			if ri := agent.RunInfoFrom(ctx); ri.TaskID > 0 {
-				f, err := s.m.pg.GetFinding(id)
-				if err != nil || f == nil {
-					return actool.Errorf("漏洞不存在"), nil
-				}
-				task := s.m.ResolveTask(strconv.FormatInt(ri.TaskID, 10))
-				if task == nil {
-					return actool.Errorf("任务不存在"), nil
-				}
-				if _, _, allowed := findingProvenanceInTask(task, f.TaskID); !allowed {
-					return actool.Errorf("当前任务不可读取该漏洞"), nil
-				}
+			if err := s.agentFindingTrafficAccess(ctx, id, false); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
 			if len(a.BindingID) == 0 {
 				list, err := s.m.pg.GetFindingTraffic(ctx, id)

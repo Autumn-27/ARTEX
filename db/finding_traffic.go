@@ -381,6 +381,40 @@ func (d *DB) FindingIDByNodeID(nodeID int64) (id int64, err error) {
 	return
 }
 
+// PopulateFindingTrafficIDs only enriches already-visible nodes. It performs no
+// discovery or ID guessing, and leaves the legacy node ID unchanged.
+func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
+	byID := map[int64]*Node{}
+	var args []any
+	var placeholders []string
+	for _, n := range nodes {
+		if n == nil || n.Kind != KindFinding || byID[n.ID] != nil {
+			continue
+		}
+		byID[n.ID] = n
+		args = append(args, n.ID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT f.id,f.node_id,(SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id) FROM findings f WHERE f.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var findingID, nodeID int64
+		var count int
+		if err := rows.Scan(&findingID, &nodeID, &count); err != nil {
+			return err
+		}
+		n := byID[nodeID]
+		n.FindingID, n.FindingNodeID, n.TrafficCount = findingID, nodeID, count
+	}
+	return rows.Err()
+}
+
 func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (n int64, err error) {
 	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
 		var id int64

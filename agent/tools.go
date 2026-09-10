@@ -399,7 +399,11 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	for _, h := range hints {
 		var p map[string]any
 		_ = json.Unmarshal(h.Payload, &p)
-		hsum = append(hsum, map[string]any{"id": h.ID, "state": h.State, "text": p["text"]})
+		hint := map[string]any{"id": h.ID, "state": h.State, "text": p["text"]}
+		if findingTrafficBindingEnabled() && p["traffic_refs"] != nil {
+			hint["traffic_refs"] = p["traffic_refs"]
+		}
+		hsum = append(hsum, hint)
 	}
 	out["hints"] = hsum
 	// lineage from the exploration edges: an intent's parents (what it
@@ -1069,6 +1073,9 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
 			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
+			if err := t.ts.PopulateFindingTrafficIDs(f); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			intentOf, _ := t.ts.FindingIntentsWithSources() // finding id -> 产生它的 intent id
 			taskID := t.taskID
 			if taskID <= 0 {
@@ -1077,6 +1084,9 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 			out := make([]map[string]any, 0, len(f))
 			for _, n := range f {
 				m := compactFinding(n)
+				if n.FindingID > 0 {
+					m["finding_id"], m["finding_node_id"], m["traffic_count"] = n.FindingID, n.ID, n.TrafficCount
+				}
 				if n.Inherited {
 					m["task_id"] = n.SourceTaskID
 				} else {
@@ -1168,7 +1178,10 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if n == nil {
 				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets / asset_neighbors（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
 			}
-			return jsonResult(n) // full payload incl. detail / evidence
+			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
 		})
 }
 
@@ -1359,10 +1372,11 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞。可选 traffic_refs 绑定多条真实 HTTP 请求/响应：先用 traffic_search / traffic_get 核对 ID；提交的流量必须全部绑定成功。TCP 等非 HTTP 漏洞、未采集或无确切匹配记录时可省略 traffic_refs 或传空数组，仍用 evidence 提供命令输出、日志等可验证证据，建议说明未绑定原因。任务上下文传当前 intent_id。", obj(map[string]any{
+	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
-		"evidence": str("证据/PoC 文本"),
+		"evidence":         str("证据/PoC 文本"),
+		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
 	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -1371,14 +1385,21 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			IntentID                                     json.RawMessage   `json:"intent_id"`
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
+			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
 		if t.ts == nil {
-			return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
+			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
 		}
-		refs, err := db.NormalizeTrafficRefs(a.TrafficRefs)
+		if !findingTrafficBindingEnabled() && (len(a.TrafficRefs) > 0 || pid(a.EvidenceHintID) > 0) {
+			return actool.Errorf(findingTrafficDisabled), nil
+		}
+		if len(a.EvidenceHintID) > 0 && pid(a.EvidenceHintID) <= 0 {
+			return actool.Errorf("evidence_hint_id 必须为有效的提示节点 ID；无交接提示时省略"), nil
+		}
+		refs, err := t.findingRefsFromHint(pid(a.EvidenceHintID), a.TrafficRefs)
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
@@ -1409,7 +1430,19 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			recorded.Traffic.Bindings[i].Snapshot.ReqHead = ""
 			recorded.Traffic.Bindings[i].Snapshot.RespHead = ""
 		}
-		raw, _ := json.Marshal(recorded)
+		result := struct {
+			*db.RecordedFinding
+			EvidenceStatus string `json:"evidence_status"`
+			EvidenceNote   string `json:"evidence_note,omitempty"`
+		}{RecordedFinding: recorded, EvidenceStatus: "bound"}
+		if len(recorded.Traffic.Bindings) == 0 {
+			result.EvidenceStatus = "not_bound"
+			result.EvidenceNote = "漏洞已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
+			if !findingTrafficBindingEnabled() {
+				result.EvidenceNote = "漏洞已保存。Agent 自动绑定流量已关闭，可在页面人工关联流量。"
+			}
+		}
+		raw, _ := json.Marshal(result)
 		return actool.Text(fmt.Sprintf("finding recorded: %d\n%s", recorded.NodeID, raw)), nil
 	})
 }
@@ -1523,12 +1556,16 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 }
 
 type hintItem struct {
-	Text     string            `json:"text"`
-	AssetIDs []json.RawMessage `json:"asset_ids"`
+	Text        string            `json:"text"`
+	AssetIDs    []json.RawMessage `json:"asset_ids"`
+	TrafficRefs []db.TrafficRef   `json:"traffic_refs"`
 }
 
 // addOneHint 挂一条 hint 节点(active/human)到探索图,可锚定资产,返回 id。
 func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
+	if len(it.TrafficRefs) > 0 && !findingTrafficBindingEnabled() {
+		return 0, fmt.Errorf("Agent 自动绑定流量已关闭，未保存携带 traffic_refs 的提示；可在系统设置开启，或仅交接文字")
+	}
 	if strings.TrimSpace(it.Text) == "" {
 		return 0, fmt.Errorf("text 不能为空")
 	}
@@ -1538,7 +1575,15 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 			anchors = append(anchors, tid)
 		}
 	}
-	id, err := t.ts.AddNode(db.KindHint, map[string]any{"text": it.Text}, 0, "active", "human", anchors)
+	refs, err := db.NormalizeTrafficRefs(it.TrafficRefs)
+	if err != nil {
+		return 0, err
+	}
+	payload := map[string]any{"text": it.Text}
+	if len(refs) > 0 {
+		payload["traffic_refs"] = refs
+	}
+	id, err := t.ts.AddNode(db.KindHint, payload, 0, "active", "human", anchors)
 	if err == nil && t.notify != nil {
 		t.notify() // wake the planner so the new hint is read promptly (debounced)
 	}
@@ -1724,9 +1769,10 @@ func (t *ToolSet) addHint() actool.CoreTool {
 	return writeTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",
 		obj(map[string]any{
-			"hints":     map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/asset_ids）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"text":      str("[单条] 提示内容，如'重点挖认证后接口'"),
-			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个）"},
+			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/asset_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
+			"text":         str("[单条] 提示内容，如'重点挖认证后接口'"),
+			"traffic_refs": HintTrafficSchema(),
+			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个）"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {

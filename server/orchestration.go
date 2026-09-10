@@ -76,6 +76,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolGetTaskNodeDetail(),
 		s.toolUpdateFindingReport(),
 		s.toolGetFindingTraffic(),
+		s.toolBindFindingTraffic(),
 	}
 }
 
@@ -334,10 +335,11 @@ func (s *Server) toolAddHint() actool.CoreTool {
 	return wrTool("add_task_hint", "给指定任务注入战略提示(该任务的 planner 下轮生成意图时会读到)。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
 		objSchema(map[string]any{
-			"task_id":   strParam("任务 id"),
-			"hints":     map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids）。", "items": map[string]any{"type": "object"}},
-			"text":      strParam("[单条] 提示内容"),
-			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
+			"task_id":      strParam("任务 id"),
+			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
+			"text":         strParam("[单条] 提示内容"),
+			"traffic_refs": agent.HintTrafficSchema(),
+			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
@@ -462,6 +464,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedWorkerPrompt()      // worker 提示词:加否定结论证据门槛(一次性)
 	s.seedReporterAgent()       // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
 	s.seedFindingTrafficTools() // 增加可选证据参数及只读证据工具，保留用户配置
+	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -687,9 +690,9 @@ func (s *Server) seedReporterAgent() {
 		Enabled:    true,
 		OnToolCall: true,
 		ToolNames:  []string{"report_finding"},
-		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请从触发上下文里取出 finding_id" +
-			"（工具返回 \"finding recorded: <id>\" 里的数字）与任务 id，按你的职责撰写该漏洞的详细报告，" +
-			"最后调用 update_finding_report(finding_id, report) 保存。",
+		ToolCallMessage: "上面刚有一个漏洞被 report_finding 登记。请读取返回 JSON 的 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID），" +
+			"用 get_finding_traffic(finding_id) 读取证据；节点详情使用 finding_node_id。" +
+			"最后调用 update_finding_report(finding_id=finding_node_id, report, evidence_version=实际读取版本) 保存。不要混用两种编号。",
 	}); err != nil {
 		log.Printf("[reporter] 创建触发器失败: %v", err)
 	}
