@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -35,15 +36,15 @@ func (s *Server) wireInterceptReviewer() {
 		}
 		prov, _, ok := s.providerForProfile(profileID)
 		if !ok {
-			return intercept.Decision{}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
 		}
 		user := fmt.Sprintf("Tool: %s\nArguments:\n%s", tool, command)
 		text, err := streamCollectText(ctx, prov, prompt, user)
 		if err != nil {
-			return intercept.Decision{}, err
+			return intercept.Decision{ProfileID: profileID}, err
 		}
 		v := intercept.ParseVerdict(text)
-		return intercept.Decision{Action: v.Action, Message: v.Reason}, nil
+		return intercept.Decision{Action: v.Action, Message: v.Reason, ProfileID: profileID}, nil
 	})
 }
 
@@ -278,6 +279,10 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.interceptor.Decide(id, req.Decision == "allowed"); err != nil {
+		if errors.Is(err, intercept.ErrAlreadyDecided) {
+			writeErr(w, 409, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -395,4 +400,26 @@ func validateInterceptRuleReq(req interceptRuleReq) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok || id <= 0 {
+		writeErr(w, 400, "bad approval id")
+		return
+	}
+	detail, err := pg.GetInterceptDetail(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if detail == nil {
+		writeErr(w, 404, "not found")
+		return
+	}
+	writeJSON(w, 200, detail)
 }

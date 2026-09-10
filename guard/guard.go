@@ -88,6 +88,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) h
 	if !g.interceptor.IsToolEnabled(ev.ToolName) {
 		return hook.Result{}
 	}
+	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
 	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
 	if !matched {
 		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
@@ -104,11 +105,8 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) h
 		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
 		return g.block(ev.ToolName, dec.Message, "")
 	case "allow":
-		// 观测:显式 allow 规则命中记一条 allowed（无规则命中的放行不记，避免全量刷屏）。
-		// 模型兜底判 allow(RuleID==0)同样不落库,与「未命中直接放行」一致。
-		if dec.RuleID != 0 {
-			g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
-		}
+		// Record explicit rule and model approvals so review details remain auditable.
+		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
 		return hook.Result{}
 	case "ask":
 		// If the worker context is already cancelled (task stopped / killed), block

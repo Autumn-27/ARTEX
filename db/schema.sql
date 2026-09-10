@@ -1024,6 +1024,11 @@ CREATE INDEX IF NOT EXISTS idx_intercept_pending_status ON intercept_pending(sta
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_task   ON intercept_pending(task_id, created_at DESC);
 -- 补旧库:reason 列(已发版,加列要带 IF NOT EXISTS)。
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
+-- Detail payloads are lazy-loaded; NULL preserves the meaning of legacy history.
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS audit JSONB;
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT '';
+UPDATE intercept_pending SET decision_source=CASE WHEN rule_id IS NOT NULL THEN 'rule'
+ WHEN reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END WHERE decision_source='';
 
 -- =====================================================================
 -- L. 漏洞发现持久化

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type InterceptPending struct {
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	Status         string          `json:"status"`
+	DecisionSource string          `json:"decision_source"`
 	Reason         string          `json:"reason"` // 规则 message 或模型判定理由(前缀 [模型])
 	DecidedAt      *time.Time      `json:"decided_at"`
 	CreatedAt      time.Time       `json:"created_at"`
@@ -106,7 +108,7 @@ func (d *DB) ToggleInterceptRule(id int64, enabled bool) error {
 // CreateInterceptPending inserts a pending approval record and returns its ID.
 // convID == 0 → conversation_id stored as NULL (background task).
 // taskID == "" → task_id stored as NULL.
-func (d *DB) CreateInterceptPending(ruleID, convID int64, taskID, agentName, toolName string, input []byte, reason string) (int64, error) {
+func (d *DB) CreateInterceptPending(ruleID, convID int64, taskID, agentName, toolName string, input []byte, reason string, audits ...*InterceptAudit) (int64, error) {
 	raw := json.RawMessage(input)
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
@@ -126,9 +128,9 @@ func (d *DB) CreateInterceptPending(ruleID, convID int64, taskID, agentName, too
 	}
 	var id int64
 	err := d.QueryRow(`
-INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, reason).Scan(&id)
+INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, reason, decision_source, audit)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
@@ -142,7 +144,7 @@ func (d *DB) DecideInterceptPending(id int64, status string) error {
 // (status = 'allowed' | 'denied'), decided_at stamped now. Used to log allow/deny
 // rule matches for observability — they don't block and need no user action, so unlike
 // CreateInterceptPending (which starts 'pending') this records the outcome directly.
-func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status, reason string) (int64, error) {
+func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status, reason string, audits ...*InterceptAudit) (int64, error) {
 	raw := json.RawMessage(input)
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
@@ -162,17 +164,17 @@ func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, too
 	}
 	var id int64
 	err := d.QueryRow(`
-INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason).Scan(&id)
+INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, decision_source, audit)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
-const interceptPendingCols = `id, rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, created_at`
+const interceptPendingCols = `id, rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, created_at, decision_source`
 
 func scanInterceptPending(s interface{ Scan(...any) error }, p *InterceptPending) error {
 	return s.Scan(&p.ID, &p.RuleID, &p.ConversationID, &p.TaskID, &p.AgentName,
-		&p.ToolName, &p.ToolInput, &p.Status, &p.Reason, &p.DecidedAt, &p.CreatedAt)
+		&p.ToolName, &p.ToolInput, &p.Status, &p.Reason, &p.DecidedAt, &p.CreatedAt, &p.DecisionSource)
 }
 
 // ListPendingIntercepts returns all unresolved approval requests, newest first.
@@ -218,19 +220,44 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 	return rows.Scan(
 		&r.ID, &r.RuleID, &r.ConversationID, &r.TaskID, &r.AgentName,
 		&r.ToolName, &r.ToolInput, &r.Status, &r.Reason, &r.DecidedAt, &r.CreatedAt,
-		&r.ConvTitle, &r.ConvAgentKey, &r.RuleName,
+		&r.DecisionSource, &r.ConvTitle, &r.ConvAgentKey, &r.RuleName,
 	)
 }
 
-const approvalRowSelect = `
-SELECT ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
-       ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at,
+const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
+       ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ip.decision_source,
        COALESCE(c.title,'') AS conv_title,
        COALESCE(c.agent_key,'') AS conv_agent_key,
-       COALESCE(ir.name,'') AS rule_name
+       COALESCE(ir.name,'') AS rule_name`
+
+const approvalRowJoins = `
 FROM intercept_pending ip
 LEFT JOIN conversations c ON c.id = ip.conversation_id
 LEFT JOIN intercept_rules ir ON ir.id = ip.rule_id`
+
+const approvalRowSelect = `SELECT ` + approvalRowColumns + approvalRowJoins
+const approvalRowSelectWithAudit = `SELECT ` + approvalRowColumns + `, ip.audit` + approvalRowJoins
+
+func interceptSource(ruleID int64, reason string) string {
+	if ruleID != 0 {
+		return "rule"
+	}
+	if strings.HasPrefix(reason, "[模型]") {
+		return "model"
+	}
+	return "unknown"
+}
+
+func firstAudit(audits []*InterceptAudit) any {
+	if len(audits) == 0 || audits[0] == nil {
+		return nil
+	}
+	raw, err := json.Marshal(audits[0])
+	if err != nil {
+		return nil
+	}
+	return raw
+}
 
 // ListAllIntercepts returns up to limit intercept_pending rows (newest first)
 // joined with conversation and rule info.
