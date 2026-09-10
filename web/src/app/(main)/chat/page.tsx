@@ -6,6 +6,7 @@ import {
   ArrowUpIcon,
   Bot,
   ChevronDownIcon,
+  ChevronRightIcon,
   ListChecksIcon,
   Loader2Icon,
   MoreHorizontalIcon,
@@ -52,6 +53,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
+import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -85,8 +87,44 @@ function fmtDuration(ms: number): string {
 const HISTORY_PAGE = 200;
 const CONVERSATION_LIST_PAGE = 100;
 
+// Which agent groups the user has collapsed in the left rail. Persisted so the
+// rail looks the same after a reload; unknown keys are harmless (a deleted agent
+// simply never renders a group again).
+const COLLAPSED_AGENTS_KEY = "artex.chat.collapsed-agents";
+
 function conversationIsPinned(conversation: Conversation): boolean {
   return conversation.pinned ?? Boolean(conversation.pinned_at);
+}
+
+// AgentGroup is one collapsible section of the left rail: all unpinned
+// conversations of a single agent, newest activity first.
+interface AgentGroup {
+  key: string;
+  name: string;
+  conversations: Conversation[];
+  runningCount: number;
+}
+
+// groupByAgent buckets conversations by agent, preserving the incoming order
+// both inside a group and across groups. The server already sorts by updated_at
+// DESC, so first-appearance order == most-recently-active group first.
+function groupByAgent(conversations: Conversation[], agentByKey: Map<string, Agent>): AgentGroup[] {
+  const groups = new Map<string, AgentGroup>();
+  for (const conversation of conversations) {
+    let group = groups.get(conversation.agent_key);
+    if (!group) {
+      group = {
+        key: conversation.agent_key,
+        name: agentByKey.get(conversation.agent_key)?.name || conversation.agent_key,
+        conversations: [],
+        runningCount: 0,
+      };
+      groups.set(conversation.agent_key, group);
+    }
+    group.conversations.push(conversation);
+    if (conversation.running) group.runningCount++;
+  }
+  return [...groups.values()];
 }
 
 // LiveBadge is the small pulsing "实时" chip reused from the task's main-agent
@@ -761,10 +799,12 @@ function ChatView({
 }
 
 // ConversationItem is one row in the left rail: title, agent subtitle, inline
-// rename, pin marker, and a compact action menu.
+// rename, pin marker, and a compact action menu. Rows nested under an agent
+// group drop the agent subtitle (showAgent=false) — the header already says it.
 const ConversationItem = React.memo(function ConversationItem({
   conv,
   agent,
+  showAgent = true,
   active,
   renaming,
   renameText,
@@ -781,6 +821,7 @@ const ConversationItem = React.memo(function ConversationItem({
 }: {
   conv: Conversation;
   agent?: Agent;
+  showAgent?: boolean;
   active: boolean;
   renaming: boolean;
   renameText: string;
@@ -859,9 +900,13 @@ const ConversationItem = React.memo(function ConversationItem({
             ) : null}
           </div>
           <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
-            <Bot className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">{agent?.name ?? conv.agent_key}</span>
-            <span className="shrink-0">·</span>
+            {showAgent && (
+              <>
+                <Bot className="size-3 shrink-0" />
+                <span className="min-w-0 truncate">{agent?.name ?? conv.agent_key}</span>
+                <span className="shrink-0">·</span>
+              </>
+            )}
             <span className="shrink-0">
               {new Date(conv.created_at).toLocaleDateString("zh-CN", {
                 month: "numeric",
@@ -921,6 +966,44 @@ const ConversationItem = React.memo(function ConversationItem({
   );
 });
 
+// AgentGroupHeader is the sticky, clickable divider above one agent's rows:
+// collapse chevron, agent name, a running marker, and the row count.
+function AgentGroupHeader({
+  group,
+  collapsed,
+  hasActive,
+  onToggle,
+}: {
+  group: AgentGroup;
+  collapsed: boolean;
+  hasActive: boolean;
+  onToggle: (key: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(group.key)}
+      aria-expanded={!collapsed}
+      title={collapsed ? `展开「${group.name}」` : `收起「${group.name}」`}
+      className={cn(
+        "sticky top-0 z-10 flex min-w-0 items-center gap-1.5 rounded-md bg-card px-1.5 py-1 text-left font-medium text-[11px] transition-colors hover:bg-accent/50",
+        collapsed && hasActive ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
+      <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform", !collapsed && "rotate-90")} />
+      <Bot className="size-3 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{group.name}</span>
+      {collapsed && hasActive && (
+        <span className="size-1.5 shrink-0 rounded-full bg-primary" title="当前对话在此分组内" />
+      )}
+      {group.runningCount > 0 && (
+        <Spinner className="size-3 shrink-0" aria-label={`${group.runningCount} 个对话运行中`} />
+      )}
+      <span className="shrink-0 tabular-nums opacity-60">{group.conversations.length}</span>
+    </button>
+  );
+}
+
 export default function ChatPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
@@ -937,6 +1020,9 @@ export default function ChatPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
   const [visibleConversationCount, setVisibleConversationCount] = React.useState(CONVERSATION_LIST_PAGE);
+  // Collapsed agent groups. Hydrated from localStorage after mount (not a lazy
+  // useState init) so the server and client render the same first pass.
+  const [collapsedAgents, setCollapsedAgents] = React.useState<Set<string>>(() => new Set());
   // Pending text + uploaded attachments handed off from a draft that created a
   // conversation via the paperclip, keyed by the new conversation id (consumed once
   // by ChatView on mount; ids never repeat, so leftover entries are harmless).
@@ -995,6 +1081,27 @@ export default function ChatPage() {
     });
   }, [convs]);
 
+  React.useEffect(() => {
+    const raw = getLocalStorageValue(COLLAPSED_AGENTS_KEY);
+    if (!raw) return;
+    try {
+      const keys = JSON.parse(raw);
+      if (Array.isArray(keys))
+        setCollapsedAgents(new Set(keys.filter((key): key is string => typeof key === "string")));
+    } catch {
+      // Corrupted entry → start with everything expanded.
+    }
+  }, []);
+
+  const toggleAgentCollapsed = React.useCallback((key: string) => {
+    setCollapsedAgents((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      setLocalStorageValue(COLLAPSED_AGENTS_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
   // Restore the open conversation from the URL (?c=<id>) on mount, so a refresh
   // returns to the same thread instead of the empty draft view. Runs after
   // hydration (not a lazy useState init) to avoid a server/client mismatch.
@@ -1023,6 +1130,20 @@ export default function ChatPage() {
   const visibleConversations = React.useMemo(
     () => filteredConversations.slice(0, visibleConversationCount),
     [filteredConversations, visibleConversationCount],
+  );
+  // Pinned rows stay a flat block above the groups (server order = pinned_at DESC);
+  // everything else is bucketed per agent, most-recently-active agent first.
+  const pinnedConversations = React.useMemo(
+    () => visibleConversations.filter(conversationIsPinned),
+    [visibleConversations],
+  );
+  const agentGroups = React.useMemo(
+    () =>
+      groupByAgent(
+        visibleConversations.filter((c) => !conversationIsPinned(c)),
+        agentByKey,
+      ),
+    [visibleConversations, agentByKey],
   );
   // conversation agents: custom agents + conversational built-ins (role=assistant,
   // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
@@ -1260,7 +1381,7 @@ export default function ChatPage() {
                   {agentFilter === null ? "暂无对话" : "该 Agent 暂无对话"}
                 </p>
               )}
-              {visibleConversations.map((c) => (
+              {pinnedConversations.map((c) => (
                 <ConversationItem
                   key={c.id}
                   conv={c}
@@ -1280,6 +1401,41 @@ export default function ChatPage() {
                   onSelectedForDeleteChange={toggleConversationSelected}
                 />
               ))}
+              {agentGroups.map((group) => {
+                const collapsed = collapsedAgents.has(group.key);
+                return (
+                  <React.Fragment key={group.key}>
+                    <AgentGroupHeader
+                      group={group}
+                      collapsed={collapsed}
+                      hasActive={group.conversations.some((c) => c.id === selectedId)}
+                      onToggle={toggleAgentCollapsed}
+                    />
+                    {!collapsed &&
+                      group.conversations.map((c) => (
+                        <ConversationItem
+                          key={c.id}
+                          conv={c}
+                          agent={agentByKey.get(c.agent_key)}
+                          showAgent={false}
+                          active={selectedId === c.id}
+                          renaming={renamingId === c.id}
+                          renameText={renamingId === c.id ? renameText : ""}
+                          onSelect={setSelectedId}
+                          onStartRename={startRename}
+                          onRenameText={setRenameText}
+                          onCommitRename={commitRename}
+                          onCancelRename={cancelRename}
+                          onTogglePinned={togglePinned}
+                          onDelete={del}
+                          selectionMode={selectionMode}
+                          selectedForDelete={selectedConversationIds.has(c.id)}
+                          onSelectedForDeleteChange={toggleConversationSelected}
+                        />
+                      ))}
+                  </React.Fragment>
+                );
+              })}
               {visibleConversationCount < filteredConversations.length && (
                 <Button
                   type="button"
