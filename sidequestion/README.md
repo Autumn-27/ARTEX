@@ -6,7 +6,7 @@
 
 ## 实现边界
 
-沿用 Go、norma v0.3.6、Next.js、现有 Markdown / ResizablePanel / Drawer / AlertDialog 组件；没有修改 norma 或添加依赖。Planner、继承自其他任务的 Worker、工具型子任务升级不在本次范围内。
+沿用 Go、norma v0.3.7、Next.js、现有 Markdown / ResizablePanel / Drawer / AlertDialog 组件；没有修改 norma 源码或为旁路添加依赖。Planner、继承自其他任务的 Worker、工具型子任务升级不在本次范围内。
 
 ```mermaid
 flowchart LR

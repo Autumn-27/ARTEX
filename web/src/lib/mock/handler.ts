@@ -16,6 +16,7 @@ import type {
   Company,
   CompanyScopeRule,
   Conversation,
+  FindingRetest,
   IntentAsset,
   ScopeRow,
   Task,
@@ -33,12 +34,41 @@ const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
 // Requests mutate a runtime copy, never the exported fixtures. This keeps module
 // initialization deterministic for tests/HMR while preserving state across mock calls.
+const mockInterceptHistory = structuredClone(D.interceptHistory);
+const mockInterceptPending = structuredClone(D.interceptPending);
+const mockInterceptDetails = structuredClone(D.interceptDetails);
 const mockTasks = structuredClone(D.tasks);
 const mockFindings = structuredClone(D.findings);
 const mockLLMRecords = structuredClone(D.llmRecords);
 const mockTaskTemplates = structuredClone(D.taskTemplates);
 const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
+const mockRetests: FindingRetest[] = [];
+const mockRetestMessages: Record<number, Activity[]> = {};
+
+function advanceMockRetests() {
+  for (const retest of mockRetests) {
+    if (retest.status !== "running" || retest.conversation_id == null) continue;
+    if (Date.now() - Date.parse(retest.created_at) < 15000) continue;
+    retest.status = "completed";
+    retest.verdict = "inconclusive";
+    retest.summary = "演示环境未执行真实验证，无法确认漏洞当前状态。";
+    retest.evidence = "### 演示记录\n\n已关联原漏洞。此环境未连接真实 Agent，也未向目标发送请求；请在实际部署中执行复测。";
+    retest.finished_at = new Date().toISOString();
+    mockRetestMessages[retest.conversation_id].push({
+      seq: 3, worker: "retester", ts: retest.finished_at, kind: "text", summary: retest.summary, detail: retest.evidence,
+    });
+  }
+}
+
+function stopMockRetest(conversationID: number) {
+  for (const retest of mockRetests) {
+    if (retest.conversation_id !== conversationID || !["pending", "running"].includes(retest.status)) continue;
+    retest.status = "stopped";
+    retest.finished_at = new Date().toISOString();
+    retest.error = "演示复测已停止";
+  }
+}
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
@@ -837,6 +867,7 @@ function parseBody(body?: BodyInit | null): Record<string, unknown> {
 }
 
 export async function mockHandle<T>(method: string, rawPath: string, body?: BodyInit | null): Promise<T> {
+  advanceMockRetests();
   await delay();
   const [path, qs] = rawPath.split("?");
   const q = new URLSearchParams(qs ?? "");
@@ -1700,6 +1731,35 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       page_size: pageSize,
     };
   }
+  if (path === "/exploration/findings/retests/active" && m === "GET") {
+    return { retests: mockRetests
+      .filter((item) => ["pending", "running"].includes(item.status) && item.conversation_id != null)
+      .map((item) => ({ id: item.id, finding_id: D.findings[item.finding_id - 1].id, conversation_id: item.conversation_id, status: item.status })) };
+  }
+  if (seg[0] === "exploration" && seg[1] === "findings" && seg[3] === "retests") {
+    const finding = mockFindings.find((item) => item.id === seg[2]);
+    if (!finding) throw new Error("漏洞不存在");
+    const findingID = D.findings.findIndex((item) => item.id === finding.id) + 1;
+    if (m === "GET") return { retests: structuredClone(mockRetests.filter((item) => item.finding_id === findingID)) };
+    if (m === "POST") {
+      const existing = mockRetests.find((item) => item.finding_id === findingID && ["pending", "running"].includes(item.status));
+      if (existing) return { retest: structuredClone(existing), created: false };
+      const now = new Date().toISOString();
+      const conversationID = mockConversations.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+      mockConversations.unshift({ id: conversationID, agent_key: "retester", title: `复测 #${finding.id} · ${finding.name || finding.vulnclass}`, pinned: false, created_at: now, updated_at: now });
+      const retest: FindingRetest = {
+        id: mockRetests.length + 1, finding_id: findingID, conversation_id: conversationID,
+        status: "running", verdict: "", notes: String(b.notes ?? ""), summary: "", evidence: "",
+        error: "", created_at: now, started_at: now, finished_at: null,
+      };
+      mockRetests.unshift(retest);
+      mockRetestMessages[conversationID] = [
+        { seq: 1, worker: "retester", ts: now, kind: "user", summary: `请复测漏洞 #${finding.id}`, detail: retest.notes },
+        { seq: 2, worker: "retester", ts: now, kind: "text", summary: "演示复测进行中（未向目标发送请求）", detail: "演示复测进行中（未向目标发送请求）" },
+      ];
+      return { retest: structuredClone(retest), created: true };
+    }
+  }
   if (seg[0] === "exploration" && seg[1] === "findings" && seg[3] === "deepen" && m === "POST") {
     const finding = mockFindings.find((candidate) => candidate.id === seg[2]);
     const description = String(b.description ?? "").trim();
@@ -1887,7 +1947,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── conversations ──
   if (path === "/conversations" && m === "GET") {
     sortMockConversations();
-    return { conversations: structuredClone(mockConversations) };
+    return { conversations: structuredClone(mockConversations.map((conversation) => ({
+      ...conversation,
+      running: mockRetests.some((item) => item.conversation_id === conversation.id && ["pending", "running"].includes(item.status)),
+    }))) };
   }
   if (path === "/conversations" && m === "POST") {
     const now = new Date().toISOString();
@@ -1918,8 +1981,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (seg[0] === "conversations" && seg.length === 2 && m === "DELETE") {
     const id = Number(seg[1]);
+    stopMockRetest(id);
     const index = mockConversations.findIndex((item) => item.id === id);
     if (index >= 0) mockConversations.splice(index, 1);
+    for (const retest of mockRetests) if (retest.conversation_id === id) retest.conversation_id = null;
     return { deleted: id };
   }
   if (path === "/conversations/delete/batch" && m === "POST") {
@@ -1930,21 +1995,27 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       const index = mockConversations.findIndex((item) => item.id === id);
       if (index < 0) return { id, ok: false, error: "conversation not found" };
       mockConversations.splice(index, 1);
+      stopMockRetest(id);
+      for (const retest of mockRetests) if (retest.conversation_id === id) retest.conversation_id = null;
       return { id, ok: true };
     });
     return { items };
   }
   if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 3 && m === "GET") {
-    const items = D.conversationMessages[Number(seg[1])] ?? [];
-    return { items, cursor: items.length ? items[items.length - 1].seq : 0, running: false };
+    const items = mockRetestMessages[Number(seg[1])] ?? D.conversationMessages[Number(seg[1])] ?? [];
+    const running = mockRetests.some((item) => item.conversation_id === Number(seg[1]) && ["pending", "running"].includes(item.status));
+    return { items, cursor: items.length ? items[items.length - 1].seq : 0, running };
   }
   if (seg[0] === "conversations" && seg[2] === "messages" && seg.length === 4) {
-    const msgs = D.conversationMessages[Number(seg[1])] ?? [];
+    const msgs = mockRetestMessages[Number(seg[1])] ?? D.conversationMessages[Number(seg[1])] ?? [];
     const a = msgs.find((x) => x.seq === Number(seg[3]));
     return { detail: a?.detail ?? a?.summary ?? "" };
   }
   if (seg[0] === "conversations" && seg[2] === "messages" && m === "POST") return { status: "ok" };
-  if (seg[0] === "conversations" && seg[2] === "stop") return { status: "stopped" };
+  if (seg[0] === "conversations" && seg[2] === "stop") {
+    stopMockRetest(Number(seg[1]));
+    return { status: "stopped" };
+  }
 
   // ── tools ──
   if (path === "/tools" && m === "GET") return { tools: D.tools };
@@ -1981,13 +2052,33 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/intercept/rules" && m === "GET") return { rules: D.interceptRules };
   if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle")
     return { ok: true, enabled: b.enabled ?? true };
-  if (path === "/intercept/pending" && m === "GET") return { pending: D.interceptPending };
-  if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") return { ok: true };
+  if (path === "/intercept/pending" && m === "GET") return { pending: mockInterceptHistory.filter((r) => r.status === "pending") };
+  if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") {
+    const id = Number(seg[2]);
+    const row = mockInterceptHistory.find((r) => r.id === id) ?? mockInterceptPending.find((r) => r.id === id);
+    if (!row || row.status !== "pending") throw new Error("审批已处理或不存在，请刷新记录");
+    if (b.decision !== "allowed" && b.decision !== "denied") throw new Error("无效审批动作");
+    row.status = b.decision;
+    row.decided_at = new Date().toISOString();
+    const detail = mockInterceptDetails[id];
+    if (detail) {
+      detail.effective_action = b.decision === "allowed" ? "allow" : "deny";
+      detail.decision_reason = b.decision === "allowed" ? "人工允许执行" : "人工拒绝执行";
+      detail.execution_status = b.decision === "allowed" ? "unknown" : "not_executed";
+      detail.output = b.decision === "allowed" ? "演示模式未执行工具。" : "";
+    }
+    return { ok: true };
+  }
+  if (seg[0] === "intercept" && seg[1] === "history" && seg.length === 3) {
+    const row = mockInterceptHistory.find((r) => r.id === Number(seg[2]));
+    if (!row) throw new Error("审批记录不存在");
+    return { ...row, audit: mockInterceptDetails[row.id] ?? null };
+  }
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
-    return D.interceptPending.find((p) => p.id === Number(seg[2])) ?? null;
-  if (path === "/intercept/history") return { items: D.interceptHistory };
+    return mockInterceptPending.find((p) => p.id === Number(seg[2])) ?? null;
+  if (path === "/intercept/history") return { items: mockInterceptHistory };
   if (seg[0] === "intercept" && seg[1] === "task")
-    return { items: D.interceptHistory.filter((r) => r.task_id === seg[2]) };
+    return { items: mockInterceptHistory.filter((r) => r.task_id === seg[2]) };
   if (path === "/intercept/tool-config") return { enabled_tools: ["bash"] };
   if (path === "/intercept/judge" && m === "GET")
     return {

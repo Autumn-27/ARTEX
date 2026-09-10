@@ -6,6 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+  ActiveFindingRetest,
   Activity,
   Agent,
   AgentDetail,
@@ -28,16 +29,21 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  EvidenceBodyPreview,
   Finding,
   FindingAssetTree,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
+  FindingRetest,
   FindingStats,
   FindingStatus,
   FindingsPage,
+  FindingTraffic,
+  FindingTrafficDetail,
   IntentAsset,
   InterceptApprovalRow,
+  InterceptDetail,
   InterceptPending,
   InterceptRule,
   JudgeConfig,
@@ -79,6 +85,8 @@ import type {
   Tool,
   ToolStat,
   TrafficDetail,
+  TrafficEvidenceRef,
+  TrafficEvidenceRole,
   TrafficHost,
   TrafficResp,
   UsageStats,
@@ -526,6 +534,73 @@ export const api = {
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
     ),
+  findingTraffic: (id: string, contextTask?: string) =>
+    get<FindingTraffic>(
+      `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  bindFindingTraffic: (id: string, traffic_refs: TrafficEvidenceRef[], contextTask?: string) =>
+    post<FindingTraffic>(
+      `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { traffic_refs },
+    ),
+  editFindingTraffic: (
+    id: string,
+    bindingId: string,
+    version: number,
+    fields: { role: TrafficEvidenceRole; note: string },
+    contextTask?: string,
+  ) =>
+    patch<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { version, ...fields },
+    ),
+  removeFindingTraffic: (id: string, bindingId: string, version: number, contextTask?: string) =>
+    del<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { version },
+    ),
+  orderFindingTraffic: (id: string, binding_ids: string[], version: number, contextTask?: string) =>
+    http<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/order${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ binding_ids, version }) },
+    ),
+  findingTrafficDetail: (id: string, bindingId: string, contextTask?: string) =>
+    get<FindingTrafficDetail>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  findingTrafficBody: (
+    id: string,
+    bindingId: string,
+    side: "request" | "response",
+    offset: number,
+    contextTask?: string,
+  ) =>
+    get<EvidenceBodyPreview>(
+      `/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&offset=${offset}${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  downloadFindingTrafficBody: async (
+    id: string,
+    bindingId: string,
+    side: "request" | "response",
+    contextTask?: string,
+  ) => {
+    const token = getToken();
+    const response = await fetch(
+      `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: "下载失败" }));
+      throw new Error(error.error ?? "下载失败");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `evidence-${bindingId}-${side}.bin`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
   // 漏洞链路:该漏洞节点回溯到任务初始节点的子图(节点 + 关系)。
   findingLineage: (id: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/findings/${id}/lineage`),
   setFindingStatus: (id: string, status: FindingStatus) => patch<Finding>(`/exploration/findings/${id}`, { status }),
@@ -537,6 +612,12 @@ export const api = {
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // 删除漏洞:移除 findings 记录 + 来源探索节点(从发现列表/任务发现 Tab/探索图一并消失)。
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
+  findingRetests: (id: string) =>
+    get<{ retests: FindingRetest[] }>(`/exploration/findings/${encodeURIComponent(id)}/retests`).then((r) => arr(r.retests)),
+  activeFindingRetests: () =>
+    get<{ retests: ActiveFindingRetest[] }>("/exploration/findings/retests/active").then((r) => arr(r.retests)),
+  startFindingRetest: (id: string, notes: string) =>
+    post<{ retest: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/retests`, { notes }),
   deepenFinding: (id: string, description: string) =>
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
@@ -957,6 +1038,7 @@ export const api = {
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),

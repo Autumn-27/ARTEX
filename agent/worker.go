@@ -14,7 +14,6 @@ import (
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/memory"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
@@ -41,17 +40,17 @@ type WebSearchOpts struct {
 }
 
 type Worker struct {
-	prov        llm.Provider
-	model       string
-	workDir     string
-	proxyAddr   string
-	proxyCACert string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
-	webSearch   WebSearchOpts     // web_search tool backend selection (off by default)
-	mem         *memory.Store     // cross-engagement tradecraft memory (G4)
-	tx          *transcript.Store // raw LLM conversation persistence (nil = off)
-	window      int               // context window in tokens (for compaction)
-	windowFn    func() int        // optional dynamic task-chain minimum
-	maxTurns    int               // max agent turns per run (0 = unlimited)
+	findingRecorder FindingRecorder
+	prov            llm.Provider
+	model           string
+	workDir         string
+	proxyAddr       string
+	proxyCACert     string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	webSearch       WebSearchOpts     // web_search tool backend selection (off by default)
+	tx              *transcript.Store // raw LLM conversation persistence (nil = off)
+	window          int               // context window in tokens (for compaction)
+	windowFn        func() int        // optional dynamic task-chain minimum
+	maxTurns        int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
@@ -133,12 +132,25 @@ func (w *Worker) SetRunTimeout(run time.Duration) {
 // plain-text one-liner (which becomes this run's displayed result).
 const settleWrapUpPrompt = "你即将因预算耗尽被终止。不要再运行任何命令/探测。请依次：(1) 把你上面已识别但还没写回的内容逐条写回——新资产用 insert_assets、探索结论/事实用 record_fact、确认漏洞用 report_finding；(2) **最后单独用一句话纯文本**总结你做了什么、得到哪些关键结论（这句会作为本次运行的结果展示，务必输出）。"
 
-// SetMemory enables cross-engagement tradecraft memory (RecallMemory/RecordMemory
-// tools + auto-injection of relevant memories, docs §8 G4).
-func (w *Worker) SetMemory(m *memory.Store) { w.mem = m }
-
 func NewWorker(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int, extra ...actool.CoreTool) *Worker {
 	return &Worker{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, extraTools: extra}
+}
+
+// defaultToolsExcept returns actool.DefaultTools() minus the named tools (by
+// CoreTool.Name()). Used to trim SDK default tools an agent shouldn't have.
+func defaultToolsExcept(exclude ...string) []actool.CoreTool {
+	drop := make(map[string]bool, len(exclude))
+	for _, n := range exclude {
+		drop[n] = true
+	}
+	all := actool.DefaultTools()
+	out := make([]actool.CoreTool, 0, len(all))
+	for _, t := range all {
+		if !drop[t.Name()] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (w *Worker) SetCompactionWindowResolver(fn func() int) { w.windowFn = fn }
@@ -197,7 +209,7 @@ func proxyEnv(proxyAddr, caCert string) []string {
 const workerDefaultTmpl = `你是一个 ARTEX 平台授权渗透测试系统的"执行者"(work agent)。你领到【一条意图】(一句话探索方向)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
 
 **边界（红线）**：
-1. **只做这一条意图**。意图边界就是红线：指纹意图只做指纹，不顺手枚举端点、爆破目录、扒 JS 找 API、测漏洞——那些是别的意图，由规划者派别的 worker。你也不负责生成探索方向。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**（它会在 recent_facts 概览里看到并规划），别自己接着追。
+1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
 2. **穷尽这条意图内的手段再下结论**。初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——换编码/方法/参数/路径把本意图的合理手段走完再判定；但穷尽只限【本意图内部】，绝不外扩去做别的意图。真正探透、或合理手段已走完后立即写回并返回；别因"总目标未达成"继续，也别为凑步数在已探尽的方向空转。
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
@@ -206,7 +218,8 @@ const workerDefaultTmpl = `你是一个 ARTEX 平台授权渗透测试系统的"
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
 - **确认漏洞 → report_finding（探索图，含 PoC，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
 
-完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
+
+完成本意图后用一句话总结你做了什么、写回了哪些事实。`
 
 // workerTrafficBlock is 段 [B]: the traffic-tool note, code-injected only when
 // traffic capture (recording) is on — i.e. the traffic_* tools actually exist.
@@ -255,6 +268,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
+	// Optional finding guidance is added for every role after tool resolution.
 	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
@@ -325,6 +339,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
+	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
@@ -338,7 +353,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
-	base = append(base, actool.DefaultTools()...)
+	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
+	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
+	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
@@ -427,9 +444,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
-	}
-	if w.mem != nil {
-		opts.Memory = &agentcore.MemoryOptions{Store: w.mem, AutoInject: true, MaxInject: 3}
 	}
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx

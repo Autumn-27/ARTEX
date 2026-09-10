@@ -9,6 +9,7 @@ import {
   ChevronRightIcon,
   FileTextIcon,
   FlaskConicalIcon,
+  RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -27,14 +28,16 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus, Severity } from "@/lib/types";
+import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -44,6 +47,7 @@ export const FINDING_STATUSES: FindingStatus[] = [
   "in_progress",
   "confirmed",
   "resolved",
+  "fixed",
   "false_positive",
   "ignored",
   "duplicate",
@@ -98,6 +102,8 @@ interface FindingsTableProps {
   saving: boolean;
   onSave: (finding: Finding) => void;
   onStatusChange: (finding: Finding, next: FindingStatus) => void;
+  onRetest: (finding: Finding) => void;
+  activeRetests: Record<string, ActiveFindingRetest>;
   onDeepen: (finding: Finding) => void;
   onDelete: (finding: Finding) => void;
   /** 全选框的无障碍标签,平铺视图与分组视图措辞不同。 */
@@ -105,7 +111,7 @@ interface FindingsTableProps {
 }
 
 // FindingsTable 是发现列表的表格主体,平铺视图与按任务分组视图共用同一份行渲染
-// (勾选 / 行内展开 / 行内改名与改状态 / 深入 / 删除),差异只在外层容器与分页。
+// (勾选 / 行内展开 / 行内改名与改状态 / 复测 / 深入 / 删除),差异只在外层容器与分页。
 export function FindingsTable({
   items,
   selectedIds,
@@ -119,6 +125,8 @@ export function FindingsTable({
   saving,
   onSave,
   onStatusChange,
+  onRetest,
+  activeRetests,
   onDeepen,
   onDelete,
   selectAllLabel = "选择当前页全部",
@@ -133,9 +141,8 @@ export function FindingsTable({
   }
 
   return (
-    /* table-fixed:列宽由表头锁定,展开行那个 colSpan 单元格再宽也只能在固定宽度内
-       换行/内部滚动,不会把整张表撑出横向滚动条。 */
-    <Table className="table-fixed">
+    /* 固定列宽保证展开内容不撑开表格；窄屏只在表格内部横向滚动。 */
+    <Table className="min-w-[60rem] table-fixed">
       <TableHeader>
         <TableRow>
           <TableHead className="w-8">
@@ -148,17 +155,18 @@ export function FindingsTable({
           <TableHead className="w-8" />
           <TableHead className="w-20">严重度</TableHead>
           <TableHead>漏洞名称</TableHead>
-          <TableHead className="w-52">资产</TableHead>
+          <TableHead className="w-44">资产</TableHead>
           <TableHead className="w-28">状态</TableHead>
-          <TableHead className="w-36 max-w-[9rem]">所属任务</TableHead>
-          <TableHead className="w-32">时间</TableHead>
-          <TableHead className="w-32 text-right">操作</TableHead>
+          <TableHead className="w-32">所属任务</TableHead>
+          <TableHead className="w-24">时间</TableHead>
+          <TableHead className="w-48">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {items.map((f) => {
           const rowKey = findingRowKey(f);
           const open = expandedKey === rowKey;
+          const retest = f.finding_id ? activeRetests[f.finding_id] : undefined;
           return (
             <React.Fragment key={rowKey}>
               <TableRow
@@ -205,15 +213,16 @@ export function FindingsTable({
                       <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>
                     )}
                     <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
+                    <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
                   </div>
                 </TableCell>
-                <TableCell className="w-52">
+                <TableCell>
                   {f.assets && f.assets.length > 0 ? (
                     <div className="flex flex-wrap gap-1">
                       {f.assets.slice(0, 3).map((a) => (
                         <code
                           key={a.id}
-                          className="max-w-[12rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+                          className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
                           title={`${a.type} · ${a.label}`}
                         >
                           {a.label}
@@ -245,7 +254,7 @@ export function FindingsTable({
                     <StatusBadge domain="finding" value={f.status} dot />
                   )}
                 </TableCell>
-                <TableCell className="w-36 max-w-[9rem]">
+                <TableCell>
                   {f.task_id ? (
                     <Link
                       href={`/function/tasks/detail?id=${f.task_id}`}
@@ -261,8 +270,22 @@ export function FindingsTable({
                   )}
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(f.ts)}</TableCell>
-                <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                  <div className="flex items-center justify-end gap-1">
+                <TableCell onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center gap-1">
+                    {retest ? (
+                      <Button asChild size="sm" variant="ghost">
+                        <Link href={`/chat?c=${retest.conversation_id}`} title="查看正在进行的复测会话">
+                          <Spinner data-icon="inline-start" />
+                          复测中
+                        </Link>
+                      </Button>
+                    ) : null}
+                    {!retest && f.finding_id && !f.inherited ? (
+                      <Button size="sm" variant="ghost" onClick={() => onRetest(f)} title="在独立会话中复测该漏洞">
+                        <RotateCcwIcon data-icon="inline-start" />
+                        复测
+                      </Button>
+                    ) : null}
                     {f.finding_id && f.task_id && (
                       <Button size="sm" variant="ghost" onClick={() => onDeepen(f)}>
                         <FlaskConicalIcon data-icon="inline-start" />
