@@ -678,6 +678,16 @@ export const api = {
     }));
   },
 
+  // Main-agent conversation segments of a task. Each segment is a resettable session
+  // (clean transcript/context) over the same task; `current` is the writable one.
+  mainSessions: (task: string) =>
+    get<{ sessions: { seq: number; created_at: string }[]; current: number }>(
+      `/exploration/main-sessions${tq(task)}`,
+    ).then((r) => ({ sessions: arr(r.sessions), current: r.current ?? 0 })),
+  // Start a fresh main-agent session segment (does not touch the task's graph/assets/goal).
+  newMainSession: (task: string) =>
+    post<{ seq: number; created_at: string; current: number }>(`/exploration/main-session/new${tq(task)}`),
+
   // ---- traffic / audit / report / chat ----
   audit: (task?: string) => get<Audit>(`/audit${tq(task)}`),
   traffic: (page = 0, size = 100, host = "", method = "", q = "") =>

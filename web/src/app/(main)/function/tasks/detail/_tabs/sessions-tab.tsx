@@ -14,6 +14,7 @@ import {
   Loader2Icon,
   PaperclipIcon,
   PauseIcon,
+  PlusIcon,
   RadioIcon,
   RotateCwIcon,
   ShieldAlertIcon,
@@ -139,7 +140,7 @@ function emptyState(): SessionState {
 // BOTH the Goal Agent's round-0 decomposition and the Planner (single Plan session).
 function sessionKeyOf(a: Activity): string {
   if (a.worker === "system" || a.kind === "llm_switch" || a.kind === "llm_failover") return "system";
-  if (a.worker === "mainagent") return "main";
+  if (a.worker === "mainagent") return `main:${a.main_seg ?? 0}`; // one key per conversation segment
   if (a.worker === "planner") return "plan";
   if (a.intent_id) return `intent:${a.intent_id}`;
   return "unknown";
@@ -235,14 +236,23 @@ const roleMeta = {
 // The main-agent session is the interactive entry point of this tab and has no
 // dedicated backend "sessions" endpoint — it is a fixed UI affordance whose
 // transcript is the main-agent activity stream (worker="mainagent") for the task.
-const MAIN_ID = "s-main";
+// A main-agent session is one resettable conversation segment. Segment 0 is the
+// original session; "新建会话" creates further segments (seq 1,2,…) so the agent
+// starts on a clean transcript while the task's graph/assets/goal stay shared. Each
+// segment is a switchable UI session; only the current (highest) one is writable.
+const mainSessionId = (seg: number) => `s-main-${seg}`;
+const mainSessionKey = (seg: number) => `main:${seg}`;
+const mainSessionTitle = (seg: number) => `主 Agent · 会话 #${seg + 1}`;
+const MAIN_ID = mainSessionId(0);
 const MAIN_SESSION: Session = {
   id: MAIN_ID,
   role: "mainagent",
-  title: "主 Agent · 编排会话",
+  title: mainSessionTitle(0),
   status: "running",
   live: true,
   last_activity: "",
+  seg: 0,
+  isCurrentMain: true,
 };
 
 // The planner session is, like the main-agent session, a fixed UI affordance with
@@ -272,9 +282,9 @@ const SYSTEM_SESSION: Session = {
   last_activity: "",
 };
 
-// keyForSession maps a UI Session → its stable store key (main | plan | intent:<id>).
+// keyForSession maps a UI Session → its stable store key (main:<seg> | plan | intent:<id>).
 function keyForSession(s: Session): string {
-  if (s.role === "mainagent") return "main";
+  if (s.role === "mainagent") return `main:${s.seg ?? 0}`;
   if (s.role === "planner") return "plan";
   if (s.role === "system") return "system";
   return `intent:${s.intent_id}`;
@@ -388,6 +398,16 @@ function SessionItem({
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
+        {s.role === "mainagent" && s.isCurrentMain && !s.live && (
+          <span className="inline-flex shrink-0 items-center rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            当前
+          </span>
+        )}
+        {s.role === "mainagent" && !s.isCurrentMain && (
+          <span className="inline-flex shrink-0 items-center rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            历史
+          </span>
+        )}
         {s.live && (
           <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
             <span className="size-1 animate-pulse rounded-full bg-blue-500" />
@@ -458,6 +478,11 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
 
 export function SessionsTab({ taskId }: { taskId: string }) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
+  // Main-agent conversation segments (newest-first); currentSeg is the writable one.
+  const [mainSegs, setMainSegs] = React.useState<{ seq: number; created_at: string }[]>([{ seq: 0, created_at: "" }]);
+  const [currentSeg, setCurrentSeg] = React.useState(0);
+  const [creatingMain, setCreatingMain] = React.useState(false);
+  const [confirmNewMain, setConfirmNewMain] = React.useState(false);
   // 手机端（<lg）会话列表默认折叠：屏幕高度本就紧张，列表若固定占掉 10~15rem，
   // 下方的会话记录会被挤到只剩标题与输入框。折叠后记录区拿到几乎全部高度，
   // 点标题栏可展开选会话，选完自动收起。桌面端不受影响（lg 起始终展开）。
@@ -498,6 +523,29 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // Start a fresh main-agent session: only the segment counter advances — the task's
+  // graph/assets/goal are untouched, so the agent continues over the same task with a
+  // clean context. The old segment stays as read-only history you can switch back to.
+  async function createMainSession() {
+    if (creatingMain) return;
+    setCreatingMain(true);
+    try {
+      const r = await api.newMainSession(taskId);
+      setMainSegs((prev) => [{ seq: r.seq, created_at: r.created_at }, ...prev.filter((m) => m.seq !== r.seq)]);
+      setCurrentSeg(r.current ?? r.seq);
+      // Seed an empty, loaded state so the new (empty) session renders immediately.
+      setStore((prev) => ({ ...prev, [mainSessionKey(r.seq)]: { ...emptyState(), loaded: true } }));
+      setActiveId(mainSessionId(r.seq));
+      setListOpen(false);
+      setInput("");
+    } catch (e) {
+      toast.error(`新建会话失败：${(e as Error).message}`);
+    } finally {
+      setCreatingMain(false);
+      setConfirmNewMain(false);
     }
   }
 
@@ -555,7 +603,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // Refs backing SSE/loading without re-render churn.
   const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
   const esRef = React.useRef<EventSource | null>(null);
-  const activeKeyRef = React.useRef("main"); // current session key (for SSE dispatch/unread)
+  const activeKeyRef = React.useRef(mainSessionKey(0)); // current session key (for SSE dispatch/unread)
   const atBottomRef = React.useRef(true); // transcript pinned to bottom?
   const llmToastSeqRef = React.useRef<Set<number>>(new Set());
   const chatStatusRequestRef = React.useRef(0);
@@ -799,12 +847,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setLLMResolutions(null);
     setSseLive(false);
     setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
+    setMainSegs([{ seq: 0, created_at: "" }]);
+    setCurrentSeg(0);
     snapshotRef.current = 0;
     llmToastSeqRef.current = new Set();
     reqTokenRef.current = {};
-    // Reserve "main" so the active-session effect (which also fires for main on mount)
-    // won't double-load it and pre-empt the SSE opened here.
-    loadingKeysRef.current = new Set(["main"]);
+    // Reserve the initial main key so the active-session effect (which fires for main on
+    // mount) won't double-load it and pre-empt the SSE opened here.
+    loadingKeysRef.current = new Set([mainSessionKey(0)]);
     let alive = true;
 
     // MOCK demo: no SSE backend — pull one activity snapshot and bucket by session.
@@ -827,13 +877,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             st.earliestSeq = st.items.length ? st.items[0].seq : 0;
             st.lastTs = st.items.length ? st.items[st.items.length - 1].ts : "";
           }
-          buckets.main ??= { ...emptyState(), loaded: true };
+          buckets[mainSessionKey(0)] ??= { ...emptyState(), loaded: true };
           buckets.system ??= { ...emptyState(), loaded: true };
           setStore(buckets);
         })
         .catch(() =>
           setStore({
-            main: { ...emptyState(), loaded: true },
+            [mainSessionKey(0)]: { ...emptyState(), loaded: true },
             system: { ...emptyState(), loaded: true },
           }),
         );
@@ -842,15 +892,30 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       };
     }
 
-    const token = (reqTokenRef.current.main ?? 0) + 1;
-    reqTokenRef.current.main = token;
-    patchStore("main", (s) => ({ ...s, loading: true }));
+    const token = (reqTokenRef.current.mainboot ?? 0) + 1;
+    reqTokenRef.current.mainboot = token;
+    let bootKey = mainSessionKey(0);
+    // Resolve the main-agent segments first, then load the CURRENT segment's history and
+    // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
+    // frame by session_key (main:<seg>), so switching segments needs no new stream.
     api
-      .activityHistory(taskId, "main", 0, PAGE)
+      .mainSessions(taskId)
+      .then((ms) => {
+        if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
+        const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
+        setMainSegs(segs);
+        setCurrentSeg(ms.current);
+        bootKey = mainSessionKey(ms.current);
+        if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
+        loadingKeysRef.current.add(bootKey);
+        setActiveId(mainSessionId(ms.current));
+        patchStore(bootKey, (s) => ({ ...s, loading: true }));
+        return api.activityHistory(taskId, bootKey, 0, PAGE);
+      })
       .then((r) => {
-        if (!alive || reqTokenRef.current.main !== token) return;
+        if (!alive || reqTokenRef.current.mainboot !== token) return;
         snapshotRef.current = r.snapshotCursor;
-        patchStore("main", (s) => {
+        patchStore(bootKey, (s) => {
           const items = mergeBySeq(r.items, s.items);
           return {
             ...s,
@@ -928,10 +993,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         };
       })
       .catch((err) => {
-        if (!alive || reqTokenRef.current.main !== token) return;
-        patchStore("main", (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
+        if (!alive || reqTokenRef.current.mainboot !== token) return;
+        if ((err as Error).message === "superseded") return;
+        patchStore(bootKey, (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
       })
-      .finally(() => loadingKeysRef.current.delete("main"));
+      .finally(() => loadingKeysRef.current.delete(bootKey));
 
     return () => {
       alive = false;
@@ -1097,17 +1163,30 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     },
     [store],
   );
-  const mainLive = sending || (mainChatRunning ?? recentLive("main"));
+  const currentMainKey = mainSessionKey(currentSeg);
+  const mainLive = sending || (mainChatRunning ?? recentLive(currentMainKey));
   const plannerLive = recentLive("plan");
 
+  // One switchable session per main-agent segment (newest-first). Only the current
+  // (highest) segment is live/writable; older ones are read-only history.
+  const mainSessions = React.useMemo<Session[]>(
+    () =>
+      mainSegs.map((m) => ({
+        id: mainSessionId(m.seq),
+        role: "mainagent",
+        title: mainSessionTitle(m.seq),
+        status: "running",
+        live: m.seq === currentSeg && mainLive,
+        last_activity: m.created_at,
+        seg: m.seq,
+        isCurrentMain: m.seq === currentSeg,
+      })),
+    [mainSegs, currentSeg, mainLive],
+  );
+
   const sessions = React.useMemo(
-    () => [
-      { ...MAIN_SESSION, live: mainLive },
-      { ...PLANNER_SESSION, live: plannerLive },
-      ...workerSessions,
-      SYSTEM_SESSION,
-    ],
-    [workerSessions, mainLive, plannerLive],
+    () => [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION],
+    [mainSessions, workerSessions, plannerLive],
   );
 
   const grouped = {
@@ -1119,6 +1198,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
   const isMain = active.role === "mainagent";
+  const isMainCurrent = isMain && (active.seg ?? 0) === currentSeg; // only the current segment is writable
   const isPlanner = active.role === "planner";
   const isSystem = active.role === "system";
   const activeKey = keyForSession(active);
@@ -1360,7 +1440,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       .finally(() => setWorkerMessageSending(false));
   }
 
-  const mainLoaded = !!store.main?.loaded;
+  const mainLoaded = !!store[currentMainKey]?.loaded;
   // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
   const sendMode = useChatSendMode();
   // What the transcript pane should show for the active session.
@@ -1476,6 +1556,23 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
                       <Meta.icon className="size-3.5" />
                       {Meta.label}
+                      {role === "mainagent" && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmNewMain(true)}
+                          disabled={creatingMain}
+                          title="新建主 Agent 会话（清空上下文，任务状态保留）"
+                          aria-label="新建主 Agent 会话"
+                          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
+                        >
+                          {creatingMain ? (
+                            <Loader2Icon className="size-3.5 animate-spin" />
+                          ) : (
+                            <PlusIcon className="size-3.5" />
+                          )}
+                          新建
+                        </button>
+                      )}
                     </div>
                     {items.map((s) => {
                       const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
@@ -1673,12 +1770,30 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
               ) : (
                 <div className="pl-9 text-xs text-muted-foreground">
-                  {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
+                  {isMainCurrent ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
                 </div>
               )}
             </div>
           </ScrollArea>
-          {isMain ? (
+          {isMain && !isMainCurrent ? (
+            <div className="flex flex-col items-center gap-2 border-t p-3 text-center text-xs text-muted-foreground">
+              <span>这是历史会话（只读）。切回当前会话或新建会话以继续对话。</span>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setActiveId(mainSessionId(currentSeg))}>
+                  回到当前会话
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 text-xs"
+                  onClick={() => setConfirmNewMain(true)}
+                  disabled={creatingMain}
+                >
+                  新建会话
+                </Button>
+              </div>
+            </div>
+          ) : isMain ? (
             <div className="border-t p-3">
               {attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-1.5">
@@ -1893,6 +2008,23 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               >
                 {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
                 确认删除
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        <AlertDialog open={confirmNewMain} onOpenChange={(open) => !open && setConfirmNewMain(false)}>
+          <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
+            <AlertDialogHeader>
+              <AlertDialogTitle>开启新会话？</AlertDialogTitle>
+              <AlertDialogDescription className="break-words whitespace-normal">
+                当前会话会被归档（可随时切回），主 Agent 将以干净的上下文继续。任务的图谱、资产、目标不受影响。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={creatingMain}>取消</AlertDialogCancel>
+              <AlertDialogAction disabled={creatingMain} onClick={() => void createMainSession()}>
+                {creatingMain ? "开启中…" : "开启新会话"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
