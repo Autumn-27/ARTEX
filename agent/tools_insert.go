@@ -76,16 +76,9 @@ type assetInputItem struct {
 func (t *ToolSet) insertAssets() actool.CoreTool {
 	return writeTool(
 		"insert_assets",
-		"发现新资产时立即批量插入资产到资产库。支持一次提交多种资产类型：root_domain/ip/subdomain/app/service/endpoint。\n"+
-			"每条资产的字段说明：\n"+
-			"• root_domain：domain(根域名, 必填)、icp(备案, 可选)\n"+
-			"• ip：ip(IP地址, 必填, 必须是 IPv4/IPv6 地址而非主机名)、bound_domains([域名])、open_ports([{port,service}])\n"+
-			"• subdomain：domain(子域名, 必填)、record_type(A/AAAA/CNAME等)、record_value(记录值)、icp(可选)\n"+
-			"• app：app_name(应用名, 必填)、bundle_id(bundle id, 可选)、category、description、app_icp、company_id(归属企业 id, 可选)\n"+
-			"• service(http)：url(必填)、technologies([指纹])、status_code、content_length、page_title、favicon_mmh3、auth([{type,username,password,...}])、service_ip\n"+
-			"• service(other)：service_name(必填)、ip或domain(至少一个)、port(必填)、auth([...])\n"+
-			"• endpoint：url(必填)、method(必填)、params([{location,name,value,type}])、service_ip\n"+
-			"auth/technologies/params 都是【追加合并】(append)，不会覆盖原有值。\n"+
+		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
+			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
+			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
@@ -476,34 +469,13 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 func (t *ToolSet) listAssets() actool.CoreTool {
 	return readTool(
 		"list_assets",
-		"查询资产库。支持 DSL 表达式搜索、按 id/ids 直接取，分页。\n"+
-			"DSL 语法：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | port>80 数字比较 | 裸词=全文模糊。\n"+
-			"逻辑运算：AND / OR（关键字，AND 优先级高于 OR），括号分组。\n"+
-			"资产类型用独立的 type 参数过滤，DSL 里不含 type 字段。\n"+
-			"约束：未传 id/ids 时 dsl 必须非空——不允许无条件查询全部资产，必须带查询条件。\n"+
-			"字段一览：\n"+
-			"  domain      域名（根域名/子域名/服务域名）\n"+
-			"  root_domain 根域名（仅子域名/服务资产有）\n"+
-			"  ip          IPv4/IPv6 地址\n"+
-			"  url         完整 URL（服务/接口）\n"+
-			"  page_title  页面标题（HTTP 服务）\n"+
-			"  icp         ICP 备案号（根域名）\n"+
-			"  service_name 服务名称（非 HTTP 服务）\n"+
-			"  app_name    应用名称（app 类型）\n"+
-			"  method      HTTP 方法（接口类型，如 GET/POST）\n"+
-			"  service_type HTTP 服务类型：http|other\n"+
-			"  record_type DNS 解析类型（子域名，如 A/CNAME）\n"+
-			"  technology  指纹/技术栈（数组字段，= 模糊 == 精确）\n"+
-			"  port        端口号（整数，支持 > >= < <=）\n"+
-			"  status_code HTTP 状态码（整数，支持 > >= < <=）\n"+
-			"  company_id  归属企业 id（整数）\n"+
-			"  task_id     来源任务 id（整数）\n"+
-			"示例：status_code>=400 AND technology=shiro\n"+
-			"      method==POST AND url=/api/admin\n"+
-			"      icp=京 OR icp=沪\n"+
-			"      (port==80 OR port==443) AND technology=nginx",
+		"查询资产库：DSL 表达式搜索，或按 id/ids 直取；支持分页。\n"+
+			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。资产类型用独立 type 参数，不写进 DSL。\n"+
+			"未传 id/ids 时 dsl 必须非空（不允许无条件全量查询）。\n"+
+			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id/task_id(整数)。\n"+
+			"示例：status_code>=400 AND technology=shiro ；(port==80 OR port==443) AND technology=nginx",
 		obj(map[string]any{
-			"dsl":    str(`DSL 查询表达式，参见工具描述。未传 id/ids 时必须非空。例：status_code>=400 technology=shiro / method==POST url=/api/admin`),
+			"dsl":    str(`DSL 查询表达式（语法/字段见工具描述）。未传 id/ids 时必须非空。`),
 			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
 			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
 			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
