@@ -401,12 +401,12 @@ export interface Company {
 }
 
 // ---- Exploration graph (per task) ----
-export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint";
+export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
-export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves";
+export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
   id: string;
