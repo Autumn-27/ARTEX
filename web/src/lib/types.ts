@@ -1133,6 +1133,7 @@ export interface InterceptRule {
 }
 
 export interface InterceptPending {
+  decision_source?: "rule" | "model" | "unknown" | "";
   id: number;
   rule_id?: number;
   conversation_id?: number;
@@ -1245,4 +1246,32 @@ export interface LLMRecordDetail extends LLMRecordItem {
 export interface LLMTask {
   task_id: string;
   count: number;
+}
+
+// Immutable review snapshot plus separately recorded execution outcome.
+export interface InterceptAudit {
+  run_id?: string;
+  tool_use_id?: string;
+  correlation: "exact" | "ambiguous" | "unavailable";
+  input_digest: string;
+  user_message: string;
+  user_truncated?: boolean;
+  context: { kind: string; tool?: string; tool_use_id?: string; text: string; is_error?: boolean; truncated?: boolean }[] | null;
+  context_truncated?: boolean;
+  captured_at: string;
+  model_fallback?: boolean;
+  initial_action: "allow" | "ask" | "deny";
+  initial_reason: string;
+  effective_action?: "allow" | "deny";
+  decision_reason?: string;
+  rule_name?: string;
+  config_digest?: string;
+  profile_id?: number;
+  execution_status: "not_started" | "not_executed" | "awaiting_result" | "succeeded" | "failed" | "unknown";
+  output?: string;
+  output_truncated?: boolean;
+  execution_ended_at?: string;
+}
+export interface InterceptDetail extends InterceptApprovalRow {
+  audit: InterceptAudit | null;
 }

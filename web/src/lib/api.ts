@@ -38,6 +38,7 @@ import type {
   FindingsPage,
   IntentAsset,
   InterceptApprovalRow,
+  InterceptDetail,
   InterceptPending,
   InterceptRule,
   JudgeConfig,
@@ -957,6 +958,7 @@ export const api = {
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
