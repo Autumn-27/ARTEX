@@ -35,7 +35,8 @@ const (
 	FindingPending       = "pending"        // 待处理
 	FindingInProgress    = "in_progress"    // 处理中
 	FindingConfirmed     = "confirmed"      // 已确认(真实漏洞,未修复)
-	FindingResolved      = "resolved"       // 已处理(已修复)
+	FindingResolved      = "resolved"       // 已处理
+	FindingFixed         = "fixed"          // 已修复
 	FindingFalsePositive = "false_positive" // 误报
 	FindingIgnored       = "ignored"        // 忽略
 	FindingDuplicate     = "duplicate"      // 重复
@@ -45,7 +46,7 @@ const (
 // ValidFindingStatus reports whether s is a known triage state.
 func ValidFindingStatus(s string) bool {
 	switch s {
-	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved,
+	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved, FindingFixed,
 		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted:
 		return true
 	}

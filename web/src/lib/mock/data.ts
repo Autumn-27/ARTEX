@@ -3059,6 +3059,10 @@ export const llmConfig = {
 // ── Agents ───────────────────────────────────────────────────────────────────
 export const agents: Agent[] = [
   {
+    id: "1001", key: "retester", name: "漏洞复测", role: "assistant", builtin: false, enabled: true,
+    description: "从漏洞详情手动启动，保存独立复测结论", max_turns: 0, mcp_count: 0, skill_count: 0, tool_count: 2,
+  },
+  {
     id: "1",
     key: "goals",
     name: "目标拆解器",

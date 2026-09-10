@@ -46,8 +46,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
@@ -166,7 +168,7 @@ function Composer({
           ))}
         </div>
       )}
-      <div className="flex flex-wrap items-end gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {leftSlot ? <div className="w-full sm:w-auto">{leftSlot}</div> : null}
         {onPickFiles && (
           <>
@@ -243,7 +245,7 @@ function LLMProfileRow({
   const label = current ? current.name : `默认${activeDefault ? `（${activeDefault.name}）` : ""}`;
 
   return (
-    <div className="flex items-center gap-1 px-1 pb-1 pt-0.5">
+    <div className="flex min-w-0 flex-wrap items-center gap-1 px-3 pb-3">
       <ZapIcon className="text-muted-foreground/50 size-3 shrink-0" />
       <span className="text-muted-foreground/70 text-xs">{label}</span>
       <Popover open={open} onOpenChange={disabled ? undefined : setOpen}>
@@ -364,23 +366,25 @@ function DraftChat({
 
   const agentPicker = (
     <Select value={agentKey} onValueChange={setAgentKey}>
-      <SelectTrigger size="sm" className="w-full sm:w-40">
+      <SelectTrigger className="w-full sm:w-40">
         <SelectValue placeholder="选择 Agent…" />
       </SelectTrigger>
       <SelectContent>
-        {agents.map((a) => (
-          <SelectItem key={a.key} value={a.key}>
-            <span className="flex items-center gap-2">
-              <Bot className="size-3.5" />
-              {a.name}
-              {!a.builtin && (
-                <Badge variant="outline" className="px-1 py-0 text-[9px]">
-                  自定义
-                </Badge>
-              )}
-            </span>
-          </SelectItem>
-        ))}
+        <SelectGroup>
+          {agents.map((a) => (
+            <SelectItem key={a.key} value={a.key}>
+              <span className="flex items-center gap-2">
+                <Bot className="size-3.5" />
+                {a.name}
+                {!a.builtin && (
+                  <Badge variant="outline" className="px-1 py-0 text-[9px]">
+                    自定义
+                  </Badge>
+                )}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectGroup>
       </SelectContent>
     </Select>
   );
@@ -490,12 +494,12 @@ function ChatView({
       .conversationHistory(conv.id, 0, HISTORY_PAGE)
       .then((r) => {
         if (!live) return;
-        setMessages(r.items);
-        cursorRef.current = r.cursor; // newest id → incremental-tail anchor
+        setMessages((current) => mergeActivities(r.items, current));
+        cursorRef.current = Math.max(cursorRef.current, r.cursor);
         earliestRef.current = r.items.length ? r.items[0].seq : 0;
         hasMoreRef.current = r.hasMore;
         setHasMore(r.hasMore);
-        setRunning(r.running);
+        setRunning((current) => current || r.running);
       })
       .catch(() => {
         /* The empty state remains usable when history loading fails. */
@@ -505,28 +509,40 @@ function ChatView({
     };
   }, [conv.id]);
 
+  // A trigger or another tab may start a turn while this conversation is open.
+  // A false list snapshot must not stop the tail before its final messages load.
+  React.useEffect(() => {
+    if (conv.running) setRunning(true);
+  }, [conv.running]);
+
   // poll while a turn is running: pull new steps after the cursor.
   React.useEffect(() => {
     if (!running) return;
     let live = true;
+    let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
+      let keepPolling = true;
       try {
         const r = await api.conversationMessages(conv.id, cursorRef.current);
         if (!live) return;
         if (r.items.length) {
-          setMessages((prev) => [...prev, ...r.items]);
-          cursorRef.current = r.cursor;
+          setMessages((prev) => mergeActivities(prev, r.items));
         }
+        cursorRef.current = Math.max(cursorRef.current, r.cursor);
+        keepPolling = r.running;
         setRunning(r.running);
         if (!r.running) onTitleMaybeChanged(); // first-turn auto-title landed
       } catch {
         /* transient — keep polling */
+      } finally {
+        // Slow responses must not overlap another poll with the same cursor.
+        if (live && keepPolling) timer = setTimeout(() => void tick(), 1000);
       }
     };
-    const h = setInterval(tick, 1000);
+    void tick();
     return () => {
       live = false;
-      clearInterval(h);
+      clearTimeout(timer);
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
@@ -549,10 +565,7 @@ function ChatView({
     try {
       const r = await api.conversationHistory(conv.id, earliestRef.current, HISTORY_PAGE);
       if (r.items.length) {
-        setMessages((prev) => {
-          const seen = new Set(prev.map((a) => a.seq));
-          return [...r.items.filter((a) => !seen.has(a.seq)), ...prev];
-        });
+        setMessages((prev) => mergeActivities(r.items, prev));
         earliestRef.current = r.items[0].seq;
       }
       hasMoreRef.current = r.hasMore;
@@ -647,11 +660,9 @@ function ChatView({
     setAttachments([]);
     try {
       await api.sendConversationMessage(conv.id, msg, atts.length ? atts : undefined);
+      // The live loop pulls the persisted human turn immediately. Sharing that
+      // fetch avoids racing a separate post-send request against the poller.
       setRunning(true);
-      // pull the just-persisted human turn immediately.
-      const r = await api.conversationMessages(conv.id, cursorRef.current);
-      setMessages((prev) => [...prev, ...r.items]);
-      cursorRef.current = r.cursor;
     } catch (e) {
       toast.error("发送失败：" + (e as Error).message);
       setInput(msg); // restore so the user doesn't lose their text
@@ -840,6 +851,12 @@ const ConversationItem = React.memo(function ConversationItem({
           <div className="flex min-w-0 items-center gap-1.5">
             {pinned && <PinIcon className="text-primary size-3 shrink-0" aria-label="已置顶" />}
             <div className="truncate text-sm">{conv.title || "新对话"}</div>
+            {conv.running ? (
+              <Badge variant="secondary" className="shrink-0 gap-1" title="Agent 正在运行">
+                <Spinner className="size-3" aria-hidden="true" />
+                运行中
+              </Badge>
+            ) : null}
           </div>
           <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
             <Bot className="size-3 shrink-0" />
@@ -926,11 +943,15 @@ export default function ChatPage() {
     Record<number, { input?: string; attachments?: ChatAttachment[] }>
   >({});
 
-  const reloadConvs = React.useCallback(() => {
-    api
-      .conversations()
-      .then(setConvs)
-      .catch(() => setConvs([]));
+  const conversationListSeq = React.useRef(0);
+  const reloadConvs = React.useCallback(async () => {
+    const seq = ++conversationListSeq.current;
+    try {
+      const items = await api.conversations();
+      if (seq === conversationListSeq.current) setConvs(items);
+    } catch {
+      // Preserve the selected transcript and list on a transient poll failure.
+    }
   }, []);
   React.useEffect(() => {
     api
@@ -945,7 +966,23 @@ export default function ChatPage() {
       .catch(() => {
         /* The conversation remains usable without profile labels. */
       });
-    reloadConvs();
+  }, []);
+
+  // One list poll supplies runtime state for all sidebar rows, including the
+  // unselected ones. Await completion so slow requests do not overlap.
+  React.useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      await reloadConvs();
+      if (!disposed) timer = setTimeout(() => void poll(), 2000);
+    }
+    void poll();
+    return () => {
+      disposed = true;
+      conversationListSeq.current++;
+      clearTimeout(timer);
+    };
   }, [reloadConvs]);
 
   React.useEffect(() => {
@@ -1023,7 +1060,7 @@ export default function ChatPage() {
           next.delete(id);
           return next;
         });
-        reloadConvs();
+        void reloadConvs();
       } catch (e) {
         toast.error("删除失败：" + (e as Error).message);
       }
@@ -1063,10 +1100,10 @@ export default function ChatPage() {
       // Fully successful → return to the clean list; keep selection mode on if
       // some failed so the user can retry the remaining ones.
       if (failed.length === 0) setSelectionMode(false);
-      reloadConvs();
+      void reloadConvs();
     } catch (error) {
       toast.error(`批量删除失败：${(error as Error).message}`);
-      reloadConvs();
+      void reloadConvs();
     } finally {
       setBulkDeleting(false);
     }
@@ -1077,7 +1114,7 @@ export default function ChatPage() {
       const pinned = conversationIsPinned(conversation);
       try {
         await api.pinConversation(conversation.id, !pinned);
-        reloadConvs();
+        void reloadConvs();
       } catch (e) {
         toast.error(`${pinned ? "取消置顶" : "置顶"}失败：${(e as Error).message}`);
       }
@@ -1096,7 +1133,7 @@ export default function ChatPage() {
       if (!title) return;
       try {
         await api.renameConversation(id, title);
-        reloadConvs();
+        void reloadConvs();
       } catch (e) {
         toast.error("重命名失败：" + (e as Error).message);
       }
@@ -1226,7 +1263,7 @@ export default function ChatPage() {
                   return [...prev.slice(0, insertAt), c, ...prev.slice(insertAt)];
                 });
                 setSelectedId(c.id);
-                reloadConvs();
+                void reloadConvs();
               }}
             />
           )}
