@@ -1882,7 +1882,7 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
-	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出(terminated=true)。",
+	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出。",
 		obj(map[string]any{"intent_id": idp("意图 id（= work 句柄）")}, "intent_id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1914,14 +1914,14 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 					fallback = &acts[i]
 				}
 			}
-			pick, terminated := chosen, false
+			pick := chosen
 			if pick == nil {
-				pick, terminated = fallback, true
+				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
 					return jsonResult(inheritedMap(map[string]any{
-						"intent_id": id, "final_text": "（该 work 尚无任何输出）", "terminated": true,
+						"intent_id": id, "final_text": "（该 work 尚无任何输出）",
 					}, intentNode.SourceTaskID))
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
@@ -1931,8 +1931,8 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 				detail = pick.Summary
 			}
 			result := map[string]any{
-				"intent_id": id, "worker_name": pick.Worker, "final_text": detail,
-				"summary": pick.Summary, "is_error": pick.IsError, "terminated": terminated,
+				"intent_id": id, "final_text": detail,
+				"summary": pick.Summary, "is_error": pick.IsError,
 			}
 			if intentNode.Inherited {
 				inheritedMap(result, intentNode.SourceTaskID)
