@@ -473,6 +473,7 @@ type ActivityDTO struct {
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	SourceTaskID string          `json:"source_task_id,omitempty"`
 	Inherited    bool            `json:"inherited,omitempty"`
+	MainSeg      *int            `json:"main_seg,omitempty"` // main-agent conversation segment (nil for non-mainagent rows)
 	// token usage (set only on kind='result'); used for per-session token totals.
 	InputTokens      *int `json:"input_tokens,omitempty"`
 	OutputTokens     *int `json:"output_tokens,omitempty"`
@@ -501,6 +502,7 @@ func activityDTO(a db.Activity) ActivityDTO {
 		OutputTokens:     a.OutputTokens,
 		CacheReadTokens:  a.CacheReadTokens,
 		CacheWriteTokens: a.CacheWriteTokens,
+		MainSeg:          a.MainSeg,
 	}
 	if a.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(a.SourceTaskID)
