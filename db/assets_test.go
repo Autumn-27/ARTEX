@@ -943,7 +943,7 @@ func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 		t.Fatalf("task pagination order=%v want=%v", got, want)
 	}
 	if got := collect(func(limit, offset int) ([]*Asset, error) {
-		return assets.QueryDSL(marker, "root_domain", limit, offset)
+		return assets.QueryDSL(marker, "root_domain", 0, limit, offset)
 	}); !slices.Equal(got, want) {
 		t.Fatalf("DSL pagination order=%v want=%v", got, want)
 	}

@@ -439,6 +439,12 @@ export const api = {
     get<{ count: number; total: number; assets: Asset[] }>(
       `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
     ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  // DSL search scoped to a task — the backend forces the task_id filter, so it
+  // always stays within that task's assets (same DSL grammar as `searchAssets`).
+  searchTaskAssets: (taskId: string, dsl: string, type = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?task_id=${encodeURIComponent(taskId)}&dsl=${encodeURIComponent(dsl)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
   attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
     post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
       asset_ids: assetIds,
