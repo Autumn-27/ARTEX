@@ -466,6 +466,12 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 	// context 里找到这个 Capture 并填入每次 HTTP 尝试的状态码与 body。
 	ctx, capt := llmrec.NewCapture(ctx)
 	defer logTestConnection(c, capt)
+	// 连接测试是一条单发路径,不经过 agentcore 的会话循环,因此没人往 context 上挂
+	// session id。对配了 SessionHeaderKey 的端点(如 opencode zen 强制要求
+	// x-opencode-session 头,缺了直接 400 MissingSessionID),这会导致"对话正常、
+	// 点击测试却 400"的落差。这里补挂一个一次性随机 session id,让测试与真实对话走同
+	// 一套发头逻辑;未配 SessionHeaderKey 的端点不读它,无副作用。
+	ctx = transcript.WithSessionID(ctx, "conntest-"+transcript.NewSessionID())
 	start := time.Now()
 	// MaxTokens 要给足：推理模型(如 deepseek-v4-pro)在给出答案前会先产出一大段
 	// 思考(实测对一句 "ping" 也能烧 ~2900 token)。若只给 32,模型会一直卡在"思考阶段"
