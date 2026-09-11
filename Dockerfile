@@ -32,10 +32,14 @@ RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@late
 WORKDIR /app
 # 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex
-RUN chmod +x /app/artex
+# 守护启动脚本：进程退出后按退出码决定是否重新拉起，页面一键更新靠它完成换装。
+# 它同时负责把 SIGTERM 转发给 artex —— docker stop 只把信号发给 PID 1，
+# 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。
+COPY start.sh /app/start.sh
+RUN chmod +x /app/artex /app/start.sh
 COPY skills/ /app/skills/
 # data/（SQLite + jwt.key）持久化点
 VOLUME ["/app/data"]
 EXPOSE 8787 8788
-ENTRYPOINT ["/app/artex"]
+ENTRYPOINT ["/app/start.sh"]
 CMD ["-addr", ":8787", "-proxy", ":8788"]

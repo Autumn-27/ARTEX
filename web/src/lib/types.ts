@@ -1288,7 +1288,9 @@ export interface InterceptAudit {
   input_digest: string;
   user_message: string;
   user_truncated?: boolean;
-  context: { kind: string; tool?: string; tool_use_id?: string; text: string; is_error?: boolean; truncated?: boolean }[] | null;
+  context:
+    | { kind: string; tool?: string; tool_use_id?: string; text: string; is_error?: boolean; truncated?: boolean }[]
+    | null;
   context_truncated?: boolean;
   captured_at: string;
   model_fallback?: boolean;
@@ -1357,4 +1359,45 @@ export interface FindingTrafficDetail {
   binding: FindingTrafficBinding;
   request: EvidenceBodyPreview;
   response: EvidenceBodyPreview;
+}
+
+/** GET /api/update/check —— 当前版本与 GitHub 最新正式版的比较结果。 */
+export interface UpdateCheck {
+  /** 当前运行的版本；开发构建为 "dev" 或 git describe 的带后缀形式。 */
+  current: string;
+  /** 运行形态。docker 下换装只作用于容器可写层，重建容器会退回镜像版本。 */
+  mode: "docker" | "binary";
+  os: string;
+  arch: string;
+  repo: string;
+  /** 是否存在可回滚的上一版本（artex.old）。 */
+  has_backup: boolean;
+  /** 本次启动时自更新自举的结论（换装失败 / 已回滚等），无事发生时为空。 */
+  boot_notice?: string;
+  rolled_back?: boolean;
+  /** 查询 GitHub 失败时给出原因，此时下面的字段都不会有。 */
+  error?: string;
+  latest?: string;
+  notes?: string;
+  html_url?: string;
+  published_at?: string;
+  /** 当前平台对应的发布包名，以及该 Release 是否真的带了它。 */
+  asset?: string;
+  asset_available?: boolean;
+  size?: number;
+  has_update?: boolean;
+  /** 双方版本号是否可比较；开发构建为 false，此时禁用一键更新。 */
+  comparable?: boolean;
+  /** comparable 为 false 时的说明。 */
+  reason?: string;
+}
+
+/** /api/update/stream 推送的一条更新进度。 */
+export interface UpdateProgress {
+  phase: "idle" | "downloading" | "verifying" | "extracting" | "staged" | "failed";
+  /** 仅下载阶段有意义（0-100）；其余阶段为 -1。 */
+  percent: number;
+  message: string;
+  version?: string;
+  error?: string;
 }

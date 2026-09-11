@@ -36,6 +36,12 @@ Thumbs.db
 
 # 内嵌前端的单二进制产物
 /artex
+# 一键更新在可执行文件旁留下的中间产物（暂存件 / 备份 / 失败版本 / 升级标记）
+/artex.new
+/artex.new.sha256
+/artex.old
+/artex.failed
+/artex.upgrade.json
 /server/webui/dist/
 /dist/
 
