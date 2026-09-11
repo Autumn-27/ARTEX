@@ -400,6 +400,7 @@ function ProfileSheet({
         toStore(effort),
         profileId,
         streaming,
+        sessionHeaderKey.trim(),
       );
       // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
       if (r.ok)
