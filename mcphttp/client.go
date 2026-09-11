@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,12 +66,18 @@ type Client struct {
 
 // New connects to a remote MCP endpoint and performs the initialize handshake.
 // headers are sent on every request (Authorization, custom API keys, …).
-func New(ctx context.Context, server, url string, headers map[string]string) (*Client, error) {
+// When insecure is true, TLS certificate verification is skipped so servers that
+// present a self-signed certificate can still be reached (issue #108).
+func New(ctx context.Context, server, url string, headers map[string]string, insecure bool) (*Client, error) {
+	hc := &http.Client{Timeout: 120 * time.Second}
+	if insecure {
+		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	}
 	c := &Client{
 		server:  server,
 		url:     url,
 		headers: headers,
-		http:    &http.Client{Timeout: 120 * time.Second},
+		http:    hc,
 	}
 	if err := c.initialize(ctx); err != nil {
 		return nil, err

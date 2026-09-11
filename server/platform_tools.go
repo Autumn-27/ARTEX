@@ -254,6 +254,7 @@ type mcpToolInput struct {
 	Env       json.RawMessage `json:"env"`
 	URL       string          `json:"url"`
 	Enabled   *bool           `json:"enabled"`
+	Insecure  *bool           `json:"insecure"`
 }
 
 func mcpSchema(withID bool) map[string]any {
@@ -265,6 +266,7 @@ func mcpSchema(withID bool) map[string]any {
 		"env":       map[string]any{"type": "object", "description": "环境变量 {KEY:VALUE}"},
 		"url":       strParam("http/sse 的 URL"),
 		"enabled":   map[string]any{"type": "boolean", "description": "是否启用(默认 true)"},
+		"insecure":  map[string]any{"type": "boolean", "description": "http: 跳过 TLS 证书校验(自签证书时置 true, 默认 false)"},
 	}
 	required := []string{"name", "transport"}
 	if withID {
@@ -279,9 +281,13 @@ func (a mcpToolInput) toDB() *db.MCPServer {
 	if a.Enabled != nil {
 		enabled = *a.Enabled
 	}
+	insecure := false
+	if a.Insecure != nil {
+		insecure = *a.Insecure
+	}
 	return &db.MCPServer{
 		ID: a.ID, Name: a.Name, Transport: a.Transport, Command: a.Command,
-		Args: a.Args, Env: a.Env, URL: a.URL, Enabled: enabled,
+		Args: a.Args, Env: a.Env, URL: a.URL, Enabled: enabled, Insecure: insecure,
 	}
 }
 
