@@ -32,7 +32,7 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 			return nil, fmt.Errorf("http 传输缺少 URL")
 		}
 		// env map doubles as HTTP headers (e.g. Authorization).
-		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env))
+		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
 	default:
 		return nil, fmt.Errorf("未知传输方式 %q", m.Transport)
 	}

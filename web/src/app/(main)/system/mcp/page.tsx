@@ -31,6 +31,7 @@ type FormState = {
   args: string;
   url: string;
   env: string;
+  insecure: boolean;
 };
 const emptyForm: FormState = {
   name: "",
@@ -39,6 +40,7 @@ const emptyForm: FormState = {
   args: "",
   url: "",
   env: "",
+  insecure: false,
 };
 
 export default function MCPPage() {
@@ -111,6 +113,7 @@ export default function MCPPage() {
       args: (s.args ?? []).join(" "),
       url: s.url ?? "",
       env: envToText(s.env),
+      insecure: s.insecure ?? false,
     });
     setTab("config");
     setOpen(true);
@@ -151,12 +154,14 @@ export default function MCPPage() {
               command: "",
               args: [] as string[],
               env: parseEnv(form.env), // 远程模式下 env 即请求头
+              insecure: form.insecure,
             }
           : {
               transport: "stdio" as const,
               command: form.command.trim(),
               args: form.args.trim() ? form.args.trim().split(/\s+/) : [],
               env: parseEnv(form.env),
+              insecure: false,
             };
       await api.saveMcpServer({
         ...(editing ? { id: editing.id } : {}),
@@ -284,6 +289,13 @@ export default function MCPPage() {
               value={form.url}
               onChange={(e) => setF({ url: e.target.value })}
             />
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={form.insecure}
+                onCheckedChange={(v) => setF({ insecure: v === true })}
+              />
+              跳过 TLS 证书校验（自签证书）
+            </label>
           </div>
         )}
         <div className="grid gap-2">

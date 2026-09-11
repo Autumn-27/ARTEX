@@ -1070,6 +1070,7 @@ export interface MCPServer {
   env: Record<string, string>;
   url?: string;
   enabled: boolean;
+  insecure?: boolean; // http: skip TLS cert verification (self-signed servers)
   tools?: string[]; // mcp_tools_cache (names only, for the count)
 }
 
