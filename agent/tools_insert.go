@@ -63,13 +63,6 @@ type assetInputItem struct {
 	// ---- endpoint ----
 	Method string           `json:"method"`
 	Params []map[string]any `json:"params"`
-
-	// Related marks whether this asset is relevant to the CURRENT test task and
-	// should therefore auto-enter the coverage system (task_scope denominator).
-	// nil = default true (relevant → auto-scoped). false = insert into the shared
-	// asset库 but keep it OUT of this task's coverage. Only consulted when the task
-	// has the coverage feature enabled; ignored (no auto-scope either way) when off.
-	Related *bool `json:"related"`
 }
 
 // insertAssets is the unified insert_assets agent tool.
@@ -150,11 +143,6 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						"type":        "array",
 						"description": "请求参数列表，每条含 location(query/body/header/path)/name/value/type（可选，追加不覆盖）",
 						"items":       map[string]any{"type": "object"},
-					},
-					// 覆盖度相关：该资产是否与当前测试任务有关。
-					"related": map[string]any{
-						"type":        "boolean",
-						"description": "该资产是否与【当前测试任务】相关：true(默认)才自动纳入资产覆盖度(测试范围分母)，该资产会进入待测资产中，如果是和任务无关的，例如CDN仅存储静态资源类，必须设置为false或不进行资产插入；false 则只入库、不计入本任务覆盖度(如顺带发现的旁站/无关资产)。仅在任务开启资产覆盖度功能时生效。",
 					},
 				}, "type"),
 			},
@@ -292,10 +280,9 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				}
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
-				// 资产覆盖度功能关闭时不再累积测试范围(分母)；related=false(与当前任务无关)
-				// 的资产也只入库、不计入覆盖度。related 省略/null 视为 true(默认纳入)。
-				related := item.Related == nil || *item.Related
-				if !t.coverageDisabled && related {
+				// 与覆盖度开关无关：task_scope 是任务的范围边界(list/查询的过滤基准)，
+				// 覆盖度开关只决定要不要把它当分母去算指标，不决定要不要累积范围本身。
+				{
 					svcIP := item.ServiceIP
 					if svcIP == "" {
 						svcIP = item.IP
@@ -370,7 +357,7 @@ func (t *ToolSet) addCompanyScope() actool.CoreTool {
 func (t *ToolSet) addTaskScope() actool.CoreTool {
 	return writeTool(
 		"add_task_scope",
-		"把测试范围加入【本任务】——这是资产测试覆盖度的分母，也是本任务的授权边界。\n"+
+		"把测试范围加入【本任务】——这是本任务的授权边界，也是资产测试覆盖度的分母。\n"+
 			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword。\n"+
 			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
 			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词。\n"+
