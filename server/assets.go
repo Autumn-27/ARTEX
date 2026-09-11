@@ -346,9 +346,12 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		total, err = as.CountDSL(dsl, typ)
+		// task_id scopes the DSL search to a task's assets (the task detail
+		// "测试资产" search); 0 means the global asset view.
+		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
+		total, err = as.CountDSL(dsl, typ, taskID)
 		if err == nil && offset < total {
-			assets, err = as.QueryDSL(dsl, typ, limit, offset)
+			assets, err = as.QueryDSL(dsl, typ, taskID, limit, offset)
 		}
 	} else {
 		companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64)

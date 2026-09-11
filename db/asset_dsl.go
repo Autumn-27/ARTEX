@@ -471,7 +471,8 @@ func ValidateDSL(dsl string) error {
 
 // CountDSL returns the total number of assets matching a DSL expression (and optional
 // type), for server-side pagination — same WHERE as QueryDSL, without LIMIT/OFFSET.
-func (s *AssetStore) CountDSL(dsl, typ string) (int, error) {
+// taskID > 0 scopes the count to assets attached to that task.
+func (s *AssetStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 	node, err := ParseDSL(dsl)
 	if err != nil {
 		return 0, err
@@ -484,6 +485,10 @@ func (s *AssetStore) CountDSL(dsl, typ string) (int, error) {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
+	if taskID > 0 {
+		args = append(args, taskID)
+		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
+	}
 	var n int
 	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
 	return n, err
@@ -491,7 +496,9 @@ func (s *AssetStore) CountDSL(dsl, typ string) (int, error) {
 
 // QueryDSL executes a DSL query string against the asset store.
 // typ is an optional asset type filter applied independently of the DSL expression.
-func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, error) {
+// taskID > 0 scopes results to assets attached to that task and hydrates each
+// row's per-task source metadata (as QueryByTask does).
+func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -510,6 +517,10 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
+	if taskID > 0 {
+		args = append(args, taskID)
+		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
+	}
 	args = append(args, limit, offset)
 	q := assetSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
@@ -518,5 +529,14 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAssets(rows)
+	assets, err := scanAssets(rows)
+	if err != nil {
+		return nil, err
+	}
+	if taskID > 0 {
+		if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+			return nil, err
+		}
+	}
+	return assets, nil
 }

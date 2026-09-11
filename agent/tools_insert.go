@@ -507,7 +507,7 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			case len(a.IDs) > 0:
 				assets, err = t.as.GetByIDs(a.IDs)
 			case a.DSL != "":
-				assets, err = t.as.QueryDSL(a.DSL, a.Type, a.Limit, a.Offset)
+				assets, err = t.as.QueryDSL(a.DSL, a.Type, 0, a.Limit, a.Offset)
 			default:
 				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部资产，请提供查询条件"), nil
 			}

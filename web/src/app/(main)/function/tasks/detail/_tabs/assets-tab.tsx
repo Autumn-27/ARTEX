@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AssetDslSearch } from "@/components/asset-dsl-search";
 import { ScopeTextEditor } from "@/components/scope-text-editor";
 import {
   AlertDialog,
@@ -346,10 +347,15 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const [tab, setTab] = React.useState<NewAssetType>("root_domain");
   const [page, setPage] = React.useState(0);
   const [size, setSize] = React.useState(50);
+  const [query, setQuery] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [dslError, setDslError] = React.useState("");
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [addOpen, setAddOpen] = React.useState(false);
   const [removeTarget, setRemoveTarget] = React.useState<Asset | null>(null);
   const [removing, setRemoving] = React.useState(false);
+  const assetsRequestRef = React.useRef(0);
+  const dslMode = query.trim() !== "";
 
   React.useEffect(() => {
     setPage(0);
@@ -357,31 +363,65 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     setLoaded(false);
   }, []);
 
+  // Switching type tabs resets the search (DSL fields differ per type; matches
+  // the global asset view).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tab changes intentionally reset tab-local controls.
+  React.useEffect(() => {
+    setQuery("");
+    setDslError("");
+  }, [tab]);
+
+  // Query / tab / page-size changes restart server pagination.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: these controls intentionally reset server pagination.
+  React.useEffect(() => setPage(0), [tab, size, query]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit manual-reload trigger.
   React.useEffect(() => {
     let active = true;
+    const dsl = query.trim();
+    const request = ++assetsRequestRef.current;
     const load = async () => {
+      setLoading(true);
       try {
+        // The search always stays within this task's assets: taskAssets and
+        // searchTaskAssets both pin task_id server-side.
         const [current, nextCounts] = await Promise.all([
-          api.taskAssets(taskId, tab, size, page * size),
+          dsl
+            ? api.searchTaskAssets(taskId, dsl, tab, size, page * size)
+            : api.taskAssets(taskId, tab, size, page * size),
           api.assetCounts(taskId),
         ]);
-        if (!active) return;
+        if (!active || assetsRequestRef.current !== request) return;
         setRows(current.assets);
         setTotal(current.total);
         setCounts(nextCounts ?? {});
+        setDslError("");
       } catch (reason) {
-        if (active) toast.error(`加载任务资产失败：${String((reason as Error)?.message ?? reason)}`);
+        if (!active || assetsRequestRef.current !== request) return;
+        const message = String((reason as Error)?.message ?? reason);
+        if (dsl) {
+          setDslError(message);
+          setRows([]);
+          setTotal(0);
+        } else {
+          toast.error(`加载任务资产失败：${message}`);
+        }
       } finally {
-        if (active) setLoaded(true);
+        if (active && assetsRequestRef.current === request) {
+          setLoading(false);
+          setLoaded(true);
+        }
       }
     };
-    void load();
-    const timer = setInterval(load, 10_000);
+    // Debounce DSL keystrokes; plain (re)loads and polling run immediately.
+    const debounce = setTimeout(() => void load(), dsl ? 400 : 0);
+    const timer = setInterval(() => void load(), 10_000);
     return () => {
       active = false;
+      clearTimeout(debounce);
       clearInterval(timer);
     };
-  }, [page, refreshKey, size, tab, taskId]);
+  }, [page, query, refreshKey, size, tab, taskId]);
 
   React.useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(total / size) - 1);
@@ -423,6 +463,16 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const commonCardProps = { loaded, onPage: setPage, onSize: setSize, page, size, total };
   const totalAll = TABS.reduce((sum, item) => sum + (counts[item.key] ?? 0), 0);
 
+  const searchBox = (
+    <AssetDslSearch
+      query={query}
+      onChange={setQuery}
+      loading={loading}
+      error={dslError}
+      count={dslMode ? total : undefined}
+    />
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -436,7 +486,11 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </Button>
       </div>
 
-      <Tabs value={tab} onValueChange={(value) => setTab(value as NewAssetType)} className="min-h-0 flex-1">
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as NewAssetType)}
+        className="flex min-h-0 flex-1 flex-col gap-2"
+      >
         <div className="overflow-x-auto overflow-y-hidden">
           <TabsList className="w-max">
             {TABS.map((item) => (
@@ -449,7 +503,9 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </TabsList>
         </div>
 
-        <TabsContent value="root_domain" className="mt-2 flex min-h-0 flex-1 flex-col">
+        {searchBox}
+
+        <TabsContent value="root_domain" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard cols={["域名", "ICP 备案", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
@@ -464,7 +520,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </AssetCard>
         </TabsContent>
 
-        <TabsContent value="ip" className="mt-2 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard cols={["IP", "C段", "绑定域名", "开放端口", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
@@ -490,7 +546,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </AssetCard>
         </TabsContent>
 
-        <TabsContent value="subdomain" className="mt-2 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="subdomain" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard cols={["域名", "根域名", "解析类型", "解析值", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
@@ -509,7 +565,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </AssetCard>
         </TabsContent>
 
-        <TabsContent value="app" className="mt-2 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="app" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard cols={["应用", "地址", "分类", "标题", "指纹", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
@@ -531,7 +587,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </AssetCard>
         </TabsContent>
 
-        <TabsContent value="service" className="mt-2 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="service" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard
             cols={["地址 / 服务", "状态码", "标题", "响应长度", "指纹", "认证", "来源", "操作"]}
             {...commonCardProps}
@@ -590,7 +646,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           </AssetCard>
         </TabsContent>
 
-        <TabsContent value="endpoint" className="mt-2 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="endpoint" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard cols={["方法", "完整地址", "参数", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
