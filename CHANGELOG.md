@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-09-11
+
 ### Agent
 
 #### 新增的功能
@@ -93,6 +95,11 @@
 #### 修改的功能
 
 - 升级 norma 至 v0.3.7。
+
+### 贡献者
+
+- [@Autumn-27](https://github.com/Autumn-27)
+- [@RuoJi6](https://github.com/RuoJi6)
 
 ## [0.3.8] - 2026-09-09
 
@@ -549,7 +556,8 @@
 - [@Autumn-27](https://github.com/Autumn-27)
 - [@neouks](https://github.com/neouks)
 
-[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/Autumn-27/ARTEX/compare/v0.3.9...HEAD
+[0.3.9]: https://github.com/Autumn-27/ARTEX/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/Autumn-27/ARTEX/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/Autumn-27/ARTEX/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/Autumn-27/ARTEX/compare/v0.3.5...v0.3.6
