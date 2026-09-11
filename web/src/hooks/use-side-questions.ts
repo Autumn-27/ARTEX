@@ -7,6 +7,13 @@ import { toast } from "sonner";
 import { sseUrl } from "@/lib/api";
 import { isBtwCommand, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
 
+// crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
+function newSideRequestID(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ?? `btw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+  );
+}
+
 function merge(old: SideExchange[], incoming: SideExchange[]) {
   const byID = new Map(old.map((item) => [item.id, item]));
   for (const item of incoming) {
@@ -150,7 +157,7 @@ export function useSideQuestions(parent: string | null) {
     setError("");
     setDraft(question);
     setOpen(true);
-    if (retry.current?.question !== question) retry.current = { question, id: crypto.randomUUID() };
+    if (retry.current?.question !== question) retry.current = { question, id: newSideRequestID() };
     try {
       const item = await sideAPI.ask(parent, question, retry.current.id);
       if (version !== epoch.current) return;
