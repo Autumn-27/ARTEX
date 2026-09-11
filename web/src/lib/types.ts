@@ -627,6 +627,7 @@ export interface Activity {
   };
   source_task_id?: string;
   inherited?: boolean;
+  main_seg?: number; // main-agent conversation segment (present only on worker="mainagent" rows)
   // token usage (present only on kind='result')
   input_tokens?: number;
   output_tokens?: number;
@@ -829,6 +830,7 @@ export interface Session {
   intent_id?: string;
   source_task_id?: string;
   inherited?: boolean;
+  seg?: number; // main-agent session: which conversation segment (0 = original)
 }
 
 // ---- Security ----

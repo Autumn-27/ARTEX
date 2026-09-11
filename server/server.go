@@ -845,6 +845,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
 	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
+	mux.HandleFunc("GET /api/exploration/main-sessions", s.mainSessions)
+	mux.HandleFunc("POST /api/exploration/main-session/new", s.newMainSession)
 	mux.HandleFunc("GET /api/exploration/activity/stream", s.streamActivity)
 	mux.HandleFunc("GET /api/exploration/activity/{seq}", s.activityDetail)
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
@@ -2585,7 +2587,14 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 	switch {
 	case sess == "" || sess == "main":
-		return db.ActivitySessionFilter{Worker: "mainagent"}, true
+		// bare "main" = the current segment; caller resolves MainSeg via the store.
+		return db.ActivitySessionFilter{Main: true}, true
+	case strings.HasPrefix(sess, "main:"):
+		seg, err := strconv.Atoi(strings.TrimPrefix(sess, "main:"))
+		if err != nil || seg < 0 {
+			return db.ActivitySessionFilter{}, false
+		}
+		return db.ActivitySessionFilter{Main: true, MainSeg: &seg}, true
 	case sess == "plan":
 		return db.ActivitySessionFilter{Worker: "planner"}, true
 	case strings.HasPrefix(sess, "intent:"):
@@ -2647,6 +2656,14 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeErr(w, 400, "bad session")
 		return
+	}
+	if filter.Main && filter.MainSeg == nil { // bare "main" → the current segment
+		seg, err := t.Store.CurrentMainSeg()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		filter.MainSeg = &seg
 	}
 	before := int64(atoiDefault(q.Get("before"), 0))
 	limit := min(atoiDefault(q.Get("limit"), 200), 500) // cap so one request can't pull an unbounded slice
@@ -3393,6 +3410,47 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "count": len(results), "backend": backend})
 }
 
+// mainSessions lists the task's main-agent conversation segments (newest-first) and
+// the current one. The frontend renders these as switchable sessions under 主 Agent.
+func (s *Server) mainSessions(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	if t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	list, err := t.Store.ListMainSessions()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	current := 0
+	if len(list) > 0 {
+		current = list[0].Seq // newest-first
+	}
+	writeJSON(w, 200, map[string]any{"sessions": list, "current": current})
+}
+
+// newMainSession starts a fresh main-agent conversation segment. Only the segment
+// counter advances — the task's exploration graph, assets and goal are untouched, so
+// the main agent continues over the same task with a clean transcript/context.
+func (s *Server) newMainSession(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	if t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if s.engine.IsDeleting(t.ID) {
+		writeErr(w, 409, "任务正在删除，无法新建会话")
+		return
+	}
+	m, err := t.Store.NewMainSession()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"seq": m.Seq, "created_at": rfc3339(m.CreatedAt), "current": m.Seq})
+}
+
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
@@ -3408,6 +3466,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
+		Seg         *int             `json:"seg,omitempty"`         // 目标主会话分段;缺省=最新段
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3432,12 +3491,26 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	s.chatCancel[t.ID] = cancel
 	s.chatMu.Unlock()
 
+	// The turn belongs to whichever main-agent segment the user is chatting in (any
+	// segment is interactive, like the top-level chat conversations). Stamp every
+	// mainagent row with it so this turn's transcript + activity land in that segment.
+	// Missing seg (older clients) falls back to the newest segment.
+	mainSeg := 0
+	if req.Seg != nil && *req.Seg >= 0 {
+		mainSeg = *req.Seg
+	} else {
+		mainSeg, _ = t.Store.CurrentMainSeg()
+	}
+	segPtr := &mainSeg
+
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
 	// reloads and updates live: the conversation lives in the activity stream as
 	// worker="mainagent" (the per-task activity table, replayed via SSE). With
 	// attachments, the activity's Detail carries {text, attachments} so the transcript
 	// renders attachment cards.
-	s.engine.emitActivity(t, userActivityWithAttachments("mainagent", req.Message, req.Attachments))
+	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
+	humanTurn.MainSeg = segPtr
+	s.engine.emitActivity(t, humanTurn)
 	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
 		ma = s.agentsForTask(t).main
@@ -3455,7 +3528,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// emit every step (thinking/tool_use/tool_result/text/result) so the main
 			// agent session shows its work live, like worker/planner. The final answer
 			// is the captured "result" step — no separate reply emit (would duplicate).
-			emit := func(rec db.Activity) { s.engine.emitActivity(t, rec) }
+			emit := func(rec db.Activity) {
+				rec.MainSeg = segPtr
+				s.engine.emitActivity(t, rec)
+			}
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.reviveTask(t) } // set_goals 新增目标 → 把任务拉回 running
 			// 把上传附件的【绝对路径】清单拼进发给 agent 的消息,它据此用 Read/Bash 打开文件。
@@ -3463,17 +3539,17 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(req.Message, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
+			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
-				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）"})
+				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
 			}
 		}()
 		writeJSON(w, 202, map[string]any{"status": "accepted", "mode": "llm"})
 		return
 	}
 	reply := s.fallbackChat(t, req.Message)
-	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply})
+	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})
 }

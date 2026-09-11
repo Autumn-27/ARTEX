@@ -244,6 +244,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"description":            strParam("任务描述(简短标题)"),
 			"goal":                   strParam("任务目标(要达成什么)"),
 			"parent_ref":             strParam("可选：父任务 id(做父子关联)"),
+			"source_task_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": fmt.Sprintf("可选：只读继承的来源任务 id 列表(最多 %d 个)。子任务可只读引用这些任务已探明的资产/结论作为起点；与 parent_ref 的纯父子指针不同，这是内容继承。", db.MaxTaskSourceCount)},
 			"llm_profile_id":         map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
 			"timeout_seconds":        map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
 			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 600(10min)；"},
@@ -251,11 +252,14 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 		}, "description", "goal"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				Description, Goal, ParentRef string
-				LLMProfileID                 json.RawMessage `json:"llm_profile_id"`
-				TimeoutSeconds               int             `json:"timeout_seconds"`
-				PlanHeartbeatSeconds         int             `json:"plan_heartbeat_seconds"`
-				SeedFirstIntent              bool            `json:"seed_first_intent"`
+				Description          string          `json:"description"`
+				Goal                 string          `json:"goal"`
+				ParentRef            string          `json:"parent_ref"`
+				SourceTaskIDs        []string        `json:"source_task_ids"`
+				LLMProfileID         json.RawMessage `json:"llm_profile_id"`
+				TimeoutSeconds       int             `json:"timeout_seconds"`
+				PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
+				SeedFirstIntent      bool            `json:"seed_first_intent"`
 			}
 			_ = json.Unmarshal(in, &a)
 			if strings.TrimSpace(a.Description) == "" {
@@ -266,6 +270,23 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			}
 			if a.TimeoutSeconds < 0 {
 				a.TimeoutSeconds = 0
+			}
+			// 只读继承来源任务：数量上限 + 每个 id 有效/去重/存在，校验规则与 HTTP 建任务一致。
+			if len(a.SourceTaskIDs) > db.MaxTaskSourceCount {
+				return actool.Errorf(fmt.Sprintf("关联任务最多选择 %d 个", db.MaxTaskSourceCount)), nil
+			}
+			sourceIDs := make([]int64, 0, len(a.SourceTaskIDs))
+			seenSources := map[int64]bool{}
+			for _, raw := range a.SourceTaskIDs {
+				id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+				if err != nil || id <= 0 || seenSources[id] {
+					return actool.Errorf("关联任务 id 无效或重复"), nil
+				}
+				if _, ok := s.m.Task(strconv.FormatInt(id, 10)); !ok {
+					return actool.Errorf(fmt.Sprintf("关联任务 #%d 不存在", id)), nil
+				}
+				seenSources[id] = true
+				sourceIDs = append(sourceIDs, id)
 			}
 			// LLM profile resolution: explicit id > inherit parent's pin > active(nil).
 			var pin *int64
@@ -279,7 +300,16 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 					pin = pt.LLMProfileID
 				}
 			}
-			t, err := s.m.CreateTask(a.Description, a.Goal, pin, a.TimeoutSeconds, a.PlanHeartbeatSeconds)
+			var llmIDs []int64
+			if pin != nil {
+				llmIDs = []int64{*pin}
+			}
+			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
+				SourceTaskIDs:        sourceIDs,
+				LLMProfileIDs:        llmIDs,
+				TimeoutSeconds:       a.TimeoutSeconds,
+				PlanHeartbeatSeconds: a.PlanHeartbeatSeconds,
+			})
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}

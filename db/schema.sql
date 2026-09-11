@@ -309,11 +309,20 @@ CREATE TABLE IF NOT EXISTS activity (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+-- main_seg segments the main-agent session into resettable conversations: a new
+-- main session bumps the segment so its transcript + activity start clean while the
+-- task's graph/assets/goal are untouched. NULL == legacy rows == segment 0 (the
+-- original session). Only worker='mainagent' rows carry it.
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS main_seg INTEGER;
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
 -- can't distinguish them); this covers reverse pagination of those sessions.
 CREATE INDEX IF NOT EXISTS idx_act_worker ON activity(exploration_id, worker, id);
+-- Main-session pages filter by segment on top of worker='mainagent'; this partial
+-- index covers reverse pagination within one segment.
+CREATE INDEX IF NOT EXISTS idx_act_main_seg ON activity(exploration_id, main_seg, id)
+    WHERE worker='mainagent';
 -- Task-list polls aggregate result usage and find the latest event repeatedly.
 -- Cover the token columns for index-only aggregation and the timestamp order for
 -- per-exploration latest-activity lookups.
@@ -321,6 +330,18 @@ CREATE INDEX IF NOT EXISTS idx_act_result_usage ON activity(exploration_id)
     INCLUDE (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
     WHERE kind='result';
 CREATE INDEX IF NOT EXISTS idx_act_latest ON activity(exploration_id, created_at DESC);
+
+-- main_sessions records the resettable main-agent conversation segments of a task.
+-- Segment 0 (the original session) is implicit and never stored; this table holds
+-- only the extra segments created by "新建会话" (seq >= 1). The current segment is
+-- MAX(seq) or 0. Each segment gets its own transcript file + activity slice; the
+-- task's exploration graph/assets/goal are shared and never reset.
+CREATE TABLE IF NOT EXISTS main_sessions (
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    seq            INTEGER NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (exploration_id, seq)
+);
 
 -- =====================================================================
 -- C. LLM profiles

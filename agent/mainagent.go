@@ -102,7 +102,7 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 // non-nil, receives each execution step (thinking / tool_use / tool_result /
 // text / result) so the main-agent session shows its work — exactly like the
 // worker/planner sessions — not just the final answer.
-func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
+func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
 	tsx.SetFindingRecorder(m.findingRecorder)
 	if as != nil {
@@ -153,9 +153,14 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
-	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
+	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx
+		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
+		// load; each new session (seg>=1) gets its own file for a clean context.
 		opts.SessionID = fmt.Sprintf("exp%d-main", ts.ID())
+		if mainSeg > 0 {
+			opts.SessionID = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
+		}
 	}
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
