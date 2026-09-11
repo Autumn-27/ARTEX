@@ -16,6 +16,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/sidequestion"
 )
 
 const (
@@ -215,6 +216,7 @@ func (s *Server) pgDeleteConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cancelConversation(c.ID)
+	s.cancelSideWhere(func(p sidequestion.Parent) bool { return p.ConversationID == c.ID })
 	if err := pg.DeleteConversation(c.ID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -273,6 +275,7 @@ func (s *Server) pgDeleteConversationsBatch(w http.ResponseWriter, r *http.Reque
 	}
 	for _, id := range ids {
 		s.cancelConversation(id)
+		s.cancelSideWhere(func(p sidequestion.Parent) bool { return p.ConversationID == id })
 	}
 	deleted, err := pg.DeleteConversations(ids)
 	if err != nil {

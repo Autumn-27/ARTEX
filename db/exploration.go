@@ -383,6 +383,11 @@ func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string)
 		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
 		return 0, err
 	}
+	// Soft deletion retains the main intent audit trail, but side conversations
+	// are removed atomically with the stopped state. Delayed snapshots reject it.
+	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE intent_id=$1`, id); err != nil {
+		return 0, err
+	}
 
 	if origin == "" {
 		origin = "user"

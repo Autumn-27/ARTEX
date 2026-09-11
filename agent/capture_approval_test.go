@@ -116,8 +116,17 @@ func TestCaptureApprovalLifecycle(t *testing.T) {
 			if tc.action == "invalid" {
 				initialAction = "allow"
 			}
-			if detail.Status != tc.status || detail.DecisionSource != "model" || a == nil || a.ExecutionStatus != tc.execution || a.ToolUseID != "probe-call" || a.UserMessage != "record this review" || a.InitialAction != initialAction || a.ModelFallback != (tc.action == "invalid") || a.ProfileID != 7 {
+			wantUserMessage := "record this review"
+			if initialAction == "allow" {
+				// Routine automatic allows keep decision/execution metadata but
+				// intentionally omit the bulky replay context from the audit row.
+				wantUserMessage = ""
+			}
+			if detail.Status != tc.status || detail.DecisionSource != "model" || a == nil || a.ExecutionStatus != tc.execution || a.ToolUseID != "probe-call" || a.UserMessage != wantUserMessage || a.InitialAction != initialAction || a.ModelFallback != (tc.action == "invalid") || a.ProfileID != 7 {
 				t.Fatalf("unexpected review: row=%+v audit=%+v", detail.InterceptApprovalRow, a)
+			}
+			if initialAction == "allow" && (len(a.Context) != 0 || a.UserTruncated || a.ContextTruncated) {
+				t.Fatalf("routine allow retained replay context: %+v", a)
 			}
 			wantCalls := 1
 			if tc.execution == "not_executed" {

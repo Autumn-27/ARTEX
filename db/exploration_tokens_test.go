@@ -88,7 +88,7 @@ func TestTokenStatsBySessionUsesCompleteIntentHistory(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("sessions = %+v, want only main, plan, and the local intent", sessions)
 	}
-	assertSessionTokens(t, got["main"], "main", 11, 12, 13, 14)
+	assertSessionTokens(t, got["main:0"], "main:0", 11, 12, 13, 14)
 	assertSessionTokens(t, got["plan"], "plan", 21, 22, 23, 24)
 	assertSessionTokens(t, got[fmt.Sprintf("intent:%d", intentID)], fmt.Sprintf("intent:%d", intentID),
 		completedRuns, completedRuns*2, completedRuns*3, completedRuns*4)
