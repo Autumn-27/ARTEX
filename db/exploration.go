@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,13 +21,45 @@ var ErrIntentStateConflict = errors.New("intent state changed concurrently")
 // UTF8 encoding rejects ("invalid byte sequence for encoding UTF8"); without this
 // the INSERT fails and the activity record is silently lost. NUL is *valid* UTF-8
 // (U+0000) so ToValidUTF8 leaves it in place, yet PostgreSQL text still rejects it
-// (SQLSTATE 22021) — so it must be removed separately. JSONB payloads are fine
-// (json.Marshal already sanitizes), so only the plain text columns need it.
+// (SQLSTATE 22021) — so it must be removed separately. JSONB columns need the
+// separate jsonbClean below: json.Marshal encodes a NUL as the escape backslash-u-0000,
+// which the text-type json accepts but jsonb rejects (SQLSTATE 22P05).
 func utf8Clean(s string) string {
 	if strings.IndexByte(s, 0) >= 0 {
 		s = strings.ReplaceAll(s, "\x00", "")
 	}
 	return strings.ToValidUTF8(s, "�")
+}
+
+// jsonbClean makes marshaled JSON safe for a PostgreSQL jsonb column. json.Marshal
+// faithfully encodes a NUL byte (U+0000) as the 6-byte escape sequence \u0000; the
+// json type stores it, but jsonb rejects it with "unsupported Unicode escape
+// sequence" (SQLSTATE 22P05). Captured HTTP/tool bytes can carry NULs, so drop the
+// escape — this also covers NULs nested inside json.RawMessage fields, which are
+// copied verbatim into the output. Only a *real* escape is stripped: a \u0000 is
+// genuine when preceded by an even number of backslashes, so an escaped-backslash
+// run such as \\u0000 (the literal text u0000) is left intact.
+func jsonbClean(b []byte) []byte {
+	if !bytes.Contains(b, []byte("\\u0000")) {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	bs := 0 // consecutive backslashes already emitted before position i
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\\' && bs%2 == 0 && i+5 < len(b) &&
+			b[i+1] == 'u' && b[i+2] == '0' && b[i+3] == '0' && b[i+4] == '0' && b[i+5] == '0' {
+			i += 5 // skip the whole \u0000
+			bs = 0
+			continue
+		}
+		if b[i] == '\\' {
+			bs++
+		} else {
+			bs = 0
+		}
+		out = append(out, b[i])
+	}
+	return out
 }
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
