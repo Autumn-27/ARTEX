@@ -394,17 +394,20 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		WebFetchCACert:  p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:    p.webSearch.Enabled,
-		WebSearchBackend:   p.webSearch.Backend,
-		BraveSearchAPIKey:  p.webSearch.BraveKey,
-		TavilySearchAPIKey: p.webSearch.TavilyKey,
-		WebSearchProxy:     p.webSearch.Proxy,
-		BashEnv:            proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:         taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
-		ToolOutputDir:      cmdOutDir(taskDir),
-		MaxTurns:           p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:        maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
-		Compaction:         compactionConfig(p.compactionWindow()),
+		EnableWebSearch:       p.webSearch.Enabled,
+		WebSearchBackend:      p.webSearch.Backend,
+		BraveSearchAPIKey:     p.webSearch.BraveKey,
+		TavilySearchAPIKey:    p.webSearch.TavilyKey,
+		DeepSeekSearchBaseURL: p.webSearch.DeepSeekBaseURL,
+		DeepSeekSearchAPIKey:  p.webSearch.DeepSeekAPIKey,
+		DeepSeekSearchModel:   p.webSearch.DeepSeekModel,
+		WebSearchProxy:        p.webSearch.Proxy,
+		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
+		ToolOutputDir:         cmdOutDir(taskDir),
+		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)
+		MaxDuration:           maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		Compaction:            compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、

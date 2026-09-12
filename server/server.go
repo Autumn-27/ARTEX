@@ -3413,10 +3413,22 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.TavilyKey) != "" {
 		tavilyKey = req.TavilyKey
 	}
+	cfg := actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}
 	// Hard cap so a slow/blocked proxy can't hang the request.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	wall := 30 * time.Second
+	// deepseek 的凭据不在表单里，来自当前激活的 LLM 配置；同时它每次搜索都跑一次
+	// 模型推理，30s 的通用上限偏紧，单独放宽。这里不预判配置能不能用——测这一下
+	// 本来就是给用户自己确认的手段，真跑不通时下面的报错比预判更有信息量。
+	probeQuery := "test"
+	if strings.TrimSpace(backend) == deepSeekWebSearchBackend {
+		cfg.DeepSeekBaseURL, cfg.DeepSeekAPIKey, cfg.DeepSeekModel = s.m.deepSeekSearchCreds()
+		wall = 120 * time.Second
+		// 搜索词由 DeepSeek 端的模型自行决定，"test" 太空泛会让它跳过搜索直接作答。
+		probeQuery = "DeepSeek company official website"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), wall)
 	defer cancel()
-	results, err := actool.WebSearchProbe(ctx, actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}, "test", 3)
+	results, err := actool.WebSearchProbe(ctx, cfg, probeQuery, 3)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "backend": backend})
 		return

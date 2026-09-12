@@ -398,8 +398,9 @@ export default function SystemSettingsPage() {
               <b>web_search</b>（仅返回标题/链接/摘要，不抓取正文；抓取由 WebFetch 负责）。网络搜索<b>不走</b>
               记录代理，独立于流量捕获。
               <br />
-              来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）或{" "}
-              <b>Tavily</b>（需填写 Tavily API Key）。总开关关闭时，各 Agent 的网络搜索开关不可用。
+              来源可选 <b>DuckDuckGo（ddgs）</b>（无需 Key）、<b>Brave（免费版）</b>（需填写 Brave API Key）、{" "}
+              <b>Tavily</b>（需填写 Tavily API Key）或 <b>DeepSeek</b>（复用当前 LLM 配置）。总开关关闭时，各
+              Agent 的网络搜索开关不可用。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
@@ -436,8 +437,28 @@ export default function SystemSettingsPage() {
                     <SelectItem value="ddgs">DuckDuckGo（ddgs · 免费无 Key）</SelectItem>
                     <SelectItem value="brave-free">Brave（免费版 · 需 Key）</SelectItem>
                     <SelectItem value="tavily">Tavily（需 Key）</SelectItem>
+                    <SelectItem value="deepseek">DeepSeek（官方）</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+
+            {webSearch && backend === "deepseek" && (
+              <div className="border-border/60 bg-muted/30 flex flex-col gap-2 rounded-md border p-3">
+                <p className="text-sm font-medium">DeepSeek 官方联网搜索</p>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  该来源直接复用<b>当前激活的 LLM 配置</b>。因此它
+                  <b>仅支持 DeepSeek 官方模型</b>，且该配置<b>必须使用 anthropic 协议</b>
+                  ——DeepSeek 的 OpenAI 协议端点不支持服务端搜索。切换 LLM 配置后此来源可能失效。
+                </p>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  与其它来源不同，搜索由 <b>DeepSeek 服务端执行</b>：每次搜索会额外消耗一次模型调用（产生 Token
+                  费用），搜索请求<b>不经过上面的出口代理</b>，也<b>不计入流量留痕</b>；返回结果<b>只有标题和链接</b>
+                  （无摘要），需要正文时由 WebFetch 抓取。
+                </p>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  是否满足上述条件由你自行确认，系统不做拦截；可用下方「测试搜索」按钮实际跑一次来验证。
+                </p>
               </div>
             )}
 

@@ -26,17 +26,28 @@ import (
 // goal on its own. Multiple workers run concurrently as goroutines.
 // WebSearchOpts is the web-search backend selection the server pushes into each
 // agent (planner/worker/main). Enabled=false leaves the web_search tool off.
-// Backend is "ddgs" (no key), "brave-free" (BraveKey required), or "tavily"
-// (TavilyKey required). It maps directly onto agentcore.Options.
+// Backend is "ddgs" (no key), "brave-free" (BraveKey required), "tavily"
+// (TavilyKey required), or "deepseek" (DeepSeek* required, filled from the
+// active LLM profile). It maps directly onto agentcore.Options.
 // Proxy is a dedicated egress proxy for the search request (http/https/socks5),
 // independent of the traffic-recording MITM proxy — set it when the search endpoint
 // is only reachable via a VPN/SOCKS proxy. Empty = direct.
+//
+// 注意 deepseek 后端与其它三个的性质不同：DeepSeek 没有可直接调用的搜索接口，
+// 搜索只存在于其 Anthropic 兼容 messages 接口内部(web_search_20250305 server
+// tool)，因此每次搜索会消耗一次模型调用，且搜索请求由 DeepSeek 服务端发出——
+// 不经过本机 Proxy，也不会进流量留痕。
 type WebSearchOpts struct {
 	Enabled   bool
 	Backend   string
 	BraveKey  string
 	TavilyKey string
 	Proxy     string
+	// DeepSeek* 来自当前激活的 LLM 配置(仅 anthropic 格式的 DeepSeek 官方端点)，
+	// 不单独配置，随 LLM 配置切换而变。
+	DeepSeekBaseURL string
+	DeepSeekAPIKey  string
+	DeepSeekModel   string
 }
 
 type Worker struct {
@@ -417,11 +428,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		WebFetchCACert: w.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立的出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:    w.webSearch.Enabled,
-		WebSearchBackend:   w.webSearch.Backend,
-		BraveSearchAPIKey:  w.webSearch.BraveKey,
-		TavilySearchAPIKey: w.webSearch.TavilyKey,
-		WebSearchProxy:     w.webSearch.Proxy,
+		EnableWebSearch:       w.webSearch.Enabled,
+		WebSearchBackend:      w.webSearch.Backend,
+		BraveSearchAPIKey:     w.webSearch.BraveKey,
+		TavilySearchAPIKey:    w.webSearch.TavilyKey,
+		DeepSeekSearchBaseURL: w.webSearch.DeepSeekBaseURL,
+		DeepSeekSearchAPIKey:  w.webSearch.DeepSeekAPIKey,
+		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
+		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
 		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
 		WorkingDir: runDir,
