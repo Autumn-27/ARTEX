@@ -1,4 +1,6 @@
 @echo off
+rem 控制台切 UTF-8，否则本文件里的中文在 GBK 终端下是乱码。
+chcp 65001 >nul 2>&1
 rem ARTEX 守护启动脚本（Windows）
 rem
 rem 用法：
