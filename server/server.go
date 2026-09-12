@@ -142,9 +142,11 @@ type provEntry struct {
 type triggeredRun struct {
 	agentKey  string
 	title     string
-	message   string
-	taskID    int64 // source task for finding/goal triggers; 0 for interval/none
-	mergeable bool  // true for finding/goal event triggers (merge by taskID)
+	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
+	taskID    int64  // source task for finding/goal triggers; 0 for interval/none
+	taskDesc  string // 任务描述(任务级,同任务相同);合并时只渲染一次
+	taskGoal  string // 任务目标(任务级,同任务相同);合并时只渲染一次
+	mergeable bool   // true for finding/goal event triggers (merge by taskID)
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {

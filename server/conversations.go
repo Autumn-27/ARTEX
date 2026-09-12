@@ -598,14 +598,14 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // agent's策略 decides concurrency + merge: serial → run one at a time (optionally
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
-func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool) {
+func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
 	if s.m.pg == nil || s.chatAgentRef() == nil {
 		return
 	}
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
 	s.triggerCfg[agentKey] = cfg
-	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, mergeable: mergeable})
+	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
 	s.pumpLocked(agentKey)
 	s.queueMu.Unlock()
 }
@@ -686,8 +686,38 @@ func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredR
 	return mergeTriggeredRuns(group)
 }
 
-// mergeTriggeredRuns folds several same-task event fires into one run: a header plus
-// each fire's message, so the agent handles the task's burst in a single conversation.
+// taskContextHeader renders a task's description/goal once. Same-task fires share
+// this block, so the scheduler no longer repeats it per event (a long task goal
+// times N fires was the dominant bloat). Returns "" for interval/none triggers
+// (taskID==0, no task context). desc/goal are truncated to keep even a single copy
+// bounded.
+func taskContextHeader(taskID int64, desc, goal string) string {
+	if desc == "" && goal == "" {
+		// No task context to show (interval/none fire, or a merged run that already
+		// embedded its per-task headers and cleared these fields).
+		return ""
+	}
+	if goal != "" {
+		return fmt.Sprintf("【任务 #%d %s（目标：%s）】", taskID, trunc(desc, 200), trunc(goal, 500))
+	}
+	return fmt.Sprintf("【任务 #%d %s】", taskID, trunc(desc, 200))
+}
+
+// finalTriggerMessage renders the message actually sent to the agent for a single
+// (non-merged) fire: the task-context header (written once) followed by the event
+// body. Merged runs embed their per-task headers inline and clear taskDesc/taskGoal,
+// so this returns their message unchanged.
+func finalTriggerMessage(item triggeredRun) string {
+	if h := taskContextHeader(item.taskID, item.taskDesc, item.taskGoal); h != "" {
+		return h + "\n" + item.message
+	}
+	return item.message
+}
+
+// mergeTriggeredRuns folds several same-task event fires into one run: the shared
+// task-context header written ONCE, then each fire's event body, so the agent handles
+// the task's burst in a single conversation without repeating the (possibly long)
+// task description/goal per event.
 func mergeTriggeredRuns(items []triggeredRun) triggeredRun {
 	if len(items) == 1 {
 		return items[0]
@@ -695,6 +725,9 @@ func mergeTriggeredRuns(items []triggeredRun) triggeredRun {
 	first := items[0]
 	var b strings.Builder
 	fmt.Fprintf(&b, "【本会话合并了任务 #%d 的 %d 条触发事件，请一并处理】\n", first.taskID, len(items))
+	if h := taskContextHeader(first.taskID, first.taskDesc, first.taskGoal); h != "" {
+		fmt.Fprintf(&b, "%s\n", h) // same task → task context appears once
+	}
 	for i, it := range items {
 		fmt.Fprintf(&b, "\n── 触发 %d ──\n%s\n", i+1, it.message)
 	}
@@ -704,20 +737,41 @@ func mergeTriggeredRuns(items []triggeredRun) triggeredRun {
 		message:   b.String(),
 		taskID:    first.taskID,
 		mergeable: true,
+		// taskDesc/taskGoal left empty: header already embedded above.
 	}
 }
 
 // mergeAllRuns folds the ENTIRE queued burst into one run (merge_mode='all'),
-// regardless of task or type — a header plus each fire's message.
+// regardless of type. Events are grouped by task (tasks in first-appearance order,
+// events in their original order within a task), so each task's context header — and
+// its possibly long description/goal — is written exactly ONCE even when fires from
+// different tasks interleave in the queue. Cross-task chronology is not preserved
+// (event bodies carry no timestamps, so per-task grouping reads better for the agent).
 func mergeAllRuns(items []triggeredRun) triggeredRun {
 	if len(items) == 1 {
 		return items[0]
 	}
 	first := items[0]
+	order := []int64{}
+	groups := map[int64][]triggeredRun{}
+	for _, it := range items {
+		if _, seen := groups[it.taskID]; !seen {
+			order = append(order, it.taskID)
+		}
+		groups[it.taskID] = append(groups[it.taskID], it)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "【本会话合并了队列中的 %d 条触发事件（不区分任务），请一并处理】\n", len(items))
-	for i, it := range items {
-		fmt.Fprintf(&b, "\n── 触发 %d（task#%d）──\n%s\n", i+1, it.taskID, it.message)
+	fmt.Fprintf(&b, "【本会话合并了队列中的 %d 条触发事件（共 %d 个任务），请一并处理】\n", len(items), len(order))
+	seq := 0
+	for _, tid := range order {
+		g := groups[tid]
+		if h := taskContextHeader(tid, g[0].taskDesc, g[0].taskGoal); h != "" {
+			fmt.Fprintf(&b, "\n%s\n", h) // same task → context appears once, even if interleaved
+		}
+		for _, it := range g {
+			seq++
+			fmt.Fprintf(&b, "\n── 触发 %d（task#%d）──\n%s\n", seq, tid, it.message)
+		}
 	}
 	return triggeredRun{
 		agentKey:  first.agentKey,
@@ -725,6 +779,7 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 		message:   b.String(),
 		taskID:    first.taskID,
 		mergeable: true,
+		// taskDesc/taskGoal left empty: per-task headers already embedded above.
 	}
 }
 
@@ -743,14 +798,15 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
 	}
-	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(item.message, 200), Detail: item.message}); err != nil {
+	msg := finalTriggerMessage(item) // prepend the task-context header for single (non-merged) fires
+	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
 		log.Printf("[trigger] append msg failed: %v", err)
 	}
 	busyKey := s.convBusyKey(c.ID)
 	s.chatMu.Lock()
 	s.chatBusy[busyKey] = true
 	s.chatMu.Unlock()
-	s.runConversationSync(c, item.message, busyKey)
+	s.runConversationSync(c, msg, busyKey)
 }
 
 // firstLine returns a single-line, length-capped preview (shared with summaries).
