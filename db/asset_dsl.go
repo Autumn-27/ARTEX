@@ -259,11 +259,12 @@ var fullTextCols = []string{
 
 type whereBuilder struct {
 	args []any
+	base int // placeholders are numbered base+1, base+2, …; 0 = the usual $1, $2, …
 }
 
 func (b *whereBuilder) next(v any) string {
 	b.args = append(b.args, v)
-	return fmt.Sprintf("$%d", len(b.args))
+	return fmt.Sprintf("$%d", b.base+len(b.args))
 }
 
 func (b *whereBuilder) build(node *astNode) (string, error) {
@@ -378,10 +379,17 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 }
 
 func buildDSLWhere(node *astNode) (string, []any, error) {
+	return buildDSLWhereBase(node, 0)
+}
+
+// buildDSLWhereBase is buildDSLWhere with a placeholder offset: emitted args are
+// numbered base+1 onward, leaving $1..$base free for the caller (e.g. a scope CTE
+// that reserves $1 for the task id).
+func buildDSLWhereBase(node *astNode, base int) (string, []any, error) {
 	if node == nil {
 		return "1=1", nil, nil
 	}
-	b := &whereBuilder{}
+	b := &whereBuilder{base: base}
 	clause, err := b.build(node)
 	if err != nil {
 		return "", nil, err
@@ -537,6 +545,93 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) 
 		if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
 			return nil, err
 		}
+	}
+	return assets, nil
+}
+
+// QueryDSLInScope is QueryDSL restricted to assets that BELONG to taskID's (and its
+// direct source tasks') declared scope — membership, not literal value: a
+// root_domain scope returns every subdomain / service / endpoint under it. This is
+// the agent-facing list_assets path, so an agent queries the task's relevant assets
+// instead of the whole shared库. taskID<=0 (non-task contexts: Auto / pentest / chat)
+// has no scope to honor and falls back to the plain global QueryDSL. Rows carry the
+// same per-task source metadata as QueryByTask.
+func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
+	if taskID <= 0 {
+		return s.QueryDSL(dsl, typ, 0, limit, offset)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	node, err := ParseDSL(dsl)
+	if err != nil {
+		return nil, err
+	}
+	// $1 is reserved for taskID (scopeTargetCTE); DSL placeholders start at $2.
+	where, dslArgs, err := buildDSLWhereBase(node, 1)
+	if err != nil {
+		return nil, err
+	}
+	args := []any{taskID}
+	args = append(args, dslArgs...)
+	if typ != "" {
+		args = append(args, typ)
+		where += fmt.Sprintf(" AND type = $%d", len(args))
+	}
+	where += " AND id IN (SELECT id FROM target)"
+	args = append(args, limit, offset)
+	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols + " WHERE " + where +
+		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets, err := scanAssets(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+		return nil, err
+	}
+	return assets, nil
+}
+
+// GetByIDsInScope is GetByIDs restricted to ids that BELONG to taskID's (and its
+// direct source tasks') declared scope, so an agent cannot reach out-of-scope
+// assets by id. taskID<=0 (non-task contexts) falls back to the global GetByIDs.
+// Out-of-scope ids are silently dropped from the result (not an error).
+func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error) {
+	if taskID <= 0 {
+		return s.GetByIDs(ids)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, taskID) // $1 reserved for scopeTargetCTE
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, id)
+	}
+	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols +
+		" WHERE id IN (" + strings.Join(placeholders, ",") + ")" +
+		" AND id IN (SELECT id FROM target) ORDER BY last_seen DESC, id DESC"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets, err := scanAssets(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+		return nil, err
 	}
 	return assets, nil
 }

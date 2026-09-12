@@ -999,3 +999,128 @@ func TestAssetIPRejectsHostname(t *testing.T) {
 	}
 	deleteAsset(d, id)
 }
+
+// TestQueryDSLInScopeMembership pins the agent-facing list_assets behavior: it
+// returns assets that BELONG to the task's declared scope (membership, not literal
+// value) — a root_domain scope surfaces its subdomains/services/endpoints even when
+// those rows were produced by a different task — and honors ip/cidr scope for
+// IP-literal hosts (the try_inet(domain) arm). Out-of-scope assets, including by id,
+// are excluded. Direct source tasks' scope is included.
+func TestQueryDSLInScopeMembership(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	task, err := d.CreateTask("scope membership", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := d.CreateTask("scope source", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID); _ = d.DeleteTask(src.ID) })
+	// task ← src is a direct source relation.
+	if _, err := d.Exec(`INSERT INTO task_relations(task_id, source_task_id) VALUES ($1,$2)`, task.ID, src.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	stamp := time.Now().UnixNano()
+	root := fmt.Sprintf("sc%d.invalid", stamp)           // in-scope root domain (task)
+	srcRoot := fmt.Sprintf("src%d.invalid", stamp)       // in-scope via source task
+	out := fmt.Sprintf("out%d.invalid", stamp)           // out of every scope
+	marker := fmt.Sprintf("mk%d", stamp)                 // bare-text token present in all rows
+	foreignTask := stamp + 777                           // asset produced by an unrelated task
+
+	// Scope: task owns root; source task owns srcRoot; task owns an IP /24.
+	for _, sc := range []struct {
+		tid  int64
+		kind string
+		dom  string
+		net  string
+	}{
+		{task.ID, "root_domain", root, ""},
+		{src.ID, "root_domain", srcRoot, ""},
+		{task.ID, "ip", "", "198.51.100.0/24"},
+	} {
+		if err := assets.upsertTaskScope(TaskScope{TaskID: sc.tid, Kind: sc.kind, Domain: sc.dom, Net: sc.net}); err != nil {
+			t.Fatalf("seed scope: %v", err)
+		}
+	}
+
+	// Insert rows directly so root_domain/task_ids are controlled exactly. Every
+	// in-scope row carries foreignTask in task_ids (never the current task) to prove
+	// membership is by scope, not by producer.
+	type row struct {
+		typ, domain, rootDom, url, method, ip, title string
+	}
+	rows := []row{
+		{"subdomain", "api." + root, root, "", "", "", marker},                        // under task root
+		{"service", "www." + root, root, "https://www." + root + "/", "", "", marker}, // service under task root
+		{"endpoint", "www." + root, root, "https://www." + root + "/a?" + marker + "=1", "GET", "", ""},
+		{"subdomain", "dev." + srcRoot, srcRoot, "", "", "", marker}, // under source-task root
+		{"endpoint", "198.51.100.9", "198.51.100.9", "http://198.51.100.9:8080/" + marker, "GET", "", ""}, // IP-literal host, ip col empty
+		{"subdomain", "x." + out, out, "", "", "", marker},                                                // out of scope
+	}
+	var inScopeIDs, outIDs []int64
+	for _, r := range rows {
+		var id int64
+		if err := d.QueryRow(`INSERT INTO assets(type,domain,root_domain,url,method,ip,page_title,task_ids,last_seen)
+			VALUES ($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),ARRAY[$8]::bigint[],now())
+			RETURNING id`,
+			r.typ, r.domain, r.rootDom, r.url, r.method, r.ip, r.title, foreignTask).Scan(&id); err != nil {
+			t.Fatalf("insert %s: %v", r.domain, err)
+		}
+		if r.rootDom == out {
+			outIDs = append(outIDs, id)
+		} else {
+			inScopeIDs = append(inScopeIDs, id)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM assets WHERE id=ANY($1::bigint[]) OR id=ANY($2::bigint[])`, inScopeIDs, outIDs)
+	})
+
+	got, err := assets.QueryDSLInScope(marker, "", task.ID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotIDs := map[int64]bool{}
+	for _, a := range got {
+		gotIDs[a.ID] = true
+	}
+	for _, id := range inScopeIDs {
+		if !gotIDs[id] {
+			t.Fatalf("in-scope asset %d missing from QueryDSLInScope result %v", id, gotIDs)
+		}
+	}
+	for _, id := range outIDs {
+		if gotIDs[id] {
+			t.Fatalf("out-of-scope asset %d leaked into scoped query", id)
+		}
+	}
+
+	// GetByIDsInScope: in-scope id returns, out-of-scope id is dropped.
+	mixed := append(append([]int64{}, inScopeIDs[0]), outIDs[0])
+	byID, err := assets.GetByIDsInScope(task.ID, mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byID) != 1 || byID[0].ID != inScopeIDs[0] {
+		t.Fatalf("GetByIDsInScope mixed ids → %+v, want only %d", byID, inScopeIDs[0])
+	}
+
+	// taskID<=0 (non-task context) falls back to global: the out-of-scope row is reachable.
+	global, err := assets.QueryDSLInScope(marker, "", 0, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOut bool
+	for _, a := range global {
+		if a.ID == outIDs[0] {
+			sawOut = true
+		}
+	}
+	if !sawOut {
+		t.Fatalf("taskID<=0 should fall back to global and include out-of-scope asset %d", outIDs[0])
+	}
+}
