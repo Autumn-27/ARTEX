@@ -172,7 +172,7 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
 	for _, b := range blocks {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil, nil))
+		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
 	}
 	// A minor may have pushed the segment count over M → merge in the same run.
 	if ad, e := ts.ActiveDigests(); e == nil && len(ad) >= c.m {
@@ -211,11 +211,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	blocks := g.group(elig, c.params)
 
 	bySig := map[string]*db.Node{}
-	genBySig := map[string]int{}
 	for _, d := range active {
-		sig, gen := digestSigGen(d)
+		sig, _ := digestSigGen(d)
 		bySig[sig] = d
-		genBySig[sig] = gen
 	}
 	desired := map[string]bool{}
 	var toCreate []block
@@ -240,7 +238,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
 	}
 	for _, b := range toCreate {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active, genBySig))
+		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
 	}
 }
 
@@ -279,7 +277,7 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 // generationFor computes a digest's重摘代次 (§1): 1 for a fresh fold; for a major
 // merge, max(generation) over the active digests that overlap this block's
 // members, +1.
-func (c *Compactor) generationFor(b block, active []*db.Node, genBySig map[string]int) int {
+func (c *Compactor) generationFor(b block, active []*db.Node) int {
 	if len(active) == 0 {
 		return 1
 	}
@@ -472,7 +470,8 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 		if conf := nodeConfidence(n); conf != "" {
 			line += fmt.Sprintf(" (confidence=%s)", conf)
 		}
-		sb.WriteString(line + "\n")
+		sb.WriteString(line)
+		sb.WriteByte('\n')
 	}
 	// internal edges among members
 	var edgeLines []string
@@ -486,7 +485,8 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	if len(edgeLines) > 0 {
 		sb.WriteString("\n【成员之间的血缘边（父→子）】：\n")
 		sort.Strings(edgeLines)
-		sb.WriteString(strings.Join(edgeLines, "\n") + "\n")
+		sb.WriteString(strings.Join(edgeLines, "\n"))
+		sb.WriteByte('\n')
 	}
 	if len(b.Anchors) > 0 {
 		sb.WriteString("\n【共同父 / 上下文锚（不是成员，只用于理解这些结果从哪个意图探出）】：\n")
@@ -496,7 +496,7 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 			if n != nil {
 				state = n.State
 			}
-			sb.WriteString(fmt.Sprintf("- #%d [%s] %s\n", a, state, nodeSummary(n)))
+			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, nodeSummary(n))
 		}
 	}
 	return sb.String()
