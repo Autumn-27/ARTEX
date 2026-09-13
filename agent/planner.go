@@ -155,6 +155,7 @@ type TriggerEvent struct {
 	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
 	OldGoal  string   // Kind=="goal_edited" 专用：修改前的目标文本
 	NewGoal  string   // Kind=="goal_edited" 专用：修改后的目标文本
+	Hints    []string // Kind=="hint" 专用：本次 add_hint 新增的提示文本（1 条或多条）
 }
 
 // renderTriggers spells out the change(s) that fired this round: for a finished
@@ -174,6 +175,12 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了一个目标：%s —— 新的待达成目标，请据此补充探索方向（若尚无对应意图）。", ev.Goals[0]))
 			} else {
 				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了 %d 个目标：%s —— 均为新的待达成目标，请逐一为尚无对应意图的目标补充探索方向。", len(ev.Goals), strings.Join(ev.Goals, "；")))
+			}
+		case "hint":
+			if len(ev.Hints) == 1 {
+				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了一条战略提示：%s —— 已挂到探索图上，请据此调整/补充探索方向（若尚无对应意图）。", ev.Hints[0]))
+			} else {
+				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了 %d 条战略提示：%s —— 均已挂到探索图上，请逐一据此调整/补充探索方向。", len(ev.Hints), strings.Join(ev.Hints, "；")))
 			}
 		case "goal_deleted":
 			b.WriteString(fmt.Sprintf("\n- 人删除了该目标：%s —— 该目标已移除，请据此重判剩余目标/方向（不必再为它派意图）。", ev.Detail))

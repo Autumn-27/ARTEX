@@ -1776,6 +1776,21 @@ func (t *Task) NotifyGoal(texts []string) {
 	t.Notify()
 }
 
+// NotifyHint records that one OR MORE hints were added in a single add_hint call —
+// by the human via the main agent, or by cross-task orchestration — then wakes the
+// planner, so the next round is told "人新增了 N 条战略提示：…" and looks at them
+// directly instead of having to spot the new hint folded into the graph overview.
+// One call → one trigger event (a batched add_hint counts as one, not one per hint).
+func (t *Task) NotifyHint(texts []string) {
+	if len(texts) == 0 {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "hint", Hints: texts})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
 // NotifyGoalDeleted records that the human deleted a goal (via 总览的目标管理), then
 // wakes the planner so the next round spells out which goal was removed. The event
 // survives an early-returning terminal round (drain happens after the gate).

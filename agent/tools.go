@@ -123,11 +123,22 @@ type ToolSet struct {
 	// goals decomposer (round-0 has no running planner to inform) and workers → those
 	// fall back to the bare notify.
 	notifyGoal func(texts []string)
+	// notifyHint, if set, wakes the planner AND records ONE "人新增了 N 条战略提示：…"
+	// trigger for a whole add_hint call (batch-aware — one call, one trigger) so the next
+	// round is told the round was fired by a new hint and spells the hint out, instead of
+	// the planner having to spot it folded into the graph overview. Wired for the main
+	// agent + cross-task orchestration; nil elsewhere → falls back to the bare notify.
+	notifyHint func(texts []string)
 }
 
 // SetNotifyGoal wires the goal-add trigger callback (see ToolSet.notifyGoal). Set only
 // by the main-agent chat, so runtime-added goals are announced to the planner by name.
 func (t *ToolSet) SetNotifyGoal(fn func([]string)) { t.notifyGoal = fn }
+
+// SetNotifyHint wires the hint-add trigger callback (see ToolSet.notifyHint). Set by
+// the main-agent chat and cross-task orchestration, so a runtime-added hint fires a
+// planner round announced by name instead of a bare wake.
+func (t *ToolSet) SetNotifyHint(fn func([]string)) { t.notifyHint = fn }
 
 // SetResumeTask wires the task-revive callback (see ToolSet.resumeTask). Set only by
 // the main-agent chat, so runtime-added goals can pull a finished task back to running.
@@ -1540,11 +1551,9 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	if len(refs) > 0 {
 		payload["traffic_refs"] = refs
 	}
-	id, err := t.ts.AddNode(db.KindHint, payload, 0, "active", "human", anchors)
-	if err == nil && t.notify != nil {
-		t.notify() // wake the planner so the new hint is read promptly (debounced)
-	}
-	return id, err
+	// 唤醒 planner 不在此处逐条做——由 addHint 在整批写完后统一触发一次（带上提示文本），
+	// 避免一次 add_hint 多条提示逐条刷屏 planner 的触发行。
+	return t.ts.AddNode(db.KindHint, payload, 0, "active", "human", anchors)
 }
 
 type goalItem struct {
@@ -1745,6 +1754,7 @@ func (t *ToolSet) addHint() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			var addedTexts []string
 			for i, it := range items {
 				id, err := t.addOneHint(it)
 				if err != nil {
@@ -1752,6 +1762,18 @@ func (t *ToolSet) addHint() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
+				addedTexts = append(addedTexts, strings.TrimSpace(it.Text))
+			}
+			if len(addedTexts) > 0 {
+				// 唤醒 planner（整批一次）。优先 notifyHint：一次 add_hint 记一条「人新增了
+				// N 条战略提示：…」触发，让 planner 明确"本轮由新增 hint 触发"并看到提示内容；
+				// 未接该回调时退回纯 notify（bare wake，hint 仍折在图里供其自行读取）。
+				switch {
+				case t.notifyHint != nil:
+					t.notifyHint(addedTexts)
+				case t.notify != nil:
+					t.notify()
+				}
 			}
 
 			if !batch { // 单条：保持原返回
