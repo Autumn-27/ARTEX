@@ -21,8 +21,6 @@ services:
     # host 模式下不用 ports 映射，容器直接绑宿主端口：8787(UI/API)、8788(代理)、
     # 以及内部 PostgreSQL 5432 —— 请确保宿主这三个端口空闲（本地测前先停掉占用它们的服务）。
     network_mode: host
-    volumes:
-      - artex_bench_data:/app/data   # jwt.key 等持久化(一次性沙箱可不留)
     restart: "no"
 
 volumes:
