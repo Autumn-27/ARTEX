@@ -490,8 +490,8 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
-	s.seedWorkerReadToolsUnbind()  // list_facts/node_detail/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
-	s.seedWorkerCrossTraceRebind() // 修复旧 v1 迁移误删：把 search_all_worker_traces/get_worker_trace 补绑回 worker(一次性)
+	s.seedWorkerReadToolsUnbind() // list_facts/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
+	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
@@ -849,23 +849,23 @@ func (s *Server) seedCompanyScopeRebind() {
 
 // seedWorkerReadToolsUnbind strips the read-context tools off worker's default
 // binding ONCE on existing DBs (guarded by a settings flag): a worker executes one
-// intent and writes back — reading facts/nodes/companies and listing all workers'
-// traces is a planning/main concern, not the executor's. Fresh DBs already lack these
-// via WorkerTools(); this only backfills old rows without overriding a user who
+// intent and writes back — reading facts/companies and listing all workers' traces is
+// a planning/main concern, not the executor's. Fresh DBs already lack these via
+// WorkerTools(); this only backfills old rows without overriding a user who
 // deliberately re-binds worker. Each RemoveAgentFromTool is per-tool +
 // membership-guarded, so planner/mainagent bindings of the same tool are untouched.
 //
-// NOTE: search_all_worker_traces / get_worker_trace are intentionally NOT unbound —
-// worker owns them for cross-work look-back (see WorkerTools). They used to be in this
-// list back when worker lacked them; seedWorkerCrossTraceRebind repairs DBs whose old
-// v1 run stripped them.
+// NOTE: search_all_worker_traces / get_worker_trace / node_detail are intentionally NOT
+// unbound — worker owns them for cross-work look-back + node drill-down (see WorkerTools).
+// They used to be in this list back when worker lacked them; seedWorkerReadbackRebind
+// repairs DBs whose old run stripped them.
 func (s *Server) seedWorkerReadToolsUnbind() {
 	const flag = "worker_readtools_unbind_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
 	for _, k := range []string{
-		"list_facts", "node_detail", "list_companies", "list_worker_traces",
+		"list_facts", "list_companies", "list_worker_traces",
 	} {
 		if err := s.m.pg.RemoveAgentFromTool("worker", k); err != nil {
 			log.Printf("[worker] %s 从 worker 解绑失败: %v", k, err)
@@ -875,21 +875,21 @@ func (s *Server) seedWorkerReadToolsUnbind() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// seedWorkerCrossTraceRebind re-binds the cross-work look-back tools onto worker ONCE
-// (guarded by a settings flag): an earlier seedWorkerReadToolsUnbind (v1) wrongly
-// stripped search_all_worker_traces / get_worker_trace from worker after they had been
-// added to WorkerTools(), so any DB that ran that migration lost them. Fresh DBs already
-// have them via WorkerTools() and this is a harmless no-op there. One-shot + flag-guarded
-// so a user who later deliberately unbinds them isn't overridden.
-func (s *Server) seedWorkerCrossTraceRebind() {
-	const flag = "worker_crosstrace_rebind_v1"
+// seedWorkerReadbackRebind re-binds the cross-work look-back / drill-down tools onto
+// worker ONCE (guarded by a settings flag): an earlier seedWorkerReadToolsUnbind wrongly
+// stripped search_all_worker_traces / get_worker_trace / node_detail from worker after
+// they had been added to WorkerTools(), so any DB that ran that migration lost them.
+// Fresh DBs already have them via WorkerTools() and this is a harmless no-op there.
+// One-shot + flag-guarded so a user who later deliberately unbinds them isn't overridden.
+func (s *Server) seedWorkerReadbackRebind() {
+	const flag = "worker_readback_rebind_v2" // v2: 追加 node_detail
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
 	if err := s.m.pg.AddAgentToToolBinding("worker", []string{
-		"search_all_worker_traces", "get_worker_trace",
+		"search_all_worker_traces", "get_worker_trace", "node_detail",
 	}); err != nil {
-		log.Printf("[worker] 跨 work 回看工具补绑失败: %v", err)
+		log.Printf("[worker] 回看/详情工具补绑失败: %v", err)
 		return // 出错则不落 flag，下次启动重试
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
