@@ -1064,7 +1064,7 @@ export interface AgentDetail {
 export interface MCPServer {
   id: number;
   name: string;
-  transport: "stdio" | "http";
+  transport: "stdio" | "http" | "sse";
   command?: string;
   args: string[];
   env: Record<string, string>;

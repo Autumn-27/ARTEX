@@ -819,7 +819,7 @@ CREATE TABLE IF NOT EXISTS agent_prompt_vars (
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id          BIGSERIAL PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
-    transport   TEXT NOT NULL CHECK (transport IN ('stdio','http')),
+    transport   TEXT NOT NULL CHECK (transport IN ('stdio','http','sse')),
     command     TEXT,
     args        JSONB NOT NULL DEFAULT '[]',
     env         JSONB NOT NULL DEFAULT '{}',
@@ -829,6 +829,11 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Allow legacy MCP SSE servers on databases created before SSE support.
+ALTER TABLE mcp_servers DROP CONSTRAINT IF EXISTS mcp_servers_transport_check;
+ALTER TABLE mcp_servers ADD CONSTRAINT mcp_servers_transport_check
+    CHECK (transport IN ('stdio','http','sse'));
 -- 旧库补列(schema.sql 每次启动都会 Exec)。
 ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS insecure BOOLEAN NOT NULL DEFAULT false;
 DROP TRIGGER IF EXISTS trg_mcp_upd ON mcp_servers;
