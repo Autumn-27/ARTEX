@@ -246,6 +246,9 @@ func TestFindingWorkflowMigrationPreservesUserConfiguration(t *testing.T) {
 	}
 	search, _ := pg.GetTool("traffic_search")
 	get, _ := pg.GetTool("traffic_get")
+	if !strings.Contains(search.Description, "支持裸主机、主机:端口或完整 URL") {
+		t.Fatal("traffic_search description migration missing host/port guidance")
+	}
 	if search.Enabled || !contains(search.Agents, "reporter") || get.Enabled || len(get.Agents) != 1 || get.Agents[0] != "custom-agent" {
 		t.Fatal("default/custom reader binding migration incorrect")
 	}
