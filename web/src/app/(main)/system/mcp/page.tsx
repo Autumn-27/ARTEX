@@ -23,7 +23,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import type { MCPServer, MCPTool, Agent } from "@/lib/types";
 
-type Transport = "stdio" | "http";
+type Transport = "stdio" | "http" | "sse";
 type FormState = {
   name: string;
   transport: Transport;
@@ -86,7 +86,10 @@ export default function MCPPage() {
       const trimmed = line.trim();
       if (!trimmed) continue;
       const idx = trimmed.indexOf("=");
-      if (idx > 0) out[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
+      if (idx > 0) {
+        const key = trimmed.slice(0, idx).trim();
+        if (key) out[key] = trimmed.slice(idx + 1).trim();
+      }
     }
     return out;
   }
@@ -140,16 +143,16 @@ export default function MCPPage() {
       toast.error("请填写命令");
       return;
     }
-    if (form.transport === "http" && !form.url.trim()) {
+    if (form.transport !== "stdio" && !form.url.trim()) {
       toast.error("请填写远程 URL");
       return;
     }
     setSaving(true);
     try {
       const base =
-        form.transport === "http"
+        form.transport !== "stdio"
           ? {
-              transport: "http" as const,
+              transport: form.transport,
               url: form.url.trim(),
               command: "",
               args: [] as string[],
@@ -245,6 +248,13 @@ export default function MCPPage() {
             >
               http（远程）
             </Button>
+            <Button
+              type="button"
+              variant={form.transport === "sse" ? "default" : "outline"}
+              onClick={() => setF({ transport: "sse" })}
+            >
+              sse（旧版）
+            </Button>
           </div>
         </div>
         <div className="grid gap-2">
@@ -300,7 +310,7 @@ export default function MCPPage() {
         )}
         <div className="grid gap-2">
           <Label htmlFor="m-env">
-            {form.transport === "http"
+            {form.transport !== "stdio"
               ? "请求头（每行 KEY=VALUE，如 Authorization=Bearer xxx）"
               : "环境变量（每行 KEY=VALUE）"}
           </Label>
@@ -308,7 +318,7 @@ export default function MCPPage() {
             id="m-env"
             className="font-mono"
             placeholder={
-              form.transport === "http" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"
+              form.transport !== "stdio" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"
             }
             value={form.env}
             onChange={(e) => setF({ env: e.target.value })}

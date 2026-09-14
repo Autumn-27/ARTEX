@@ -101,6 +101,11 @@ docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
+远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
+旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
+`/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
+`Authorization=Bearer <token>` 填写。
+
 ### 方式三：下载预编译二进制（Releases）
 
 到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
