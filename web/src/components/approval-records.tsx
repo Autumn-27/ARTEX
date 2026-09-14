@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { TablePagination } from "@/components/table-pagination";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -464,6 +465,9 @@ function ApprovalTable({
 
 export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [rows, setRows] = React.useState<InterceptApprovalRow[]>([]);
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(20);
+  const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -472,14 +476,24 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const request = React.useRef(0);
   const decisionLock = React.useRef(false);
 
+  // A task can stay mounted while the user switches between task details.
+  // Reset the cursor so the new scope always starts at its newest records.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: taskId intentionally resets pagination when scope changes.
+  React.useEffect(() => {
+    setPage(1);
+  }, [taskId]);
+
   const load = React.useCallback(
     async (manual = false) => {
       const id = ++request.current;
       if (manual) setRefreshing(true);
       try {
-        const items = taskId ? await api.interceptTask(taskId) : await api.interceptHistory();
+        const result = taskId
+          ? await api.interceptTaskPage(taskId, page, pageSize)
+          : await api.interceptHistoryPage(page, pageSize);
         if (id !== request.current) return;
-        setRows(items);
+        setRows(result.items);
+        setTotal(result.total);
         setError("");
         if (manual) setRevision((v) => v + 1);
       } catch (e) {
@@ -491,7 +505,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         }
       }
     },
-    [taskId],
+    [taskId, page, pageSize],
   );
 
   React.useEffect(() => {
@@ -502,6 +516,11 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       clearInterval(timer);
     };
   }, [load]);
+
+  const changePageSize = (next: number) => {
+    setPageSize(next);
+    setPage(1);
+  };
 
   const decide: Decide = async (id, decision) => {
     if (decisionLock.current) return;
@@ -556,9 +575,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         </section>
       ) : null}
       <section className="overflow-hidden rounded-xl border">
-        <div className="border-b px-4 py-3 font-medium text-sm">
-          {taskId ? "全部记录" : "最近记录"}（{rows.length}）
-        </div>
+        <div className="border-b px-4 py-3 font-medium text-sm">全部记录（{total}）</div>
         {loading ? (
           <div className="flex flex-col gap-3 p-4">
             <Skeleton className="h-10 w-full" />
@@ -579,6 +596,16 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         ) : null}
         {rows.length ? (
           <ApprovalTable rows={rows} busy={deciding} decide={decide} revision={revision} label="审批记录列表" />
+        ) : null}
+        {!loading && !error ? (
+          <TablePagination
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            onPageChange={setPage}
+            onPageSizeChange={changePageSize}
+            pageSizeOptions={[10, 20, 50]}
+          />
         ) : null}
       </section>
     </div>

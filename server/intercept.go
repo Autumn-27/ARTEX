@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -234,7 +235,21 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 400, "bad task id")
 		return
 	}
-	items, err := pg.ListTaskIntercepts(taskID)
+	q := r.URL.Query()
+	if q.Get("page") == "" && q.Get("size") == "" {
+		items, err := pg.ListTaskIntercepts(taskID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if items == nil {
+			items = []db.InterceptApprovalRow{}
+		}
+		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
+		return
+	}
+	page, size := interceptPageParams(q)
+	items, total, err := pg.ListTaskInterceptsPage(taskID, page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -242,7 +257,7 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 	if items == nil {
 		items = []db.InterceptApprovalRow{}
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
 }
 
 func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +265,21 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	items, err := pg.ListAllIntercepts(200)
+	q := r.URL.Query()
+	if q.Get("page") == "" && q.Get("size") == "" {
+		items, err := pg.ListAllIntercepts(200)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if items == nil {
+			items = []db.InterceptApprovalRow{}
+		}
+		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
+		return
+	}
+	page, size := interceptPageParams(q)
+	items, total, err := pg.ListAllInterceptsPage(page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -258,7 +287,22 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []db.InterceptApprovalRow{}
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
+}
+
+func interceptPageParams(q url.Values) (int, int) {
+	page := atoiDefault(q.Get("page"), 1)
+	size := atoiDefault(q.Get("size"), 20)
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+	return page, size
 }
 
 func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
