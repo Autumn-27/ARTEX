@@ -1063,8 +1063,22 @@ export const api = {
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
   interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
+  interceptHistoryPage: (page = 1, size = 20) =>
+    get<{ items: InterceptApprovalRow[]; total?: number }>(`/intercept/history?page=${page}&size=${size}`).then(
+      (r) => ({
+        items: arr(r.items),
+        total: r.total ?? r.items?.length ?? 0,
+      }),
+    ),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
+  interceptTaskPage: (taskId: string, page = 1, size = 20) =>
+    get<{ items: InterceptApprovalRow[]; total?: number }>(
+      `/intercept/task/${encodeURIComponent(taskId)}?page=${page}&size=${size}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? r.items?.length ?? 0,
+    })),
 
   // ---- intercept tool-config (全局工具拦截范围) ----
   interceptGetToolConfig: async (): Promise<{ enabled_tools: string[] }> => {
