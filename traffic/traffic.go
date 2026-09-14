@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,11 @@ const (
 	// floods the agent's context.
 	maxBlobRead = 8 * 1024
 )
+
+// TrafficSearchDescription is persisted into the tool catalog for new and
+// upgraded installations. Keep it in the traffic package so the runtime tool
+// and the catalog migration cannot drift apart.
+const TrafficSearchDescription = "查询记录代理已抓取的目标流量（必须指定 host；支持裸主机、主机:端口或完整 URL，可再按 URL 子串或正文关键词过滤）。指定端口时只返回该服务的流量，避免同一 IP 的不同端口串包。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符）。仅返回极轻量索引(id/method/url/status/resp_len)，不含响应内容；结果非空后必须用 traffic_get 逐条核实请求/响应，再把确实支持当前漏洞的 ID 交给 bind_finding_traffic。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页。"
 
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
@@ -1474,8 +1480,24 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 	q := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges WHERE 1=1`
 	args := []any{}
 	if host != "" {
+		hostName, port, err := normalizeSearchHost(host)
+		if err != nil {
+			return nil, err
+		}
 		q += ` AND host=?`
-		args = append(args, host)
+		args = append(args, hostName)
+		if port != "" {
+			// Recorded rows historically store URL.Hostname() (without the port),
+			// so constrain the original URL authority as a compatibility fallback.
+			// New and old captures therefore share the same search contract.
+			authority := net.JoinHostPort(hostName, port)
+			q += ` AND (url LIKE ? OR url LIKE ? OR url LIKE ?)`
+			args = append(args,
+				"%://"+authority+"/%",
+				"%://"+authority+"?%",
+				"%://"+authority,
+			)
+		}
 	}
 	if contains != "" {
 		q += ` AND (url LIKE ? OR url_template LIKE ?)`
@@ -1510,6 +1532,42 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 	return out, rows.Err()
 }
 
+// normalizeSearchHost accepts the forms agents commonly have at hand while
+// keeping the stored host (URL.Hostname()) as the canonical host key. A port,
+// when supplied, is applied to the URL authority so captures from different
+// services on the same IP cannot be mixed.
+func normalizeSearchHost(raw string) (host, port string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", errors.New("host 为必填参数")
+	}
+	if strings.Contains(raw, "://") {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil || u.Host == "" {
+			return "", "", fmt.Errorf("无法解析 host：%q", raw)
+		}
+		host, port = u.Hostname(), u.Port()
+	} else if h, p, splitErr := net.SplitHostPort(raw); splitErr == nil {
+		host, port = h, p
+	} else if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+	} else {
+		host = raw
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return "", "", fmt.Errorf("无法解析 host：%q", raw)
+	}
+	if port != "" {
+		p, parseErr := strconv.Atoi(port)
+		if parseErr != nil || p < 1 || p > 65535 {
+			return "", "", fmt.Errorf("端口无效：%q", port)
+		}
+		port = strconv.Itoa(p)
+	}
+	return strings.ToLower(host), port, nil
+}
+
 // Tools exposes traffic lookup to work agents so they query already-captured
 // traffic instead of re-curling the same resource (token + dedup win).
 func (t *Traffic) Tools() []actool.CoreTool {
@@ -1520,11 +1578,11 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	search := actool.Build(actool.Spec{
 		Name:        "traffic_search",
-		Description: "查询记录代理已抓取的目标流量（必须指定 host，可再按 URL 子串或正文关键词过滤）。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符），可用来找响应里的密码、密钥、报错、内网地址等。仅返回极轻量索引(id/method/url/status/resp_len)，不含任何响应内容。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页（page=0 起）；要看某条的请求/响应原文用 traffic_get(id)。回看已访问资源、找端点先用它，避免重复 curl 同一 URL。",
+		Description: TrafficSearchDescription,
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"host":          map[string]any{"type": "string", "description": "按主机过滤（必填，如 '107.172.96.177:8082'）"},
+				"host":          map[string]any{"type": "string", "description": "按主机过滤（必填；如 '107.172.96.177'、'107.172.96.177:8082' 或 'http://107.172.96.177:8082/path'）"},
 				"contains":      map[string]any{"type": "string", "description": "URL 子串过滤（可选，如 'api' / 'login'）"},
 				"body_contains": map[string]any{"type": "string", "description": "正文全文搜索（可选，至少 3 个字符），匹配请求/响应的头与正文，如 'password' / 'root:x:0' / '内网测试'"},
 				"limit":         map[string]any{"type": "integer", "description": "每页条数，默认 3，最大 10"},
@@ -1543,7 +1601,7 @@ func (t *Traffic) Tools() []actool.CoreTool {
 			}
 			_ = json.Unmarshal(in, &a)
 			if strings.TrimSpace(a.Host) == "" {
-				return actool.Errorf("host 为必填参数：请指定要查询的主机（如 '107.172.96.177:8082'），避免全库扫描。"), nil
+				return actool.Errorf("host 为必填参数：请指定裸主机、主机:端口或完整 URL，避免全库扫描。"), nil
 			}
 			rows, err := t.query(a.Host, a.Contains, a.BodyContains, a.Page, a.Limit)
 			if err != nil {
