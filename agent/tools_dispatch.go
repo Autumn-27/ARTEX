@@ -69,7 +69,7 @@ func (t *ToolSet) CancelIntentTool() actool.CoreTool { return t.cancelIntentTool
 // db.ExplorationStore.CancelOpenIntent:open → stopped,作废原因挂图留痕(审计),
 // 不销毁数据。running 的意图被拒绝(那种用 kill_work)。
 func (t *ToolSet) cancelIntentTool() actool.CoreTool {
-	return writeTool("cancel_intent", "作废一条【尚未开始(open)】的意图:状态置为 stopped、不再被 worker 领取,作废原因作为事实挂图留痕。用于清理 frontier 里过期/重复/不再需要的积压方向。\n"+
+	return t.writeExpTool("cancel_intent", "作废一条【尚未开始(open)】的意图:状态置为 stopped、不再被 worker 领取,作废原因作为事实挂图留痕。用于清理 frontier 里过期/重复/不再需要的积压方向。\n"+
 		"与 steer_work / kill_work 的区别:steer_work 是【不打断】的实时纠偏;kill_work 是【立即终止】正在运行(running)的意图;cancel_intent 只作废【未开始(open)】的——对 running 的意图无效(那种用 kill_work)。",
 		obj(map[string]any{
 			"intent_id": idp("要作废的意图 id(必须处于 open 未领取状态)"),
