@@ -198,7 +198,8 @@ func firstLine(s string, max int) string {
 }
 
 // Preserve the recorded session's visible messages, excluding thinking blocks.
-// This is audit context; it is not presented as input to the existing tool-only judge.
+// This is audit context; the judge receives only bounded, paired execution
+// evidence selected from it, never assistant prose or thinking blocks.
 func approvalHistory(messages []llm.Message) []db.InterceptContextEntry {
 	var entries []db.InterceptContextEntry
 	for _, message := range messages {

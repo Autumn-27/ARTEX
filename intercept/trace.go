@@ -159,6 +159,7 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 	}
 	a.InitialAction, a.InitialReason = dec.Action, dec.Message
 	a.ModelFallback = dec.ModelFallback
+	a.ModelInput, a.ModelInputDigest = dec.ModelInput, dec.ModelInputDigest
 	a.RuleName, a.ConfigDigest, a.ProfileID = dec.RuleName, dec.ConfigDigest, dec.ProfileID
 	a.ExecutionStatus = "not_started"
 	if status == "allowed" {
@@ -175,6 +176,7 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 		// The ask path builds its audit in HandleAsk and is unaffected.
 		a.UserMessage, a.UserTruncated = "", false
 		a.Context, a.ContextTruncated = nil, false
+		a.ModelInput = nil // Keep the digest, not another per-allow replay snapshot.
 	}
 	if status == "denied" {
 		a.EffectiveAction, a.ExecutionStatus = "deny", "not_executed"

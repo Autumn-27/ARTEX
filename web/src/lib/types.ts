@@ -1282,6 +1282,8 @@ export interface LLMTask {
 
 // Immutable review snapshot plus separately recorded execution outcome.
 export interface InterceptAudit {
+  model_input?: Record<string, unknown>;
+  model_input_digest?: string;
   run_id?: string;
   tool_use_id?: string;
   correlation: "exact" | "ambiguous" | "unavailable";

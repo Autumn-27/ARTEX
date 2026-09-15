@@ -137,21 +137,27 @@ function DecisionActions({ row, busy, decide }: { row: InterceptApprovalRow; bus
   );
 }
 
-function ApprovalDetail({
+export function ApprovalDetail({
   row,
   busy,
   decide,
   revision,
+  readOnly = false,
+  defaultExpanded = false,
+  onResolved,
 }: {
   row: InterceptApprovalRow;
   busy: boolean;
   decide: Decide;
   revision: number;
+  readOnly?: boolean;
+  defaultExpanded?: boolean;
+  onResolved?: (status: "allowed" | "denied" | "timeout") => void;
 }) {
   const [detail, setDetail] = React.useState<InterceptDetail | null>(null);
   const [error, setError] = React.useState("");
   const [retry, setRetry] = React.useState(0);
-  const [more, setMore] = React.useState(false);
+  const [more, setMore] = React.useState(defaultExpanded);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Status, refresh and retry invalidate details without closing the panel.
   React.useEffect(() => {
@@ -163,6 +169,7 @@ function ApprovalDetail({
         if (cancelled) return;
         setDetail(next);
         setError("");
+        if (next.status !== "pending") onResolved?.(next.status);
         if (next.status === "pending" || next.audit?.execution_status === "awaiting_result")
           timer = setTimeout(() => void load(), 5000);
       } catch (e) {
@@ -174,7 +181,7 @@ function ApprovalDetail({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [row.id, row.status, revision, retry]);
+  }, [row.id, row.status, revision, retry, onResolved]);
 
   // Row updates are authoritative until the lazy detail has caught up.
   const current = detail?.status === row.status ? detail : row;
@@ -191,7 +198,7 @@ function ApprovalDetail({
       <div className="grid min-w-0 gap-5 rounded-xl border bg-muted/20 p-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">
           <CodeBlock
-            label={`${row.agent_name || row.conv_agent_key || "Agent"} · 工具请求`}
+            label={`${current.agent_name || current.conv_agent_key || "Agent"} · 工具请求`}
             text={JSON.stringify(row.tool_input ?? {}, null, 2)}
           />
           {command ? (
@@ -227,7 +234,7 @@ function ApprovalDetail({
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">来源</dt>
             <dd className="break-words">
-              {row.conv_title || (row.task_id ? `任务 ${row.task_id}` : row.agent_name || "未记录")}
+              {current.conv_title || (current.task_id ? `任务 ${current.task_id}` : current.conversation_id ? `对话 #${current.conversation_id}` : current.agent_name || "未记录")}
             </dd>
             <dt className="text-muted-foreground">申请时间</dt>
             <dd>{fmtTime(row.created_at)}</dd>
@@ -246,7 +253,7 @@ function ApprovalDetail({
               </>
             ) : null}
           </dl>
-          <DecisionActions row={current} busy={busy} decide={decide} />
+          {!readOnly ? <DecisionActions row={current} busy={busy} decide={decide} /> : null}
         </div>
       </div>
       {error ? (
@@ -281,7 +288,7 @@ function ApprovalDetail({
               <section className="flex min-w-0 flex-col gap-3">
                 <h3 className="font-medium text-muted-foreground text-xs">可见会话上下文</h3>
                 <p className="text-muted-foreground text-xs">
-                  保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型审批目前仅接收工具名称和参数。
+                  保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型实际使用的内容以“模型审查输入”为准。
                 </p>
                 {audit.context_truncated ? (
                   <p className="text-muted-foreground text-xs">仅保存最近的上下文，部分内容已截断。</p>
@@ -299,6 +306,15 @@ function ApprovalDetail({
                   <p className="text-muted-foreground text-sm">未记录可关联的上下文</p>
                 )}
               </section>
+              {audit.model_input ? (
+                <CodeBlock label="模型审查输入" text={JSON.stringify(audit.model_input, null, 2)} />
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  {audit.model_input_digest
+                    ? "本次自动放行仅保留审查输入指纹，未保存完整模型输入。"
+                    : "此记录未保存模型审查输入，可能由规则直接裁决或产生于旧版本。"}
+                </p>
+              )}
               <CodeBlock
                 label={`${initialLabel}：${actionLabels[audit.initial_action] ?? audit.initial_action}`}
                 text={audit.initial_reason.replace(/^\[模型\]\s*/, "")}
@@ -321,6 +337,7 @@ function ApprovalDetail({
                 <div>工具调用 ID：{audit.tool_use_id || "未记录"}</div>
                 <div>参数摘要 SHA-256：{audit.input_digest}</div>
                 <div>审查配置指纹 SHA-256：{audit.config_digest || "未记录"}</div>
+                {audit.model_input_digest ? <div>模型审查输入 SHA-256：{audit.model_input_digest}</div> : null}
                 {audit.execution_ended_at ? <div>结果记录时间：{fmtTime(audit.execution_ended_at)}</div> : null}
               </dl>
             </div>
