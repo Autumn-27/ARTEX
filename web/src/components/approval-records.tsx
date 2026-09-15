@@ -44,6 +44,12 @@ function source(row: InterceptApprovalRow) {
   return row.reason?.startsWith("[模型]") ? "model" : "unknown";
 }
 
+function originLabel(row: InterceptApprovalRow) {
+  if (row.task_id) return row.task_id;
+  if (row.conversation_id) return `对话 #${row.conversation_id}`;
+  return "—";
+}
+
 function StatusBadge({ status }: { status: string }) {
   const labels: Record<string, string> = { pending: "待审批", allowed: "已允许", denied: "已拒绝", timeout: "已超时" };
   let variant: "default" | "destructive" | "secondary" | "outline" = "outline";
@@ -293,14 +299,7 @@ export function ApprovalDetail({
           {audit?.effective_action ? <p className="text-sm">最终动作：{actionLabels[audit.effective_action]}</p> : null}
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">来源</dt>
-            <dd className="break-words">
-              {current.conv_title ||
-                (current.task_id
-                  ? `任务 ${current.task_id}`
-                  : current.conversation_id
-                    ? `对话 #${current.conversation_id}`
-                    : current.agent_name || "未记录")}
-            </dd>
+            <dd className="break-words">{current.task_id ? `任务 ${current.task_id}` : originLabel(current)}</dd>
             <dt className="text-muted-foreground">申请时间</dt>
             <dd>{fmtTime(row.created_at)}</dd>
             <dt className="text-muted-foreground">决定时间</dt>
@@ -526,8 +525,8 @@ function ApprovalTable({
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
                   <div className="flex flex-col gap-1">
-                    <span className="truncate" title={row.conv_title || row.task_id}>
-                      {row.conv_title || row.task_id || "—"}
+                    <span className="truncate" title={originLabel(row)}>
+                      {originLabel(row)}
                     </span>
                     <span className="truncate text-muted-foreground text-xs">
                       {row.agent_name || row.conv_agent_key}
