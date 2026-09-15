@@ -21,7 +21,8 @@ func noaWarn(session string) func(string) {
 // 一次,故切换只影响之后启动的 run,无需重建 agent。
 
 // enableNoa 在解析器报告开启时把 noa 接入 opts。archiveRoot 是压缩原文的持久化基目录
-// (取各 agent 本 run 的工作目录,任务级持久),sessionID 命名其下的归档子目录。
+// (取全局 workDir,各 agent 统一落在 <workDir>/noa 下,不随任务/意图目录分散),sessionID
+// 命名其下的归档子目录(全局唯一,故同一基目录内不冲突)。
 //
 // noa 是实验功能:接入失败不得中断真实任务。发生错误时经 onWarn 上报并回退内置压缩。
 // 启用成功时清掉 opts.Compaction,避免 agentcore 因「两个上下文管理器同时设置」告警。
