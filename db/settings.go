@@ -25,6 +25,13 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, key
 	return err
 }
 
+// DeleteSetting removes a setting row; a missing key is not an error.
+// (F6: refresh token 旋转/登出时删除哈希记录。)
+func (d *DB) DeleteSetting(key string) error {
+	_, err := d.Exec(`DELETE FROM settings WHERE key=$1`, key)
+	return err
+}
+
 // GetBool returns the boolean setting, or def when unset/unparseable.
 func (d *DB) GetBool(key string, def bool) bool {
 	v, ok, err := d.GetSetting(key)

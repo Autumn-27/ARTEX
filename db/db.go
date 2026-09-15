@@ -88,6 +88,28 @@ func DSN() (dsn, source string, err error) {
 	return config.PostgresDSN()
 }
 
+// Probe 轻量只读预检（artex doctor 用）：连接 + ping，通了就顺手只读统计
+// LLM profile 数。与 Open 不同，这里不做任何迁移/seed/写操作。
+// 返回 (llmProfiles, err)：err 非 nil 是连接失败；llmProfiles < 0 表示连上了
+// 但查不到（如库还没初始化，llm_profiles 表不存在）。
+func Probe(dsn string) (int, error) {
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return -1, err
+	}
+	defer sqlDB.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return -1, err
+	}
+	var n int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM llm_profiles`).Scan(&n); err != nil {
+		return -1, nil
+	}
+	return n, nil
+}
+
 // DB wraps the shared *sql.DB. PG handles its own connection pool + concurrency
 // (MVCC), so unlike the old SQLite store there is no process-wide write mutex.
 type DB struct{ *sql.DB }
@@ -191,6 +213,14 @@ var builtinAgents = []builtinAgent{
 	{"worker", "执行", "worker", "领取一条意图执行，把发现的事实/漏洞写回知识图谱后停止。", []promptVar{
 		{"ProxyAddr", "记录代理地址(驱动 if 双文案)", "127.0.0.1:8080", "runtime"},
 		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
+		{"Intranet", "是否内网期(有立足点会话/活跃隧道)", "true", "runtime"},
+	}, false, nil},
+	// worker.intranet:期 4 内网期 worker 提示词变体——不是独立 agent,只是 worker
+	// 正文的 DB 覆盖槽位(有立足点/隧道的任务渲染时优先取它,见 agent.renderSystemVariant)。
+	{"worker.intranet", "执行·内网", "worker", "worker 的内网期提示词变体：任务存在立足点会话/活跃隧道时代替 worker 正文。", []promptVar{
+		{"ProxyAddr", "记录代理地址(驱动 if 双文案)", "127.0.0.1:8080", "runtime"},
+		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
+		{"Intranet", "是否内网期(有立足点会话/活跃隧道)", "true", "runtime"},
 	}, false, nil},
 	// Auto:内置「平台操作」agent。不参与渗透编排循环,经对话页驱动,用工具操作平台。
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
@@ -260,6 +290,21 @@ ON CONFLICT (name) DO NOTHING`,
 	}
 	if err := d.seedDefaultInterceptRulesV2(); err != nil {
 		return fmt.Errorf("seed intercept rules v2: %w", err)
+	}
+	if err := d.seedDefaultInterceptRulesV3(); err != nil {
+		return fmt.Errorf("seed intercept rules v3: %w", err)
+	}
+	if err := d.seedDefaultInterceptRulesV4(); err != nil {
+		return fmt.Errorf("seed intercept rules v4: %w", err)
+	}
+	if err := d.seedDefaultInterceptRulesV5(); err != nil {
+		return fmt.Errorf("seed intercept rules v5: %w", err)
+	}
+	if err := d.seedDefaultInterceptRulesV6(); err != nil {
+		return fmt.Errorf("seed intercept rules v6: %w", err)
+	}
+	if err := d.seedDefaultInterceptRulesV7(); err != nil {
+		return fmt.Errorf("seed intercept rules v7: %w", err)
 	}
 	return nil
 }
@@ -530,4 +575,219 @@ ON CONFLICT DO NOTHING`,
 		}
 	}
 	return d.SetSetting("intercept_default_rules_v2", "done")
+}
+
+// stageShareHint 是临时 HTTP 服务拦截规则的统一放行提示(指向受管替代方案)。
+const stageShareHint = "临时 HTTP 服务易遗忘暴露(无 TTL、任务结束即成孤儿、目录里常混有战利品与凭据)。请改用 stage_share 工具投递文件(受管暂存:随机 token 路径、硬 TTL 到期自动销毁、可一次性即焚)。"
+
+// builtinHTTPServerRules 是 F13 的平台底线规则(pattern 均为 tool_input 正则,
+// action=ask, builtin=true)。提成包级变量:既给 seed 用,也给无 PG 的正则单测用。
+var builtinHTTPServerRules = []struct {
+	name    string
+	pattern string
+}{
+	{
+		name:    "[内置] 临时 HTTP 服务: python -m http.server",
+		pattern: `(?i)\bpython[0-9.]*\s+-m\s+(?:http\.server|SimpleHTTPServer)\b`,
+	},
+	{
+		name:    "[内置] 临时 HTTP 服务: php -S",
+		pattern: `(?i)\bphp[0-9.]*\s+-S\b`,
+	},
+	{
+		name:    "[内置] 临时 HTTP 服务: busybox httpd",
+		pattern: `(?i)\bbusybox\s+httpd\b`,
+	},
+	{
+		name:    "[内置] 临时 HTTP 服务: ruby -run -e httpd",
+		pattern: `(?i)\bruby\b[^\n|;]{0,60}-e\s+httpd\b`,
+	},
+	{
+		name:    "[内置] 临时 HTTP 服务: npx serve / http-server",
+		pattern: `(?i)\bnpx\s+(?:-y\s+|--yes\s+)?(?:serve|http-server)\b`,
+	},
+}
+
+// seedDefaultInterceptRulesV3 堵「野路子 HTTP 服务投递」(F13):worker 用 Bash 自行
+// python3 -m http.server / php -S / busybox httpd / npx serve 起临时服务投递武器,
+// 平台零感知、无 TTL,任务结束即成对全网开放的孤儿。这批是【平台底线规则】:
+// builtin=true,禁止删除/禁用(DeleteInterceptRule/ToggleInterceptRule 拒绝)。
+// action=ask 而非 deny:确有合理场景(如目标必须回连特定端口)可人工放行一次。
+func (d *DB) seedDefaultInterceptRulesV3() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v3"); v == "done" {
+		return nil
+	}
+	for _, r := range builtinHTTPServerRules {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin)
+VALUES ($1, true, 85, 'tool_input', 'regex', $2, 'ask', $3, false, 60, 'deny', true)
+ON CONFLICT DO NOTHING`,
+			r.name, r.pattern, stageShareHint,
+		); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// lateralHint 是横向/喷洒拦截规则的统一提示(内网 blast radius 远大于外网:
+// 喷洒可锁死全域账号、SMB 打爆终端,见 INTRANET-PIVOT-DESIGN.md §6.3)。
+const lateralHint = "横向移动/口令喷洒属高动静动作(可锁死账号、触发告警),需人工确认,且须确认目标在 RoE 范围内(新网段≠已授权,先登记 task scope)。"
+
+// builtinLateralRules 是内网期 2 的平台底线规则(§4.4:喷洒/爆破动作必须过 guard
+// ask;F13 同模式:pattern 均为 tool_input 正则,action=ask,builtin=true)。
+//
+// 取舍说明:hashcat 不列入——它是本地破密工具,只有命令行同时出现目标 host 才该
+// 拦,而「任意 hashcat 参数里含 IP/域名」用正则表达会大量误伤本地破解场景
+// (字典/掩码路径常含点分数字),宁可不列、在工具与提示侧约束,也不做半吊子拦截。
+var builtinLateralRules = []struct {
+	name    string
+	pattern string
+}{
+	{
+		name:    "[内置] 口令喷洒/爆破: crackmapexec/nxc",
+		pattern: `(?i)\b(?:crackmapexec|cme|nxc|netexec)\b`,
+	},
+	{
+		name:    "[内置] 口令喷洒/爆破: hydra",
+		pattern: `(?i)\bhydra\b`,
+	},
+	{
+		name:    "[内置] 口令喷洒/爆破: medusa",
+		pattern: `(?i)\bmedusa\b`,
+	},
+	{
+		name:    "[内置] 横向执行: psexec/wmiexec/smbexec",
+		pattern: `(?i)\b(?:psexec|wmiexec|smbexec|atexec|dcomexec)(?:\.py)?\b`,
+	},
+	{
+		name:    "[内置] 域 Kerberos 枚举/喷洒: kerbrute",
+		pattern: `(?i)\bkerbrute\b`,
+	},
+}
+
+// builtinTunnelBinaryRules 拦「裸用隧道二进制」(内网期 3 实战教训):worker 绕过
+// tunnel_deploy 直接用 chisel/frp 等建隧道——无台账、无健康看护、无自动回收,
+// 违反受管资源原则(INTRANET-PIVOT-DESIGN.md 4.3a)。平台底线规则,builtin=true。
+var builtinTunnelBinaryRules = []struct {
+	name    string
+	pattern string
+}{
+	{
+		name: "[内置] 裸用隧道工具(改用 tunnel_deploy): chisel/frp/ligolo/suo5 等",
+		// 只拦"作为命令执行"(行首/管道/分号/sudo 后,可带路径),
+		// 不拦文本中提及该词(grep/cat/readme 诊断场景,实战误伤教训)。
+		// suo5 在列:平台 tunnel_deploy 自己起 CLI 走 Go exec,不过 tool_input 拦截,
+		// 天然豁免;worker 裸 Bash 起 suo5 仍拦(无台账/看护/回收)。
+		pattern: `(?i)(?:^|[|;&]\s*|&&\s*|\|\|\s*|sudo\s+)(?:\S*/)?(?:chisel|frpc|frps|ligolo(?:-ng)?|nps|npc|stowaway|iodine|dnscat2?|suo5)\b`,
+	},
+}
+
+// tunnelBinaryHint 是裸用隧道工具被 ask 拦截时给模型的人工审批提示。
+const tunnelBinaryHint = "裸用隧道二进制没有台账/健康看护/自动回收,违反受管资源原则。" +
+	"建隧道请改用 tunnel_deploy(内建投递/验证/看护),临时文件投递用 stage_share。" +
+	"确需裸用的授权场景可人工放行一次。"
+
+// builtinProtocolClientRules 拦「起手就手写协议客户端」(工具纪律的 guard 兜底):
+// 红日3 复盘里 worker 手写 MySQL/SMB/TDS/Kerberos 裸 socket 客户端,产出错误 fact 污染
+// 规划。已装工具(gogo/naabu/httpx/katana/impacket 等)与平台工具必须先用,手搓是最后
+// 妥协。action=ask 而非 deny:确有授权场景(工具全覆盖不到)可人工放行一次。
+var builtinProtocolClientRules = []struct {
+	name    string
+	pattern string
+}{
+	{
+		name:    "[内置] 自研协议客户端(先用已装工具): socket+协议特征",
+		pattern: `(?is)(import\s+socket|from\s+socket\s+import|socket\.create_connection)[\s\S]{0,600}(smb2?|mysql|postgres|mssql|tds|kerberos|krb5|ldap|ntlm|dcerpc|ncacn|drsuapi)`,
+	},
+}
+
+// protocolClientHint 是自研协议客户端被 ask 拦截时给模型的人工审批提示。
+const protocolClientHint = "检测到自研协议客户端迹象。工具纪律:协议交互/扫描必须先用已装工具(gogo/naabu/httpx/katana/impacket)与平台工具。" +
+	"确认这些工具都无法完成后,人工可放行一次;放行时请在 fact 写明哪个工具不行、为什么。"
+
+// seedDefaultInterceptRulesV6 拦「起手手写协议客户端」(工具纪律 guard 兜底,平台底线规则)。
+func (d *DB) seedDefaultInterceptRulesV6() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v6"); v == "done" {
+		return nil
+	}
+	for _, r := range builtinProtocolClientRules {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin)
+VALUES ($1, true, 88, 'tool_input', 'regex', $2, 'ask', $3, false, 60, 'deny', true)
+ON CONFLICT DO NOTHING`,
+			r.name, r.pattern, protocolClientHint,
+		); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v6", "done")
+}
+
+// seedDefaultInterceptRulesV5 拦「裸用隧道二进制」(内网期 3):隧道是长寿命受管资源,
+// 必须走 tunnel_deploy 进入台账,裸 Bash 起的隧道进程平台无法看护与回收。
+func (d *DB) seedDefaultInterceptRulesV5() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v5"); v == "done" {
+		return nil
+	}
+	for _, r := range builtinTunnelBinaryRules {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin)
+VALUES ($1, true, 87, 'tool_input', 'regex', $2, 'ask', $3, false, 60, 'deny', true)
+ON CONFLICT DO NOTHING`,
+			r.name, r.pattern, tunnelBinaryHint,
+		); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v5", "done")
+}
+
+// seedDefaultInterceptRulesV7 把 suo5 并入「裸用隧道工具」底线规则（suo5 适配器上线）:
+// 平台 tunnel_deploy 自己起 suo5 CLI 走 Go exec，不过 tool_input 拦截，天然豁免；
+// worker 裸 Bash 起 suo5 无台账/看护/回收，仍拦。已 seed 过 V5 的老库在此改名+换
+// 正则；新库 V5 已用新规则，UPDATE 0 行后 ON CONFLICT 兜底为空操作。
+func (d *DB) seedDefaultInterceptRulesV7() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v7"); v == "done" {
+		return nil
+	}
+	r := builtinTunnelBinaryRules[0]
+	res, err := d.Exec(`
+UPDATE intercept_rules SET name=$2, pattern=$3, message=$4
+WHERE name=$1 AND builtin=true`,
+		"[内置] 裸用隧道工具(改用 tunnel_deploy): chisel/frp/ligolo 等", r.name, r.pattern, tunnelBinaryHint)
+	if err != nil {
+		return fmt.Errorf("rule %q: %w", r.name, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin)
+VALUES ($1, true, 87, 'tool_input', 'regex', $2, 'ask', $3, false, 60, 'deny', true)
+ON CONFLICT DO NOTHING`,
+			r.name, r.pattern, tunnelBinaryHint); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v7", "done")
+}
+
+// seedDefaultInterceptRulesV4 拦「横向移动/口令喷洒类工具」(内网期 2):worker 直接
+// crackmapexec/nxc/hydra/medusa/psexec.py/kerbrute 打内网,动静大、可锁死全域账号,
+// 必须人工确认且在 RoE 范围内。这批是【平台底线规则】:builtin=true,禁止删除/禁用;
+// action=ask:确有授权场景可人工放行一次。
+func (d *DB) seedDefaultInterceptRulesV4() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v4"); v == "done" {
+		return nil
+	}
+	for _, r := range builtinLateralRules {
+		if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin)
+VALUES ($1, true, 86, 'tool_input', 'regex', $2, 'ask', $3, false, 60, 'deny', true)
+ON CONFLICT DO NOTHING`,
+			r.name, r.pattern, lateralHint,
+		); err != nil {
+			return fmt.Errorf("rule %q: %w", r.name, err)
+		}
+	}
+	return d.SetSetting("intercept_default_rules_v4", "done")
 }

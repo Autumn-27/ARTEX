@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 // CommandRecord is a paired tool_use + tool_result from the activity table
@@ -214,8 +215,27 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		r.Model, nullIfEmpty(r.ProfileName), r.SessionID, nullIfEmpty(r.TaskID), nullIfEmpty(r.Worker),
 		r.LatencyMs, r.InputTokens, r.OutputTokens, r.CacheRead, r.CacheWrite,
 		r.Status, nullIfEmpty(r.Error), nullIfEmpty(r.RequestBody), nullIfEmpty(r.ResponseBody),
-		nullIfEmpty(r.RawRequest), nullIfEmpty(r.RawResponse))
+		nullIfEmpty(capLLMRawBody(r.RawRequest)), nullIfEmpty(capLLMRawBody(r.RawResponse)))
 	return err
+}
+
+// llmRawBodyCap 是单条 raw_request / raw_response 的入库上限(1 MiB)。原始报文
+// 含完整 tool schemas,体积无界;超限部分截断并在行内追加标记,读取侧(GetLLMRecord)
+// 原样返回即可兼容——详情页看到标记就知道不是全量。
+const llmRawBodyCap = 1 << 20
+
+// capLLMRawBody truncates s to llmRawBodyCap bytes, appending an inline marker
+// with the original size. The cut is backed off to a UTF-8 boundary so the
+// stored TEXT stays valid.
+func capLLMRawBody(s string) string {
+	if len(s) <= llmRawBodyCap {
+		return s
+	}
+	cut := s[:llmRawBodyCap]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return fmt.Sprintf("%s\n[... truncated, original %d bytes ...]", cut, len(s))
 }
 
 // ListLLMRecords returns paginated LLM records with optional filters.
@@ -318,6 +338,17 @@ WHERE COALESCE(task_id,'') <> '' GROUP BY task_id ORDER BY MAX(id) DESC`)
 // match the page's task picker/filter uses. Returns rows deleted.
 func (d *DB) DeleteLLMRecords(task string) (int64, error) {
 	res, err := d.Exec(`DELETE FROM llm_records WHERE COALESCE(task_id,'') = $1`, task)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteLLMRecordsBefore removes every record with ts older than cutoff — the
+// retention cleanup (settings.llm_records_retention_days) drives it daily.
+// Returns rows deleted.
+func (d *DB) DeleteLLMRecordsBefore(cutoff time.Time) (int64, error) {
+	res, err := d.Exec(`DELETE FROM llm_records WHERE ts < $1`, cutoff)
 	if err != nil {
 		return 0, err
 	}
