@@ -12,6 +12,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type { Finding, FindingsPage } from "@/lib/types";
@@ -85,23 +86,25 @@ export function RetestsTab({ taskId }: { taskId: string }) {
             <CardTitle>选择漏洞{data ? ` · ${data.total}` : ""}</CardTitle>
             <CardDescription>查看本任务漏洞的复测记录，或发起新的复测。</CardDescription>
           </CardHeader>
-          <CardContent className="flex max-h-[32rem] flex-col gap-2 overflow-y-auto">
+          <CardContent className="flex max-h-[32rem] flex-col overflow-y-auto">
             {!loaded && !error ? <Skeleton className="h-24 w-full" /> : null}
-            {findings.map((finding) => (
-              <Button
-                key={finding.id}
-                variant={finding.id === selectedId ? "secondary" : "ghost"}
-                className="h-auto w-full shrink-0 flex-col items-start gap-2 whitespace-normal py-3 text-left"
-                aria-label={`选择漏洞：${findingLabel(finding)}`}
-                aria-pressed={finding.id === selectedId}
-                onClick={() => setSelectedId(finding.id)}
-              >
-                <span className="line-clamp-2 break-words">{findingLabel(finding)}</span>
-                <span className="flex flex-wrap items-center gap-2">
-                  <StatusBadge domain="severity" value={finding.severity} dot />
-                  <StatusBadge domain="finding" value={finding.status} dot />
-                </span>
-              </Button>
+            {findings.map((finding, index) => (
+              <React.Fragment key={finding.id}>
+                {index > 0 ? <Separator className="my-1" /> : null}
+                <Button
+                  variant={finding.id === selectedId ? "secondary" : "ghost"}
+                  className="h-auto w-full shrink-0 flex-col items-start gap-2 whitespace-normal py-3 text-left"
+                  aria-label={`选择漏洞：${findingLabel(finding)}`}
+                  aria-pressed={finding.id === selectedId}
+                  onClick={() => setSelectedId(finding.id)}
+                >
+                  <span className="line-clamp-2 break-words">{findingLabel(finding)}</span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <StatusBadge domain="severity" value={finding.severity} dot />
+                    <StatusBadge domain="finding" value={finding.status} dot />
+                  </span>
+                </Button>
+              </React.Fragment>
             ))}
             {loaded && findings.length === 0 ? (
               <Empty>
