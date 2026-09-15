@@ -24,6 +24,7 @@ import { toast } from "sonner";
 
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -490,6 +491,7 @@ function ChatView({
   onTitleMaybeChanged: () => void;
   onConvUpdated: () => void;
 }) {
+  const approvalFocus = useApprovalFocus({ conversationId: conv.id });
   const [messages, setMessages] = React.useState<Activity[]>([]);
   const [running, setRunning] = React.useState(false);
   const [input, setInput] = React.useState(initial?.input ?? "");
@@ -502,6 +504,7 @@ function ChatView({
   const earliestRef = React.useRef(0); // earliest loaded id — reverse-pagination anchor
   const hasMoreRef = React.useRef(false); // older history remains above the loaded window
   const loadingMoreRef = React.useRef(false); // guard: one scroll-up load at a time
+  const [historyLoaded, setHistoryLoaded] = React.useState(false);
   const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
@@ -539,6 +542,7 @@ function ChatView({
     hasMoreRef.current = false;
     setHasMore(false);
     setMessages([]);
+    setHistoryLoaded(false);
     setRunning(false);
     let live = true;
     api
@@ -551,9 +555,12 @@ function ChatView({
         hasMoreRef.current = r.hasMore;
         setHasMore(r.hasMore);
         setRunning((current) => current || r.running);
+        setHistoryLoaded(true);
       })
       .catch(() => {
-        /* The empty state remains usable when history loading fails. */
+        // A source link can retry history through its locator; ordinary chats
+        // retain the existing usable empty state on a transient failure.
+        if (live) setHistoryLoaded(true);
       });
     return () => {
       live = false;
@@ -597,6 +604,15 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
+  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
+    setMessages((prev) => mergeActivities(page.items, prev));
+    earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
+    hasMoreRef.current = page.hasMore;
+    setHasMore(page.hasMore);
+  }, []);
+  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const atBottomRef = React.useRef(true);
@@ -635,12 +651,13 @@ function ChatView({
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
+      if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) void loadEarlier(); // near top → pull an older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, loadEarlier]);
+  }, [viewport, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a conversation → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: changing conversations intentionally retriggers the scroll reset.
   React.useLayoutEffect(() => {
@@ -653,10 +670,10 @@ function ChatView({
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: message and running changes intentionally retrigger bottom anchoring.
   React.useLayoutEffect(() => {
-    if (!atBottomRef.current) return;
+    if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [messages, running, viewport]);
+  }, [messages, running, viewport, approvalFocus.state]);
 
   // Per-conversation token total, live — same accounting as the main-agent
   // console: completed runs' `result` sum + the in-progress run's latest `usage`.
@@ -770,6 +787,8 @@ function ChatView({
         </div>
       </div>
 
+      <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
+
       {/* messages */}
       <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
@@ -782,7 +801,7 @@ function ChatView({
               {hasMore && (
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
+              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
             </>
           )}
         </div>
@@ -1026,6 +1045,18 @@ export default function ChatPage() {
   const [convs, setConvs] = React.useState<Conversation[]>([]);
   const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
+  const [sourceRequested, setSourceRequested] = React.useState(false);
+  const [convsLoaded, setConvsLoaded] = React.useState(false);
+  const selectConversation = React.useCallback((id: number | null) => {
+    if (id !== selectedId) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("approval");
+      setSourceRequested(false);
+      window.history.replaceState(null, "", url);
+    }
+    setSelectedId(id);
+  }, [selectedId]);
+
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
   const [selectedConversationIds, setSelectedConversationIds] = React.useState<Set<number>>(() => new Set());
@@ -1051,7 +1082,7 @@ export default function ChatPage() {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) setConvs(items);
+      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
     } catch {
       // Preserve the selected transcript and list on a transient poll failure.
     }
@@ -1122,7 +1153,9 @@ export default function ChatPage() {
   // returns to the same thread instead of the empty draft view. Runs after
   // hydration (not a lazy useState init) to avoid a server/client mismatch.
   React.useEffect(() => {
-    const c = new URLSearchParams(window.location.search).get("c");
+    const params = new URLSearchParams(window.location.search);
+    setSourceRequested(params.has("approval"));
+    const c = params.get("c");
     const id = c ? Number(c) : NaN;
     if (Number.isFinite(id)) setSelectedId(id);
   }, []);
@@ -1249,7 +1282,7 @@ export default function ChatPage() {
           else failed.push({ id: item.id, error: item.error ?? "对话不存在" });
         }
       }
-      if (deleted.has(selectedId ?? -1)) setSelectedId(null);
+      if (deleted.has(selectedId ?? -1)) selectConversation(null);
       setSelectedConversationIds((current) => {
         const next = new Set(current);
         for (const id of deleted) next.delete(id);
@@ -1318,7 +1351,7 @@ export default function ChatPage() {
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
           <div className="flex flex-col gap-2 border-b p-2">
-            <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
+            <Button size="sm" className="w-full" onClick={() => selectConversation(null)}>
               <PlusIcon /> 新建对话
             </Button>
             <Select
@@ -1405,7 +1438,7 @@ export default function ChatPage() {
                   active={selectedId === c.id}
                   renaming={renamingId === c.id}
                   renameText={renamingId === c.id ? renameText : ""}
-                  onSelect={setSelectedId}
+                  onSelect={selectConversation}
                   onStartRename={startRename}
                   onRenameText={setRenameText}
                   onCommitRename={commitRename}
@@ -1437,7 +1470,7 @@ export default function ChatPage() {
                           active={selectedId === c.id}
                           renaming={renamingId === c.id}
                           renameText={renamingId === c.id ? renameText : ""}
-                          onSelect={setSelectedId}
+                          onSelect={selectConversation}
                           onStartRename={startRename}
                           onRenameText={setRenameText}
                           onCommitRename={commitRename}
@@ -1479,6 +1512,10 @@ export default function ChatPage() {
               onTitleMaybeChanged={reloadConvs}
               onConvUpdated={reloadConvs}
             />
+          ) : sourceRequested ? (
+            <div role="status" className="p-6 text-sm text-muted-foreground">
+              {convsLoaded ? "对话已被删除" : "正在加载对应对话…"}
+            </div>
           ) : (
             <DraftChat
               agents={chatAgents}

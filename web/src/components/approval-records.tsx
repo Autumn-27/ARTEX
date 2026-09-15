@@ -50,6 +50,46 @@ function originLabel(row: InterceptApprovalRow) {
   return "—";
 }
 
+function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; detail?: boolean }) {
+  const [locating, setLocating] = React.useState(false);
+  const label = detail && row.task_id ? `任务 ${row.task_id}` : originLabel(row);
+  const query = new URLSearchParams({ approval: String(row.id) });
+  let href: string | undefined;
+  if (row.conversation_id) {
+    query.set("c", String(row.conversation_id));
+    href = `/chat?${query}`;
+  } else if (row.task_id) {
+    query.set("id", row.task_id);
+    href = `/function/tasks/detail?${query}`;
+  }
+  return href ? (
+    <a
+      href={href}
+      className="text-primary underline-offset-4 hover:underline"
+      aria-label={`定位审批 #${row.id} 的来源：${label}`}
+      aria-busy={locating}
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        if (locating) return;
+        setLocating(true);
+        try {
+          await api.interceptExecution(row.id, row.conversation_id ?? undefined);
+          window.location.assign(href);
+        } catch (error) {
+          toast.error((error as Error).message || "无法定位对应执行");
+          setLocating(false);
+        }
+      }}
+    >
+      {label}
+    </a>
+  ) : (
+    <span>{label}</span>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   const labels: Record<string, string> = { pending: "待审批", allowed: "已允许", denied: "已拒绝", timeout: "已超时" };
   let variant: "default" | "destructive" | "secondary" | "outline" = "outline";
@@ -131,45 +171,73 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
       <div className="flex flex-col gap-2">
         <h3 className="font-medium text-sm">模型审查上下文</h3>
         <p className="text-muted-foreground text-xs">
-          以下为本次实际发送给审查模型的输入快照，包含当时可用的任务背景与执行记录。
-          {input.task ? "当前轮输入可能由调度器生成，不等同于原始用户消息。" : "当前轮输入为本次 Agent 收到的消息。"}
+          以下为本次实际发送给审查模型的输入快照。背景仅用于理解当前动作，裁决依据为审查策略。
+          {input.version < 4 ? "此记录使用旧版输入，保留当时实际发送的内容。" : null}
         </p>
       </div>
-      {input.turn_input ? (
-        <CodeBlock label="当前轮输入" text={input.turn_input} truncated={input.background_truncated} />
-      ) : (
-        <p className="text-muted-foreground text-xs">本次审查输入未包含当前轮消息。</p>
-      )}
-      {input.task ? (
-        <>
-          <CodeBlock label="任务描述" text={input.task.description} truncated={input.task.truncated} />
-          <CodeBlock label="任务目标" text={input.task.goal} truncated={input.task.truncated} />
-          <CodeBlock label="任务操作约束" text={JSON.stringify(input.task.constraints, null, 2)} />
-        </>
-      ) : null}
-      {input.worker_intent ? (
-        <CodeBlock label="Worker 意图" text={input.worker_intent} truncated={input.background_truncated} />
-      ) : null}
-      {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
-      <div className="flex min-w-0 flex-col gap-3">
-        <h4 className="font-medium text-muted-foreground text-xs">提供给模型的近期工具执行记录</h4>
-        {input.history?.length ? (
-          input.history.map((entry) => (
-            <div key={entry.tool_use_id} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
-              <p className="break-words font-medium text-xs">
-                {entry.tool} · {entry.status === "succeeded" ? "成功" : "失败（可能有部分副作用）"}
-              </p>
-              <CodeBlock label="历史调用参数" text={entry.arguments_preview} truncated={entry.truncated} />
-              <CodeBlock label="历史执行结果" text={entry.result} truncated={entry.truncated} />
-            </div>
-          ))
+      <CodeBlock
+        label="当前待审查调用"
+        text={JSON.stringify({ tool_name: input.tool_name, arguments: input.arguments }, null, 2)}
+      />
+      {input.version >= 2 ? (
+        input.background ? (
+          <div className="flex min-w-0 flex-col gap-2">
+            <CodeBlock
+              label={input.background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要（旧版）"}
+              text={input.background.text}
+              truncated={input.background.truncated}
+            />
+            <p className="text-muted-foreground text-xs">
+              {input.background.source === "user_message"
+                ? "取自当前用户消息。"
+                : "这是旧版发送的 Worker 意图摘要；新版 Worker 审查不再发送此内容。"}
+            </p>
+          </div>
         ) : (
-          <p className="text-muted-foreground text-xs">本次未提供可配对的历史工具执行记录。</p>
-        )}
-        {input.history_truncated ? (
-          <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
-        ) : null}
-      </div>
+          <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>
+        )
+      ) : (
+        <>
+          {input.turn_input ? (
+            <CodeBlock label="当前轮输入（旧版）" text={input.turn_input} truncated={input.background_truncated} />
+          ) : null}
+          {input.task ? (
+            <>
+              <CodeBlock label="任务描述（旧版）" text={input.task.description} truncated={input.task.truncated} />
+              <CodeBlock label="任务目标（旧版）" text={input.task.goal} truncated={input.task.truncated} />
+              <CodeBlock label="任务操作约束（旧版）" text={JSON.stringify(input.task.constraints, null, 2)} />
+            </>
+          ) : null}
+          {input.worker_intent ? (
+            <CodeBlock label="Worker 意图（旧版）" text={input.worker_intent} truncated={input.background_truncated} />
+          ) : null}
+        </>
+      )}
+      {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
+      {input.version >= 3 ? (
+        <p className="text-muted-foreground text-xs">本次审查未发送历史调用或执行结果。</p>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-3">
+          <h4 className="font-medium text-muted-foreground text-xs">当时提供给模型的历史调用（旧版）</h4>
+          {input.history?.length ? (
+            input.history.map((entry) => (
+              <div key={entry.tool_use_id} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+                <p className="break-words font-medium text-xs">
+                  {entry.tool} · {entry.status === "succeeded" ? "成功" : "失败（可能有部分副作用）"}
+                </p>
+                <CodeBlock label="历史调用参数" text={entry.arguments_preview} truncated={entry.truncated} />
+                <CodeBlock label="历史执行结果" text={entry.result} truncated={entry.truncated} />
+              </div>
+            ))
+          ) : (
+            <p className="text-muted-foreground text-xs">本次未提供可配对的历史工具执行记录。</p>
+          )}
+          {input.history_truncated ? (
+            <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
+          ) : null}
+        </div>
+      )}
+
       <Collapsible>
         <CollapsibleTrigger asChild>
           <Button variant="outline" size="sm" className="self-start">
@@ -299,7 +367,9 @@ export function ApprovalDetail({
           {audit?.effective_action ? <p className="text-sm">最终动作：{actionLabels[audit.effective_action]}</p> : null}
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">来源</dt>
-            <dd className="break-words">{current.task_id ? `任务 ${current.task_id}` : originLabel(current)}</dd>
+            <dd className="break-words">
+              <ApprovalOrigin row={current} detail />
+            </dd>
             <dt className="text-muted-foreground">申请时间</dt>
             <dd>{fmtTime(row.created_at)}</dd>
             <dt className="text-muted-foreground">决定时间</dt>
@@ -364,7 +434,9 @@ export function ApprovalDetail({
                   <CollapsibleTrigger asChild>
                     <Button variant="ghost" size="sm">
                       <ChevronDownIcon data-icon="inline-start" />
-                      查看会话审计片段
+                      {audit.model_input && audit.model_input.version >= 3
+                        ? "查看会话审计片段（未发送模型）"
+                        : "查看会话审计片段"}
                     </Button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="pt-3">
@@ -526,7 +598,7 @@ function ApprovalTable({
                 <TableCell className="hidden md:table-cell">
                   <div className="flex flex-col gap-1">
                     <span className="truncate" title={originLabel(row)}>
-                      {originLabel(row)}
+                      <ApprovalOrigin row={row} />
                     </span>
                     <span className="truncate text-muted-foreground text-xs">
                       {row.agent_name || row.conv_agent_key}

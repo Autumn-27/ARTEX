@@ -1,27 +1,9 @@
 package db
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 )
-
-// OperationReviewContext takes one database snapshot of the task's original
-// description/goal and registered constraints. Discovered task_scope assets are
-// deliberately excluded: discovery does not grant authorization.
-func (s *ExplorationStore) OperationReviewContext(ctx context.Context) (description, goal string, constraints []Constraint, err error) {
-	var raw []byte
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(e.description,''), e.goal,
-        COALESCE((SELECT jsonb_agg(jsonb_build_object(
-            'id', c.id, 'kind', c.kind, 'text', c.text, 'origin', COALESCE(c.origin,''), 'created_at', c.created_at
-        ) ORDER BY c.id) FROM task_constraints c WHERE c.exploration_id=e.id), '[]'::jsonb)
-        FROM explorations e WHERE e.id=$1`, s.expID).Scan(&description, &goal, &raw)
-	if err == nil {
-		err = json.Unmarshal(raw, &constraints)
-	}
-	return
-}
 
 // Constraint is one operator-authored operation constraint for a task: kind=allow
 // (permitted operations) or kind=deny (forbidden operations), free-text. Stored in

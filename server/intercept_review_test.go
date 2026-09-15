@@ -25,11 +25,9 @@ func (p *reviewCaptureProvider) Complete(ctx context.Context, req llm.Completion
 }
 
 // Assert the actual model request, rather than merely the envelope helper.
-func TestReviewCompletionSendsTaskAndPairedContext(t *testing.T) {
-	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", "清理本次测试文件", func(context.Context) (*intercept.ReviewTask, error) {
-		return &intercept.ReviewTask{TaskID: 7, Goal: "仅验证测试站点", Constraints: []db.Constraint{{Kind: "deny", Text: "禁止删除生产文件", Origin: "human"}}}, nil
-	})
-	ctx, trace := intercept.WithTrace(ctx, "清理测试文件", []db.InterceptContextEntry{
+func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
+	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: "清理本次测试文件"})
+	ctx, trace := intercept.WithTrace(ctx, "GLOBAL_OVERVIEW_SENTINEL", []db.InterceptContextEntry{
 		{Kind: "tool_use", Tool: "Write", ToolUseID: "created", Text: `{"path":"probe.txt"}`},
 		{Kind: "tool_result", ToolUseID: "created", Text: "file created"},
 		{Kind: "assistant", Text: "untrusted worker speculation"},
@@ -57,7 +55,22 @@ func TestReviewCompletionSendsTaskAndPairedContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Task.TaskID != 7 || got.Task.Constraints[0].Origin != "human" || got.WorkingDir != "/tmp/review-fixture" || len(got.History) != 1 || got.History[0].ToolUseID != "created" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 5 {
+		t.Fatalf("unexpected envelope keys: %s", body)
+	}
+	for _, key := range []string{"version", "working_directory", "background", "tool_name", "arguments"} {
+		if _, ok := fields[key]; !ok {
+			t.Fatalf("missing %s", key)
+		}
+	}
+	if strings.Contains(body, "file created") || strings.Contains(body, `"path"`) {
+		t.Fatal("history leaked into actual model request")
+	}
+	if got.Version != 4 || got.Background == nil || got.Background.Source != intercept.BackgroundUserMessage || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
 		t.Fatalf("wrong model input: %s", body)
 	}
 }

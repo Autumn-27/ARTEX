@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -477,4 +478,49 @@ func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, detail)
+}
+
+// The navigation endpoint returns only the original call and its paired result.
+func (s *Server) interceptExecution(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok || id <= 0 {
+		writeErr(w, 400, "bad approval id")
+		return
+	}
+	target, err := pg.GetInterceptExecution(id)
+	if errors.Is(err, db.ErrInterceptTaskDeleted) || errors.Is(err, db.ErrInterceptSessionDeleted) {
+		writeErr(w, http.StatusGone, err.Error())
+		return
+	}
+	if errors.Is(err, db.ErrInterceptExecutionUnavailable) {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if target == nil {
+		// Conversation deletion cascades approval rows. A stale source link still
+		// carries its conversation ID, allowing a precise message without retaining
+		// deleted conversations or changing their deletion semantics.
+		if convID, parseErr := strconv.ParseInt(r.URL.Query().Get("conversation"), 10, 64); parseErr == nil && convID > 0 {
+			conv, getErr := pg.GetConversation(convID)
+			if getErr != nil {
+				writeErr(w, 500, getErr.Error())
+				return
+			}
+			if conv == nil {
+				writeErr(w, http.StatusGone, "对话已被删除")
+				return
+			}
+		}
+		writeErr(w, 404, "审批记录已被删除或不存在")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"conversation_id": target.ConversationID, "task_id": target.TaskID, "session": target.Session, "seq": target.Seq, "items": activityDTOs(target.Items)})
 }

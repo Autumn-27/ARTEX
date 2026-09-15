@@ -448,8 +448,8 @@ func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.Raw
 	var err error
 	var modelInput []byte
 	if contextErr != nil {
-		// Missing task policy must not become an implicit permission via the
-		// model's configurable fail-open strategy. A human can resolve the gap.
+		// Invalid current arguments cannot be reviewed faithfully, regardless of
+		// the configured model-failure strategy. A human must resolve the input.
 		out = Decision{Action: "ask", ModelFallback: true, Message: "审查上下文不完整，需要人工确认：" + contextErr.Error()}
 	} else {
 		modelInput, _ = json.Marshal(input)

@@ -167,10 +167,9 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 		if a.Correlation != "exact" {
 			a.ExecutionStatus = "unknown"
 		}
-		// Keep the exact bounded model input for EVERY model verdict, including
-		// automatic allows. The larger raw transcript is redundant for those
-		// events; the UI renders the actual input snapshot, not a reconstruction.
-		// Rule-only allows keep their existing lightweight retention policy.
+		// Keep the exact model input for EVERY model verdict, including automatic
+		// allows. Raw audit history is not model input. Preserve the existing
+		// lightweight allow-retention policy; render the saved input directly.
 		a.UserMessage, a.UserTruncated = "", false
 		a.Context, a.ContextTruncated = nil, false
 	}

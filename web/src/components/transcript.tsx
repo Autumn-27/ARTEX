@@ -355,12 +355,15 @@ function ToolBlock({
   group,
   getDetail,
   showWorker,
+  focused = false,
 }: {
   group: Extract<Group, { type: "tool" }>;
   getDetail: (seq: number) => Promise<string>;
   showWorker?: boolean;
+  focused?: boolean;
 }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(focused);
+  const targetRef = React.useRef<HTMLElement>(null);
   const [detail, setDetail] = React.useState<string | null>(null);
   // what we last loaded, keyed by the underlying step seqs. When the tool result
   // arrives after we expanded mid-run (command only), this key changes and the
@@ -377,7 +380,7 @@ function ToolBlock({
       ? "text-emerald-600 dark:text-emerald-400"
       : "text-red-600 dark:text-red-400";
   const rawCmd =
-    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : use?.summary ?? "";
+    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : (use?.summary ?? "");
   const cmd = toolInputText(toolName, rawCmd);
   // status only — the full result lives behind the expand (【输出】), not previewed inline
   const statusText = running ? "执行中…" : ok ? "✓" : "✕ 失败";
@@ -410,12 +413,53 @@ function ToolBlock({
     };
   }, [open, detailKey, use, result, getDetail, toolName]);
 
+  const scrolledRef = React.useRef(false);
+  React.useEffect(() => {
+    scrolledRef.current = false;
+    if (focused) setOpen(true);
+  }, [focused]);
+  React.useEffect(() => {
+    if (!focused || !open || detail === null || scrolledRef.current) return;
+    const el = targetRef.current;
+    const viewport = el?.closest('[data-slot="scroll-area-viewport"]');
+    if (!el || !viewport) return;
+    scrolledRef.current = true;
+    const center = () => {
+      const rect = el.getBoundingClientRect();
+      const bounds = viewport.getBoundingClientRect();
+      viewport.scrollTop += rect.top + rect.height / 2 - bounds.top - bounds.height / 2;
+    };
+    // User bubbles load their full text lazily. Allow their initial layout to
+    // settle, but stop anchoring immediately if the user interacts or after 2s.
+    const observer = new ResizeObserver(center);
+    observer.observe(el.parentElement ?? el);
+    observer.observe(viewport);
+    const stop = () => observer.disconnect();
+    viewport.addEventListener("wheel", stop, { passive: true, once: true });
+    viewport.addEventListener("touchstart", stop, { passive: true, once: true });
+    viewport.addEventListener("pointerdown", stop, { once: true });
+    const frame = requestAnimationFrame(center);
+    const timer = setTimeout(stop, 2000);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      stop();
+      viewport.removeEventListener("wheel", stop);
+      viewport.removeEventListener("touchstart", stop);
+      viewport.removeEventListener("pointerdown", stop);
+    };
+  }, [focused, open, detail]);
+
   function toggle() {
     setOpen((o) => !o);
   }
 
   return (
-    <div className="text-xs">
+    <section
+      ref={targetRef}
+      aria-label={focused ? `定位的工具调用 #${use?.seq}` : undefined}
+      className={focused ? "rounded-lg border-2 border-primary bg-primary/5 p-3 text-xs" : "text-xs"}
+    >
       <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
@@ -431,7 +475,7 @@ function ToolBlock({
           {detail ?? "加载中…"}
         </pre>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -637,18 +681,19 @@ function ExecView({
   taskId,
   chat,
   fetchDetail,
+  focusedSeq,
 }: {
   activity: Activity[];
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusedSeq?: number;
 }) {
   const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
   // its own (conversation-scoped) fetcher instead.
   const getDetail = React.useCallback(
-    (seq: number) =>
-      fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? ""),
+    (seq: number) => (fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? "")),
     [fetchDetail, taskId],
   );
   return (
@@ -665,7 +710,13 @@ function ExecView({
         ) : g.type === "answer" ? (
           <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
         ) : g.type === "tool" ? (
-          <ToolBlock key={"t" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+          <ToolBlock
+            key={"t" + g.key}
+            group={g}
+            getDetail={getDetail}
+            showWorker={showWorker}
+            focused={focusedSeq != null && g.use?.seq === focusedSeq}
+          />
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
         ) : (
@@ -685,16 +736,30 @@ export function Transcript({
   taskId,
   chat,
   fetchDetail,
+  focusedSeq,
 }: {
   activity: Activity[];
   live?: boolean;
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusedSeq?: number;
 }) {
+  const transcriptRef = React.useRef<HTMLDivElement>(null);
+  const [focusPadding, setFocusPadding] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (focusedSeq == null) { setFocusPadding(0); return; }
+    const viewport = transcriptRef.current?.closest('[data-slot="scroll-area-viewport"]');
+    if (!viewport) return;
+    const measure = () => setFocusPadding(viewport.clientHeight / 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [focusedSeq]);
   return (
-    <div className="flex flex-col gap-1">
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} />
+    <div ref={transcriptRef} className="flex flex-col gap-1" style={focusPadding ? { paddingBlock: focusPadding } : undefined}>
+      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusedSeq={focusedSeq} />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">
