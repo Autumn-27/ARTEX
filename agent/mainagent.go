@@ -31,8 +31,14 @@ type MainAgent struct {
 	workDir         string                                 // shared work dir (surfaced in prompt as artifact-output target)
 	steerWork       func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 }
+
+// SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
+// context-compression mechanism. nil/unset = off (built-in compaction). Read per
+// run so the settings toggle takes effect without rebuilding the agent.
+func (m *MainAgent) SetNoaEnabled(fn func() bool) { m.noaEnabledFn = fn }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default).
@@ -167,6 +173,13 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 			opts.SessionID = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
 		}
 	}
+	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
+	// session id 与 transcript 同规则(分段感知),使归档与恢复对齐。
+	noaSession := fmt.Sprintf("exp%d-main", ts.ID())
+	if mainSeg > 0 {
+		noaSession = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
+	}
+	enableNoa(&opts, m.noaEnabledFn, m.workDir, noaSession, noaWarn(noaSession))
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()

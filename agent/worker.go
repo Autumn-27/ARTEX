@@ -78,6 +78,10 @@ type Worker struct {
 	// path. Read per run so a profile/task toggle takes effect without rebuilding
 	// the agent. nil = streaming (default).
 	nonStreamingFn func() bool
+	// noaEnabledFn resolves whether this run uses the experimental noa context-
+	// compression mechanism. Read per run, like nonStreaming. nil = off (built-in
+	// compaction).
+	noaEnabledFn func() bool
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
 	maxTokensFn func() int
@@ -113,6 +117,11 @@ func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
 func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
 
 func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
+
+// SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
+// context-compression mechanism. nil/unset = off (built-in compaction). Read per
+// run so the settings toggle takes effect without rebuilding the agent.
+func (w *Worker) SetNoaEnabled(fn func() bool) { w.noaEnabledFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -481,6 +490,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		input = "开始执行 system 里领到的意图：只做它、只产生事实、assets、finding、做完即停。"
 	}
 
+	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
+	noaSession := WorkerSessionID(ts.ID(), intent.ID)
+	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
