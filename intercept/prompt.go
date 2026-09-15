@@ -136,11 +136,34 @@ type Verdict struct {
 	Reason string
 }
 
+// stripCodeFence unwraps a fenced reply (```json … ```) before strict parsing.
+// This is a deterministic unwrap, not a repair: the payload still goes through
+// ParseVerdict unchanged, so truncated, ambiguous or prose replies stay
+// unparseable. A reply cut off at MaxTokens has no closing fence and is left
+// alone on purpose — completing it would invent a verdict the model never gave.
+//
+// It exists because the fail action defaults to allow: without it a model that
+// merely wraps its JSON in markdown turns a DENY into a silent allow.
+func stripCodeFence(text string) string {
+	t := strings.TrimSpace(text)
+	if len(t) <= 6 || !strings.HasPrefix(t, "```") || !strings.HasSuffix(t, "```") {
+		return t
+	}
+	t = strings.TrimSpace(t[3 : len(t)-3])
+	if !strings.HasPrefix(t, "{") {
+		// Drop the opening fence's language tag line (```json).
+		if _, rest, ok := strings.Cut(t, "\n"); ok {
+			t = strings.TrimSpace(rest)
+		}
+	}
+	return t
+}
+
 // ParseVerdict requires a complete verdict and explanation for every action.
 // Never extract a decision keyword from prose, arguments, or a broken JSON
 // reply. Invalid/incomplete responses follow the configured model-failure path.
 func ParseVerdict(text string) Verdict {
-	d := json.NewDecoder(strings.NewReader(text))
+	d := json.NewDecoder(strings.NewReader(stripCodeFence(text)))
 	if tok, err := d.Token(); err != nil || tok != json.Delim('{') {
 		return Verdict{}
 	}

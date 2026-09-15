@@ -31,10 +31,33 @@ func TestParseVerdictRejectsIncompleteOrAmbiguousReplies(t *testing.T) {
 		strings.Replace(valid, "；命中规则：A5", "", 1),
 		strings.Replace(valid, `"decision":"allow"`, `"decision":"deny","decision":"allow"`, 1),
 		strings.Replace(valid, `"decision":"allow"`, `"extra":true,"decision":"allow"`, 1),
-		valid + valid, "```json\n" + valid + "\n```", valid[:len(valid)-1],
+		valid + valid, valid[:len(valid)-1],
+		// A fence the model never closed is what a reply truncated at MaxTokens
+		// looks like; completing it would invent a verdict.
+		"```json\n" + valid[:len(valid)-1],
+		"```json\n" + valid + "\n```\n此外我建议后续人工复核。",
+		"我的裁决是：\n" + valid,
 	} {
 		if got := ParseVerdict(reply); got.Action != "" {
 			t.Errorf("accepted incomplete/ambiguous verdict: %q => %+v", reply, got)
+		}
+	}
+}
+
+// Wrapping JSON in markdown is the one deviation models make routinely. Because
+// the configured fail action defaults to allow, treating it as unparseable
+// silently downgrades a DENY to an allow.
+func TestParseVerdictUnwrapsCodeFence(t *testing.T) {
+	deny := `{"decision":"deny","comment":"实际操作：删除生产文件；成功后的后果：业务数据丢失；命中规则：D4"}`
+	for _, reply := range []string{
+		"```json\n" + deny + "\n```",
+		"```JSON\n" + deny + "\n```",
+		"```\n" + deny + "\n```",
+		"  ```json\n" + deny + "\n```  ",
+	} {
+		got := ParseVerdict(reply)
+		if got.Action != "deny" || !strings.HasSuffix(got.Reason, "命中规则：D4") {
+			t.Errorf("fenced verdict lost: %q => %+v", reply, got)
 		}
 	}
 }
