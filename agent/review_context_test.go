@@ -14,8 +14,8 @@ import (
 	"github.com/Autumn-27/norma/tool"
 )
 
-// Real PostgreSQL + SDK hooks: only selected background and paired execution
-// evidence reach the reviewer. Task metadata remains in the audit origin only.
+// Real PostgreSQL + SDK hooks: each review receives only the current call and
+// selected background. Prior execution stays in the separate audit record.
 func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	dsn, _, err := db.DSN()
 	if err != nil {
@@ -101,15 +101,12 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 		t.Fatalf("reviews=%d executions=%d", len(inputs), executions)
 	}
 	first, second := inputs[0], inputs[1]
-	if len(first.History) != 0 {
-		t.Fatal("first call has unexpected history")
-	}
 	for _, in := range inputs {
-		if in.Version != 2 || in.Background == nil || in.Background.Source != intercept.BackgroundWorkerSummary || in.Background.Text != "创建并清理" || in.WorkingDir != runDir {
+		if in.Version != 3 || in.Background == nil || in.Background.Source != intercept.BackgroundWorkerSummary || in.Background.Text != "创建并清理" || in.WorkingDir != runDir {
 			t.Fatalf("wrong selected background: %+v", in)
 		}
 		raw, _ := json.Marshal(in)
-		for _, forbidden := range []string{"只操作隔离测试目录", "验证创建和清理", "禁止后续清理", "FULL_INTENT_SENTINEL", "全局探索态势", `"task_id"`, `"task"`, `"turn_input"`, `"worker_intent"`} {
+		for _, forbidden := range []string{"只操作隔离测试目录", "验证创建和清理", "禁止后续清理", "FULL_INTENT_SENTINEL", "全局探索态势", `"task_id"`, `"task"`, `"turn_input"`, `"worker_intent"`, `"history"`, `"history_truncated"`, `"correlation"`, "Created a new fixture"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Fatalf("unexpected review data: %s", forbidden)
 			}
@@ -119,9 +116,10 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	if err != nil || len(constraints) != 1 {
 		t.Fatal("Agent task constraints were unexpectedly changed")
 	}
-	if second.Correlation != "exact" || len(second.History) != 1 || second.History[0].ToolUseID != "call-1" || second.History[0].Status != "succeeded" || string(second.Arguments) != `{"step":2}` {
-		t.Fatalf("lost paired execution evidence: %+v", second)
+	if string(first.Arguments) != `{"step":1}` || string(second.Arguments) != `{"step":2}` {
+		t.Fatal("review lost current parameters")
 	}
+
 	rows, err := d.ListTaskIntercepts(taskID)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
@@ -135,8 +133,22 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background == nil || *saved.Background != *first.Background {
 			t.Fatal("stored review input cannot reconstruct the actual selected background")
 		}
-		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 2) {
+		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 3) {
 			t.Fatal("automatic allow lost execution result or its original background snapshot")
+		}
+		if detail.Audit.Correlation != "exact" {
+			t.Fatal("audit lost call correlation")
+		}
+		if row.Status == "denied" {
+			found := false
+			for _, entry := range detail.Audit.Context {
+				if entry.Kind == "tool_result" && entry.ToolUseID == "call-1" && strings.Contains(entry.Text, "Created a new fixture") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("prior execution missing from separate audit")
+			}
 		}
 		if row.Status == "denied" && detail.Audit.ExecutionStatus != "not_executed" {
 			t.Fatal("denial recorded an execution")

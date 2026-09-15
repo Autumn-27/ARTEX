@@ -132,9 +132,13 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         <h3 className="font-medium text-sm">模型审查上下文</h3>
         <p className="text-muted-foreground text-xs">
           以下为本次实际发送给审查模型的输入快照。背景仅用于理解当前动作，裁决依据为审查策略。
-          {input.version < 2 ? "此记录使用旧版输入，保留当时实际发送的内容。" : null}
+          {input.version < 3 ? "此记录使用旧版输入，保留当时实际发送的内容。" : null}
         </p>
       </div>
+      <CodeBlock
+        label="当前待审查调用"
+        text={JSON.stringify({ tool_name: input.tool_name, arguments: input.arguments }, null, 2)}
+      />
       {input.version >= 2 ? (
         input.background ? (
           <div className="flex min-w-0 flex-col gap-2">
@@ -170,25 +174,30 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         </>
       )}
       {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
-      <div className="flex min-w-0 flex-col gap-3">
-        <h4 className="font-medium text-muted-foreground text-xs">提供给模型的近期工具执行记录</h4>
-        {input.history?.length ? (
-          input.history.map((entry) => (
-            <div key={entry.tool_use_id} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
-              <p className="break-words font-medium text-xs">
-                {entry.tool} · {entry.status === "succeeded" ? "成功" : "失败（可能有部分副作用）"}
-              </p>
-              <CodeBlock label="历史调用参数" text={entry.arguments_preview} truncated={entry.truncated} />
-              <CodeBlock label="历史执行结果" text={entry.result} truncated={entry.truncated} />
-            </div>
-          ))
-        ) : (
-          <p className="text-muted-foreground text-xs">本次未提供可配对的历史工具执行记录。</p>
-        )}
-        {input.history_truncated ? (
-          <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
-        ) : null}
-      </div>
+      {input.version >= 3 ? (
+        <p className="text-muted-foreground text-xs">本次审查未发送历史调用或执行结果。</p>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-3">
+          <h4 className="font-medium text-muted-foreground text-xs">当时提供给模型的历史调用（旧版）</h4>
+          {input.history?.length ? (
+            input.history.map((entry) => (
+              <div key={entry.tool_use_id} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+                <p className="break-words font-medium text-xs">
+                  {entry.tool} · {entry.status === "succeeded" ? "成功" : "失败（可能有部分副作用）"}
+                </p>
+                <CodeBlock label="历史调用参数" text={entry.arguments_preview} truncated={entry.truncated} />
+                <CodeBlock label="历史执行结果" text={entry.result} truncated={entry.truncated} />
+              </div>
+            ))
+          ) : (
+            <p className="text-muted-foreground text-xs">本次未提供可配对的历史工具执行记录。</p>
+          )}
+          {input.history_truncated ? (
+            <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
+          ) : null}
+        </div>
+      )}
+
       <Collapsible>
         <CollapsibleTrigger asChild>
           <Button variant="outline" size="sm" className="self-start">
@@ -383,7 +392,9 @@ export function ApprovalDetail({
                   <CollapsibleTrigger asChild>
                     <Button variant="ghost" size="sm">
                       <ChevronDownIcon data-icon="inline-start" />
-                      查看会话审计片段
+                      {audit.model_input && audit.model_input.version >= 3
+                        ? "查看会话审计片段（未发送模型）"
+                        : "查看会话审计片段"}
                     </Button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="pt-3">

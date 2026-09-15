@@ -1300,7 +1300,8 @@ export interface InterceptReviewInput {
   worker_intent?: string;
   turn_input?: string;
   background_truncated?: boolean;
-  history: {
+  // Legacy v1/v2 snapshots only; v3 never sends execution history.
+  history?: {
     tool_use_id: string;
     tool: string;
     arguments_preview: string;
@@ -1309,7 +1310,7 @@ export interface InterceptReviewInput {
     truncated?: boolean;
   }[];
   history_truncated?: boolean;
-  correlation: "exact" | "ambiguous" | "unavailable";
+  correlation?: "exact" | "ambiguous" | "unavailable";
   tool_name: string;
   arguments: Record<string, unknown>;
 }
