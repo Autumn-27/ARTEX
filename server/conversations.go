@@ -450,7 +450,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(msg, req.Attachments, baseDir), busyKey)
+	s.runConversation(c, composeAgentMessage(msg, req.Attachments, baseDir), busyKey, msg)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
@@ -458,8 +458,13 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 // (each conversation is independent → parallel). Steps stream to
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
-func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
+func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
+	// Only the human-message handler supplies this field, before adding the
+	// attachment manifest. Scheduler/retest prompts must not be labelled as users.
+	if len(userMessage) == 1 {
+		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
+	}
 	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 

@@ -25,11 +25,9 @@ func (p *reviewCaptureProvider) Complete(ctx context.Context, req llm.Completion
 }
 
 // Assert the actual model request, rather than merely the envelope helper.
-func TestReviewCompletionSendsTaskAndPairedContext(t *testing.T) {
-	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", "清理本次测试文件", func(context.Context) (*intercept.ReviewTask, error) {
-		return &intercept.ReviewTask{TaskID: 7, Goal: "仅验证测试站点", Constraints: []db.Constraint{{Kind: "deny", Text: "禁止删除生产文件", Origin: "human"}}}, nil
-	})
-	ctx, trace := intercept.WithTrace(ctx, "清理测试文件", []db.InterceptContextEntry{
+func TestReviewCompletionSendsBackgroundAndPairedContext(t *testing.T) {
+	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", intercept.ReviewBackground{Source: intercept.BackgroundWorkerSummary, Text: "清理本次测试文件"})
+	ctx, trace := intercept.WithTrace(ctx, "GLOBAL_OVERVIEW_SENTINEL", []db.InterceptContextEntry{
 		{Kind: "tool_use", Tool: "Write", ToolUseID: "created", Text: `{"path":"probe.txt"}`},
 		{Kind: "tool_result", ToolUseID: "created", Text: "file created"},
 		{Kind: "assistant", Text: "untrusted worker speculation"},
@@ -57,7 +55,7 @@ func TestReviewCompletionSendsTaskAndPairedContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Task.TaskID != 7 || got.Task.Constraints[0].Origin != "human" || got.WorkingDir != "/tmp/review-fixture" || len(got.History) != 1 || got.History[0].ToolUseID != "created" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") {
+	if got.Version != 2 || got.Background == nil || got.Background.Source != intercept.BackgroundWorkerSummary || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || len(got.History) != 1 || got.History[0].ToolUseID != "created" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
 		t.Fatalf("wrong model input: %s", body)
 	}
 }

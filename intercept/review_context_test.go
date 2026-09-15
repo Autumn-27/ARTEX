@@ -1,9 +1,7 @@
 package intercept
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,22 +53,46 @@ func TestReviewInputPairsEvidenceAndPreservesCurrentCall(t *testing.T) {
 	}
 }
 
-func TestReviewInputEnvironmentAndFreshTaskConstraints(t *testing.T) {
-	constraints := []db.Constraint{{ID: 1, Kind: "deny", Text: "禁止访问生产主机", Origin: "human"}}
-	ctx := WithReviewContext(t.Context(), "/tmp/task-1", "验证访客注册", func(context.Context) (*ReviewTask, error) {
-		return &ReviewTask{TaskID: 1, Goal: "验证测试站点", Constraints: constraints}, nil
-	})
-	first, err := BuildReviewInput(ctx, "Bash", json.RawMessage(`{"command":"pwd"}`))
-	if err != nil {
-		t.Fatal(err)
+func TestReviewInputExplicitBackgroundOnly(t *testing.T) {
+	for _, source := range []string{BackgroundUserMessage, BackgroundWorkerSummary, "", "scheduler"} {
+		t.Run(source, func(t *testing.T) {
+			ctx := WithReviewContext(t.Context(), "/tmp/task-1", ReviewBackground{Source: source, Text: "验证访客注册"})
+			ctx, trace := WithTrace(ctx, "GLOBAL_OVERVIEW_NOT_FOR_REVIEW", nil)
+			args := json.RawMessage(`{"command":"pwd"}`)
+			trace.Start("current", "Bash", args)
+			in, err := BuildReviewInput(WithCall(ctx, "Bash", args), "Bash", args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in.Version != 2 || in.WorkingDir != "/tmp/task-1" {
+				t.Fatalf("wrong environment: %+v", in)
+			}
+			if source == BackgroundUserMessage || source == BackgroundWorkerSummary {
+				if in.Background == nil || in.Background.Source != source || in.Background.Text != "验证访客注册" {
+					t.Fatal("lost selected background")
+				}
+			} else if in.Background != nil {
+				t.Fatal("accepted unknown background source")
+			}
+			raw, _ := json.Marshal(in)
+			var fields map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &fields)
+			for _, key := range []string{"task", "task_id", "goal", "description", "constraints", "worker_intent", "turn_input"} {
+				if _, ok := fields[key]; ok {
+					t.Fatalf("unexpected field %s", key)
+				}
+			}
+			if strings.Contains(string(raw), "GLOBAL_OVERVIEW") {
+				t.Fatal("raw turn prompt leaked into reviewer input")
+			}
+		})
 	}
-	constraints[0].Text = "禁止口令测试"
-	second, err := BuildReviewInput(ctx, "Bash", json.RawMessage(`{"command":"pwd"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Task.Constraints[0].Text != "禁止访问生产主机" || second.Task.Constraints[0].Text != "禁止口令测试" || first.WorkingDir != "/tmp/task-1" || first.Intent != "验证访客注册" {
-		t.Fatal("task policy is stale or snapshots share mutable state")
+	ctx, trace := WithTrace(t.Context(), "Do not substitute this for missing background", nil)
+	args := json.RawMessage(`{}`)
+	trace.Start("current", "Read", args)
+	in, err := BuildReviewInput(WithCall(ctx, "Read", args), "Read", args)
+	if err != nil || in.Background != nil {
+		t.Fatal("missing environment must not infer user input")
 	}
 }
 
@@ -108,27 +130,16 @@ func TestReviewInputBoundsAndInvalidContext(t *testing.T) {
 		entries = append(entries, db.InterceptContextEntry{Kind: "tool_use", ToolUseID: id, Tool: "Read", Text: `{}`},
 			db.InterceptContextEntry{Kind: "tool_result", ToolUseID: id, Text: strings.Repeat("中文", 3000)})
 	}
-	ctx, trace := WithTrace(t.Context(), strings.Repeat("中文", 3000), entries)
+	ctx := WithReviewContext(t.Context(), "", ReviewBackground{Source: BackgroundUserMessage, Text: strings.Repeat("中文", 3000)})
+	ctx, trace := WithTrace(ctx, "omitted raw turn", entries)
 	trace.Start("current", "Read", []byte(`{}`))
 	in, err := BuildReviewInput(WithCall(ctx, "Read", []byte(`{}`)), "Read", json.RawMessage(`{}`))
-	if err != nil || !in.HistoryTruncated || !in.BackgroundTruncated || len(in.History) != reviewHistoryLimit {
+	if err != nil || !in.HistoryTruncated || (in.Background == nil || !in.Background.Truncated || len(in.Background.Text) > reviewTextLimit || !utf8.ValidString(in.Background.Text)) || len(in.History) != reviewHistoryLimit {
 		t.Fatalf("missing bounds: %+v %v", in, err)
 	}
 	for _, e := range in.History {
 		if !e.Truncated || len(e.Result) > reviewHistoryTextLimit || !utf8.ValidString(e.Result) {
 			t.Fatal("invalid result truncation")
-		}
-	}
-	for _, load := range []func(context.Context) (*ReviewTask, error){
-		func(context.Context) (*ReviewTask, error) { return nil, errors.New("database offline") },
-		func(context.Context) (*ReviewTask, error) { return nil, nil },
-		func(context.Context) (*ReviewTask, error) {
-			return &ReviewTask{Constraints: []db.Constraint{{Text: strings.Repeat("x", reviewConstraintLimit+1)}}}, nil
-		},
-	} {
-		_, err := BuildReviewInput(WithReviewContext(t.Context(), "", "", load), "Read", json.RawMessage(`{}`))
-		if err == nil {
-			t.Fatal("silently ignored missing or excessive task policy")
 		}
 	}
 	if _, err := BuildReviewInput(t.Context(), "Read", json.RawMessage(`{"broken"`)); err == nil {
@@ -156,7 +167,8 @@ func TestEffectiveJudgePromptPreservesCustomPolicy(t *testing.T) {
 }
 
 func TestAutomaticAllowRetainsActualReviewContext(t *testing.T) {
-	ctx, trace := WithTrace(t.Context(), "请读取刚创建的文件", []db.InterceptContextEntry{
+	ctx := WithReviewContext(t.Context(), "", ReviewBackground{Source: BackgroundUserMessage, Text: "请读取刚创建的文件"})
+	ctx, trace := WithTrace(ctx, "请读取刚创建的文件", []db.InterceptContextEntry{
 		{Kind: "tool_use", ToolUseID: "prior", Tool: "Write", Text: `{"file_path":"probe.txt"}`},
 		{Kind: "tool_result", ToolUseID: "prior", Text: "Created probe.txt"},
 	})
@@ -171,10 +183,31 @@ func TestAutomaticAllowRetainsActualReviewContext(t *testing.T) {
 	reason := "实际操作：读取测试文件；成功后的后果：返回文件内容；命中规则：A5"
 	a := auditFor(ctx, Decision{Action: "allow", Message: reason, ModelInput: raw, ModelInputDigest: digestInput(raw)}, args, "allowed")
 	var saved ReviewInput
-	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.TurnInput != "请读取刚创建的文件" || len(saved.History) != 1 || saved.History[0].ToolUseID != "prior" || a.InitialReason != reason {
+	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.Background == nil || saved.Background.Text != "请读取刚创建的文件" || len(saved.History) != 1 || saved.History[0].ToolUseID != "prior" || a.InitialReason != reason {
 		t.Fatal("automatic allow lost the model's input or explanation")
 	}
 	if a.Context != nil || a.UserMessage != "" {
 		t.Fatal("automatic allow redundantly retained the larger raw transcript")
+	}
+}
+
+func TestReviewWorkingDirectoryPreservesExplicitProvenance(t *testing.T) {
+	for _, background := range []ReviewBackground{{}, {Source: BackgroundUserMessage, Text: "原始用户消息"}} {
+		ctx := WithReviewContext(t.Context(), "", background)
+		ctx = WithReviewWorkingDirectory(ctx, "/tmp/chat-run")
+		ctx, trace := WithTrace(ctx, "SCHEDULER_OR_ATTACHMENT_MANIFEST", nil)
+		args := json.RawMessage(`{}`)
+		trace.Start("current", "Read", args)
+		in, err := BuildReviewInput(WithCall(ctx, "Read", args), "Read", args)
+		if err != nil || in.WorkingDir != "/tmp/chat-run" {
+			t.Fatal("lost working directory")
+		}
+		if background.Text == "" {
+			if in.Background != nil {
+				t.Fatal("scheduled prompt was mislabelled as user message")
+			}
+		} else if in.Background == nil || *in.Background != background {
+			t.Fatal("raw user message was replaced by augmented Agent input")
+		}
 	}
 }

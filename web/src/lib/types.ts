@@ -1283,6 +1283,12 @@ export interface LLMTask {
 // The exact JSON sent to the review model, retained for all model verdicts.
 export interface InterceptReviewInput {
   version: number;
+  background?: {
+    source: "user_message" | "worker_summary";
+    text: string;
+    truncated?: boolean;
+  };
+  // Version 1 snapshots are immutable and remain readable in historical audits.
   task?: {
     task_id: number;
     description: string;

@@ -2,27 +2,24 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 )
 
-// Keep operator constraints separate from worker plans and discovered assets.
-// The reader runs for each review so mid-run constraint edits are visible.
-func withTaskReviewContext(ctx context.Context, taskID int64, ts *db.ExplorationStore, workDir string, intent *db.Node) context.Context {
-	intentText := ""
+// Select only the current intent's existing summary. Missing or malformed data
+// deliberately produces no background; never substitute the payload, task goal,
+// constraints, global exploration state, or a generated Worker prompt.
+func withWorkerReviewContext(ctx context.Context, workDir string, intent *db.Node) context.Context {
+	background := intercept.ReviewBackground{}
 	if intent != nil {
-		intentText = string(intent.Payload)
-	}
-	var load func(context.Context) (*intercept.ReviewTask, error)
-	if ts != nil {
-		load = func(ctx context.Context) (*intercept.ReviewTask, error) {
-			description, goal, constraints, err := ts.OperationReviewContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-			return &intercept.ReviewTask{TaskID: taskID, Description: description, Goal: goal, Constraints: constraints}, nil
+		var payload struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(intent.Payload, &payload) == nil {
+			background = intercept.ReviewBackground{Source: intercept.BackgroundWorkerSummary, Text: payload.Summary}
 		}
 	}
-	return intercept.WithReviewContext(ctx, workDir, intentText, load)
+	return intercept.WithReviewContext(ctx, workDir, background)
 }

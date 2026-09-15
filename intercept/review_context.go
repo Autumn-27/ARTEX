@@ -13,17 +13,20 @@ const (
 	reviewTextLimit        = 4000
 	reviewHistoryLimit     = 6
 	reviewHistoryTextLimit = 2000
-	reviewConstraintLimit  = 16000
 )
 
-// ReviewTask is loaded by the application, never from a tool's arguments. Origin
-// records how constraints were registered; it is not proof of human approval.
-type ReviewTask struct {
-	TaskID      int64           `json:"task_id"`
-	Description string          `json:"description"`
-	Goal        string          `json:"goal"`
-	Constraints []db.Constraint `json:"constraints"`
-	Truncated   bool            `json:"truncated,omitempty"`
+const (
+	BackgroundUserMessage   = "user_message"
+	BackgroundWorkerSummary = "worker_summary"
+)
+
+// ReviewBackground is selected by the application from an existing message or
+// the current intent's summary. Worker summaries are planner-authored, not human
+// instructions. Neither source can override the reviewer's own action policy.
+type ReviewBackground struct {
+	Source    string `json:"source"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type ReviewExecution struct {
@@ -38,67 +41,59 @@ type ReviewExecution struct {
 // ReviewInput orders background before the exact current call. History is a
 // bounded evidence window, not a complete transcript or an authorization source.
 type ReviewInput struct {
-	Version             int               `json:"version"`
-	Task                *ReviewTask       `json:"task,omitempty"`
-	WorkingDir          string            `json:"working_directory,omitempty"`
-	Intent              string            `json:"worker_intent,omitempty"`
-	TurnInput           string            `json:"turn_input,omitempty"`
-	BackgroundTruncated bool              `json:"background_truncated,omitempty"`
-	History             []ReviewExecution `json:"history"`
-	HistoryTruncated    bool              `json:"history_truncated,omitempty"`
-	Correlation         string            `json:"correlation"`
-	Tool                string            `json:"tool_name"`
-	Arguments           json.RawMessage   `json:"arguments"`
+	Version          int               `json:"version"`
+	WorkingDir       string            `json:"working_directory,omitempty"`
+	Background       *ReviewBackground `json:"background,omitempty"`
+	History          []ReviewExecution `json:"history"`
+	HistoryTruncated bool              `json:"history_truncated,omitempty"`
+	Correlation      string            `json:"correlation"`
+	Tool             string            `json:"tool_name"`
+	Arguments        json.RawMessage   `json:"arguments"`
 }
 
 type reviewContextKey struct{}
 type reviewEnvironment struct {
-	workingDir, intent string
-	loadTask           func(context.Context) (*ReviewTask, error)
+	workingDir string
+	background ReviewBackground
 }
 
-// WithReviewContext binds one run's environment and a fresh task-context reader.
-// It must be called by the application, not exposed as a model-callable tool.
-func WithReviewContext(ctx context.Context, workingDir, intent string, loadTask func(context.Context) (*ReviewTask, error)) context.Context {
-	return context.WithValue(ctx, reviewContextKey{}, reviewEnvironment{workingDir, intent, loadTask})
+// WithReviewContext explicitly binds the permitted background for one run. Never
+// fall back to the raw turn transcript: it may contain the full scheduler prompt.
+// This is application wiring, not a model-callable tool.
+func WithReviewContext(ctx context.Context, workingDir string, background ReviewBackground) context.Context {
+	return context.WithValue(ctx, reviewContextKey{}, reviewEnvironment{workingDir, background})
+}
+
+// WithReviewWorkingDirectory preserves only explicitly selected background.
+// Chat runs can be human-initiated or scheduled, so the Agent must not infer
+// message provenance from the text it receives.
+func WithReviewWorkingDirectory(ctx context.Context, workingDir string) context.Context {
+	env, _ := ctx.Value(reviewContextKey{}).(reviewEnvironment)
+	env.workingDir = workingDir
+	return context.WithValue(ctx, reviewContextKey{}, env)
 }
 
 func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessage) (ReviewInput, error) {
 	if !json.Valid(arguments) {
 		return ReviewInput{}, fmt.Errorf("工具参数不是有效 JSON")
 	}
-	in := ReviewInput{Version: 1, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...), History: []ReviewExecution{}, Correlation: "unavailable"}
+	in := ReviewInput{Version: 2, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...), History: []ReviewExecution{}, Correlation: "unavailable"}
 	if env, ok := ctx.Value(reviewContextKey{}).(reviewEnvironment); ok {
 		in.WorkingDir = env.workingDir
-		in.Intent, in.BackgroundTruncated = bounded(env.intent, reviewTextLimit)
-		if env.loadTask != nil {
-			task, err := env.loadTask(ctx)
-			if err != nil || task == nil {
-				return ReviewInput{}, fmt.Errorf("无法读取任务目标和操作约束")
-			}
-			copyTask := *task
+		background := env.background
+		if (background.Source == BackgroundUserMessage || background.Source == BackgroundWorkerSummary) && strings.TrimSpace(background.Text) != "" {
 			var cut bool
-			copyTask.Description, cut = bounded(task.Description, reviewTextLimit)
-			copyTask.Truncated = copyTask.Truncated || cut
-			copyTask.Goal, cut = bounded(task.Goal, reviewTextLimit)
-			copyTask.Truncated = copyTask.Truncated || cut
-			copyTask.Constraints = append([]db.Constraint{}, task.Constraints...)
-			// Do not silently drop a prohibition when a task exceeds the context budget.
-			constraints, err := json.Marshal(copyTask.Constraints)
-			if err != nil || len(constraints) > reviewConstraintLimit {
-				return ReviewInput{}, fmt.Errorf("任务操作约束超过审查上下文上限")
-			}
-			in.Task = &copyTask
+			background.Text, cut = bounded(background.Text, reviewTextLimit)
+			background.Truncated = background.Truncated || cut
+			in.Background = &background
 		}
 	}
 	if audit, ok := ctx.Value(callKey{}).(db.InterceptAudit); ok {
 		in.Correlation = audit.Correlation
-		var cut bool
-		in.TurnInput, cut = bounded(audit.UserMessage, reviewTextLimit)
-		in.BackgroundTruncated = in.BackgroundTruncated || cut || audit.UserTruncated
 		in.HistoryTruncated = audit.ContextTruncated
 		// Ambiguous concurrent calls must not borrow another call's history.
 		if audit.Correlation == "exact" {
+			var cut bool
 			in.History, cut = reviewHistory(audit.Context, audit.ToolUseID)
 			in.HistoryTruncated = in.HistoryTruncated || cut
 		}

@@ -131,25 +131,44 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
       <div className="flex flex-col gap-2">
         <h3 className="font-medium text-sm">模型审查上下文</h3>
         <p className="text-muted-foreground text-xs">
-          以下为本次实际发送给审查模型的输入快照，包含当时可用的任务背景与执行记录。
-          {input.task ? "当前轮输入可能由调度器生成，不等同于原始用户消息。" : "当前轮输入为本次 Agent 收到的消息。"}
+          以下为本次实际发送给审查模型的输入快照。背景仅用于理解当前动作，裁决依据为审查策略。
+          {input.version < 2 ? "此记录使用旧版输入，保留当时实际发送的内容。" : null}
         </p>
       </div>
-      {input.turn_input ? (
-        <CodeBlock label="当前轮输入" text={input.turn_input} truncated={input.background_truncated} />
+      {input.version >= 2 ? (
+        input.background ? (
+          <div className="flex min-w-0 flex-col gap-2">
+            <CodeBlock
+              label={input.background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要"}
+              text={input.background.text}
+              truncated={input.background.truncated}
+            />
+            <p className="text-muted-foreground text-xs">
+              {input.background.source === "user_message"
+                ? "取自当前用户消息。"
+                : "取自当前 Worker 意图中已有的 summary，由规划器生成，不等同于用户消息。"}
+            </p>
+          </div>
+        ) : (
+          <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>
+        )
       ) : (
-        <p className="text-muted-foreground text-xs">本次审查输入未包含当前轮消息。</p>
-      )}
-      {input.task ? (
         <>
-          <CodeBlock label="任务描述" text={input.task.description} truncated={input.task.truncated} />
-          <CodeBlock label="任务目标" text={input.task.goal} truncated={input.task.truncated} />
-          <CodeBlock label="任务操作约束" text={JSON.stringify(input.task.constraints, null, 2)} />
+          {input.turn_input ? (
+            <CodeBlock label="当前轮输入（旧版）" text={input.turn_input} truncated={input.background_truncated} />
+          ) : null}
+          {input.task ? (
+            <>
+              <CodeBlock label="任务描述（旧版）" text={input.task.description} truncated={input.task.truncated} />
+              <CodeBlock label="任务目标（旧版）" text={input.task.goal} truncated={input.task.truncated} />
+              <CodeBlock label="任务操作约束（旧版）" text={JSON.stringify(input.task.constraints, null, 2)} />
+            </>
+          ) : null}
+          {input.worker_intent ? (
+            <CodeBlock label="Worker 意图（旧版）" text={input.worker_intent} truncated={input.background_truncated} />
+          ) : null}
         </>
-      ) : null}
-      {input.worker_intent ? (
-        <CodeBlock label="Worker 意图" text={input.worker_intent} truncated={input.background_truncated} />
-      ) : null}
+      )}
       {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
       <div className="flex min-w-0 flex-col gap-3">
         <h4 className="font-medium text-muted-foreground text-xs">提供给模型的近期工具执行记录</h4>
