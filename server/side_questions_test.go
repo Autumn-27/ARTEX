@@ -267,6 +267,9 @@ func TestSideHTTPBusyIsolationClearAndReconnect(t *testing.T) {
 			}
 		}
 		resp.Body.Close()
+		if err := scanner.Err(); err != nil {
+			t.Fatal(err)
+		}
 		if !seen {
 			t.Fatal("reconnect did not return cumulative request")
 		}
