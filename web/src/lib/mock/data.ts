@@ -3326,6 +3326,7 @@ export const settings: Settings = {
   workers: 3,
   llm_pool_enabled: true,
   llm_pool_bind_fallback: false,
+  noa_compaction: false,
 };
 
 // ── LLM 轮询（故障转移）──────────────────────────────────────────────────────

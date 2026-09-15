@@ -33,6 +33,7 @@ type ChatAgent struct {
 	webSearch      WebSearchOpts
 	guard          *guard.Guard // optional; nil disables intercept hooks for chat
 	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
 }
 
@@ -45,6 +46,11 @@ func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store
 func (c *ChatAgent) SetNonStreaming(fn func() bool) { c.nonStreamingFn = fn }
 
 func (c *ChatAgent) nonStreaming() bool { return c.nonStreamingFn != nil && c.nonStreamingFn() }
+
+// SetNoaEnabled wires a resolver deciding whether chat runs use the experimental
+// noa context-compression mechanism. nil/unset = off (built-in compaction). Read
+// per run so the settings toggle takes effect without rebuilding the agent.
+func (c *ChatAgent) SetNoaEnabled(fn func() bool) { c.noaEnabledFn = fn }
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -161,6 +167,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		opts.Transcript = c.tx
 		opts.SessionID = sessionID
 	}
+	// 实验功能:开启后由 noa 接管上下文压缩(归档落在本会话 sessionWorkDir 下,持久)。
+	enableNoa(&opts, c.noaEnabledFn, sessionWorkDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()

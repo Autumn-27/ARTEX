@@ -271,6 +271,10 @@ const (
 	// 任务并发上限:开关 + 上限数。默认关闭;开启后默认上限 5(见 defaultConcurrencyLimit)。
 	settingConcurrencyOn    = "task_concurrency_enabled"
 	settingConcurrencyLimit = "task_concurrency_limit"
+	// 实验功能:noa 模型驱动上下文压缩(norma v0.4.0)。默认关闭——开启后平台接入的四类
+	// agent(planner/worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction。
+	// 每 run 读一次,切换只影响之后启动的 run。
+	settingNoaCompaction = "noa_compaction"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -486,6 +490,19 @@ func (m *Manager) SetLLMRecordEnabled(on bool) error {
 	m.llmRecOn = on
 	m.mu.Unlock()
 	return nil
+}
+
+// NoaCompactionEnabled reports whether the experimental noa context-compression
+// mechanism is on (默认关；settings.noa_compaction). Read per agent run via the
+// injected resolver, so a toggle takes effect on the next run without rebuild.
+func (m *Manager) NoaCompactionEnabled() bool {
+	return m.pg.GetBool(settingNoaCompaction, false)
+}
+
+// SetNoaCompaction persists the noa toggle. Effective on the next agent run —
+// the resolver reads it per run, so no rebuild is needed.
+func (m *Manager) SetNoaCompaction(on bool) error {
+	return m.pg.SetBool(settingNoaCompaction, on)
 }
 
 // LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
