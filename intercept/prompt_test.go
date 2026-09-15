@@ -23,6 +23,21 @@ func TestParseVerdict(t *testing.T) {
 		{"extra trailing text on later line", "DENY:清库(D4)\n其它解释", "deny", "清库(D4)"},
 		{"unparseable", "我认为这个命令没问题", "", ""},
 		{"empty", "", "", ""},
+		// Adversarial: substrings must not count as whole-word verdicts.
+		{"disallowed is not allow", "DISALLOWED", "", ""},
+		{"disallowed with reason", "DISALLOWED:命中D4", "", ""},
+		{"not allow negated", "NOT ALLOW", "", ""},
+		{"not allow lowercase", "not allow", "", ""},
+		{"not allow with punctuation", "NOT ALLOW.", "", ""},
+		{"ask inside word", "I ran TASKLIST to check", "", ""},
+		// Mixed output: the strictest whole-word verdict wins regardless of position.
+		{"deny beats earlier allow", "ALLOW? 不,DENY:命中D4", "deny", "命中D4"},
+		{"ask beats earlier allow", "ALLOW 吧,还是 ASK:无法判断", "ask", "无法判断"},
+		{"deny beats ask", "ASK:先看看 DENY:命中D5", "deny", "命中D5"},
+		// A negated ALLOW is skipped, but a later clean ALLOW still counts.
+		{"later clean allow after negation", "NOT ALLOWED? actually ALLOW", "allow", ""},
+		// Only the first non-empty line is read.
+		{"verdict on first non-empty line", "\n\nDENY:清库(D4)\nALLOW", "deny", "清库(D4)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -140,6 +140,23 @@ func FindingFilename(f *db.DBFinding) string {
 	return name + ".md"
 }
 
+// csvSafe 对写入 CSV 的字符串字段做两件事:
+//  1. 防公式注入:以 = + - @ 开头的单元格,Excel/表格软件会按公式执行(典型的
+//     CSV injection 入口,漏洞名称/证据摘要均来自目标侧数据),前置单引号强制按文本解析;
+//  2. 字段内的 \r \n 换成空格,避免单元格内容把一条记录顶成多行(记录断裂注入)。
+func csvSafe(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@':
+		return "'" + s
+	}
+	return s
+}
+
 // FindingsCSV 把一批 findings 渲染成 CSV(带 UTF-8 BOM,便于 Excel 正确识别中文)。
 // 不含大段 report/evidence 全文,只放摘要类字段;需要全文用 Markdown/JSON 导出。
 func FindingsCSV(fs []*db.DBFinding) []byte {
@@ -153,14 +170,14 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	for _, f := range items {
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
-			findingTitle(f),
-			f.VulnClass,
-			nz(f.Severity, "info"),
-			nz(f.Status, "pending"),
-			f.TaskDescription,
+			csvSafe(findingTitle(f)),
+			csvSafe(f.VulnClass),
+			csvSafe(nz(f.Severity, "info")),
+			csvSafe(nz(f.Status, "pending")),
+			csvSafe(f.TaskDescription),
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
-			strings.TrimSpace(f.Summary),
-			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			csvSafe(strings.TrimSpace(f.Summary)),
+			fmt.Sprint(len(f.TrafficBindings)), csvSafe(findingTrafficIDs(f)),
 		})
 	}
 	w.Flush()

@@ -63,10 +63,18 @@ func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion str
 	}
 
 	prog(PhaseDownload, 0, "获取校验和清单…")
-	sums, err := fetchSums(ctx, c, rel)
+	sums, sumsRaw, err := fetchSums(ctx, c, rel)
 	if err != nil {
 		return err
 	}
+
+	// 先验签再信清单：SHA256SUMS 本身也是从同一个 Release 下载的，没有签名
+	// 背书的话，篡改了 zip 的攻击者只要顺手改一行摘要就能绕过哈希校验。
+	prog(PhaseVerify, -1, "验证发布签名…")
+	if err := verifySumsSignature(ctx, c, rel, sumsRaw, prog); err != nil {
+		return err
+	}
+
 	want, ok := sums[name]
 	if !ok {
 		return fmt.Errorf("%s 未收录 %s，拒绝安装未经校验的二进制", sumsAsset, name)
@@ -127,27 +135,28 @@ func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion str
 	return nil
 }
 
-// fetchSums 下载并解析 SHA256SUMS，返回 文件名 → 十六进制摘要。
-func fetchSums(ctx context.Context, c *http.Client, rel *Release) (map[string]string, error) {
+// fetchSums 下载并解析 SHA256SUMS，返回 文件名 → 十六进制摘要，以及文件原始
+// 字节（验签要按原样哈希，不能用解析后的 map 重拼）。
+func fetchSums(ctx context.Context, c *http.Client, rel *Release) (map[string]string, []byte, error) {
 	asset, ok := rel.FindAsset(sumsAsset)
 	if !ok {
-		return nil, fmt.Errorf("该 Release 没有 %s，无法校验完整性，拒绝升级", sumsAsset)
+		return nil, nil, fmt.Errorf("该 Release 没有 %s，无法校验完整性，拒绝升级", sumsAsset)
 	}
 	body, err := get(ctx, c, asset.URL)
 	if err != nil {
-		return nil, fmt.Errorf("下载 %s: %w", sumsAsset, err)
+		return nil, nil, fmt.Errorf("下载 %s: %w", sumsAsset, err)
 	}
 	defer body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("读取 %s: %w", sumsAsset, err)
+		return nil, nil, fmt.Errorf("读取 %s: %w", sumsAsset, err)
 	}
 	out := parseSums(string(raw))
 	if len(out) == 0 {
-		return nil, fmt.Errorf("%s 内容为空或格式无法识别", sumsAsset)
+		return nil, nil, fmt.Errorf("%s 内容为空或格式无法识别", sumsAsset)
 	}
-	return out, nil
+	return out, raw, nil
 }
 
 // parseSums 解析 sha256sum 风格的清单，返回 文件名 → 十六进制摘要。

@@ -26,8 +26,13 @@ type Database struct {
 
 // Config is the on-disk config file shape.
 type Config struct {
-	Database Database `json:"database"`
-	SkillDir string   `json:"skill_dir"`
+	Database        Database `json:"database"`
+	SkillDir        string   `json:"skill_dir"`
+	CallbackAddr    string   `json:"callback_addr"`
+	TunnelPortRange string   `json:"tunnel_port_range"` // 隧道端口池 "min-max"(期 3a)
+	// TaskProxyPortRange 是按任务 MITM 实例(期 3b)的端口池 "min-max",
+	// 默认 21100-21199,与隧道池(20000-21000)错开。
+	TaskProxyPortRange string `json:"task_proxy_port_range"`
 }
 
 // BaseDir is the directory that anchors all runtime artifacts (config.json and
@@ -175,6 +180,60 @@ func (d Database) buildDSN() string {
 	}
 	u.RawQuery = url.Values{"sslmode": {ssl}}.Encode()
 	return u.String()
+}
+
+// CallbackAddr resolves the platform callback address with precedence:
+//
+//	env ARTEX_CALLBACK_ADDR  >  config file (callback_addr)
+//
+// 反弹 shell / 隧道(内网渗透期 3/5)回连平台时用;期 1a(立足点)仅落配置,
+// 未设置时启动给提示,不阻断。
+func CallbackAddr() string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_CALLBACK_ADDR")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(Load().CallbackAddr)
+}
+
+// TunnelPortRange resolves the tunnel port pool ("min-max") with precedence:
+//
+//	env ARTEX_TUNNEL_PORT_RANGE  >  config file (tunnel_port_range)  >  "20000-21000"
+//
+// 多层代理隧道（内网渗透期 3a）平台侧监听端口都从该池分配；合法性由
+// tunnel.ParsePortRange 校验。
+func TunnelPortRange() string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_TUNNEL_PORT_RANGE")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(Load().TunnelPortRange); v != "" {
+		return v
+	}
+	return "20000-21000"
+}
+
+// TaskProxyEnabled reports whether per-task MITM instances (期 3b) are on.
+// Default on; env ARTEX_TASK_PROXY=off/0/false disables (worker traffic then
+// keeps using the single global recording proxy).
+func TaskProxyEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("ARTEX_TASK_PROXY"))
+	return !(strings.EqualFold(v, "off") || v == "0" || strings.EqualFold(v, "false"))
+}
+
+// TaskProxyPortRange resolves the per-task MITM port pool ("min-max") with
+// precedence:
+//
+//	env ARTEX_TASK_PROXY_PORT_RANGE  >  config file (task_proxy_port_range)  >  "21100-21199"
+//
+// 按任务懒建的 MITM 实例(期 3b)监听端口从该池分配;与隧道池错开,合法性由
+// tunnel.ParsePortRange 校验。
+func TaskProxyPortRange() string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_TASK_PROXY_PORT_RANGE")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(Load().TaskProxyPortRange); v != "" {
+		return v
+	}
+	return "21100-21199"
 }
 
 // String is a redacted view of the resolved DSN (password masked) for logging.
