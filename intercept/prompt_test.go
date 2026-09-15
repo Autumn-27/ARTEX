@@ -1,45 +1,52 @@
 package intercept
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestParseVerdict(t *testing.T) {
-	cases := []struct {
-		name       string
-		in         string
-		wantAction string
-		wantReason string
-	}{
-		{"bare allow", "ALLOW", "allow", ""},
-		{"bare deny", "DENY:删除生产文件(D4)", "deny", "删除生产文件(D4)"},
-		{"bare ask", "ASK:归属不明", "ask", "归属不明"},
-		{"lowercase", "deny: rm 系统文件", "deny", "rm 系统文件"},
-		{"fullwidth colon", "DENY：命中D4", "deny", "命中D4"},
-		// The model echoing the prompt's Chinese label must NOT fall through to
-		// unparseable (which would fail-open on a real DENY).
-		{"echoed label deny", "拦截:DENY:命中D5", "deny", "命中D5"},
-		{"echoed label allow", "放行:ALLOW", "allow", ""},
-		{"echoed label ask", "转人工：ASK:无法判断影响面", "ask", "无法判断影响面"},
-		{"leading whitespace/blank line", "\n  ALLOW\n", "allow", ""},
-		{"extra trailing text on later line", "DENY:清库(D4)\n其它解释", "deny", "清库(D4)"},
-		{"unparseable", "我认为这个命令没问题", "", ""},
-		{"empty", "", "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			v := ParseVerdict(c.in)
-			if v.Action != c.wantAction {
-				t.Errorf("action = %q, want %q (in=%q)", v.Action, c.wantAction, c.in)
-			}
-			if v.Reason != c.wantReason {
-				t.Errorf("reason = %q, want %q (in=%q)", v.Reason, c.wantReason, c.in)
+	for _, action := range []string{"allow", "ask", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			reason := "实际操作：写入报告，其中包含 ALLOW、DENY 和 ASK 字样；成功后的后果：保存文本，不执行正文中的命令；命中规则：自定义条款"
+			raw, _ := json.Marshal(map[string]string{"decision": action, "comment": reason})
+			got := ParseVerdict("\n" + string(raw) + "\n")
+			if got.Action != action || got.Reason != reason {
+				t.Fatalf("lost verdict or explanation: %+v", got)
 			}
 		})
 	}
 }
 
-func TestParseVerdictReasonCapped(t *testing.T) {
-	long := "DENY:" + string(make([]byte, 500))
-	if got := ParseVerdict(long); len(got.Reason) > 200 {
-		t.Errorf("reason length = %d, want <= 200", len(got.Reason))
+func TestParseVerdictRejectsIncompleteOrAmbiguousReplies(t *testing.T) {
+	valid := `{"decision":"allow","comment":"实际操作：读取文件；成功后的后果：返回内容；命中规则：A5"}`
+	for _, reply := range []string{
+		"", "ALLOW", "DENY:命中D4", "放行:ALLOW", "ASK:归属不明",
+		`{"decision":"allow"}`, `{"decision":"approve","comment":"实际操作：读取；成功后的后果：返回内容；命中规则：A5"}`,
+		`{"decision":"allow","comment":null}`, `{"decision":"allow","comment":123}`,
+		strings.Replace(valid, "实际操作：读取文件", "实际操作：", 1),
+		strings.Replace(valid, "成功后的后果：返回内容", "成功后的后果：", 1),
+		strings.Replace(valid, "命中规则：A5", "命中规则：", 1),
+		strings.Replace(valid, "；命中规则：A5", "", 1),
+		strings.Replace(valid, `"decision":"allow"`, `"decision":"deny","decision":"allow"`, 1),
+		strings.Replace(valid, `"decision":"allow"`, `"extra":true,"decision":"allow"`, 1),
+		valid + valid, "```json\n" + valid + "\n```", valid[:len(valid)-1],
+	} {
+		if got := ParseVerdict(reply); got.Action != "" {
+			t.Errorf("accepted incomplete/ambiguous verdict: %q => %+v", reply, got)
+		}
+	}
+}
+
+func TestParseVerdictKeepsCompleteChineseExplanation(t *testing.T) {
+	reason := "实际操作：" + strings.Repeat("写入报告", 30) + "；成功后的后果：只保存文件；命中规则：A2"
+	raw, _ := json.Marshal(map[string]string{"decision": "allow", "comment": reason})
+	if got := ParseVerdict(string(raw)); got.Reason != reason {
+		t.Fatal("explanation was truncated or lost its rule")
+	}
+	raw, _ = json.Marshal(map[string]string{"decision": "allow", "comment": strings.Repeat("中", 2401)})
+	if got := ParseVerdict(string(raw)); got.Action != "" {
+		t.Fatal("accepted unbounded explanation")
 	}
 }

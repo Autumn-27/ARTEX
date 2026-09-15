@@ -52,7 +52,7 @@ func TestCaptureApprovalLifecycle(t *testing.T) {
 		{"timeout_allow", "ask", "timeout", "succeeded", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ic.SetReviewer(func(context.Context, int64, string, string, string) (intercept.Decision, error) {
+			ic.SetReviewer(func(context.Context, int64, string, intercept.ReviewInput) (intercept.Decision, error) {
 				return intercept.Decision{Action: tc.action, Message: "probe review", ProfileID: 7}, nil
 			})
 			g := guard.NewWithInterceptor(ic)

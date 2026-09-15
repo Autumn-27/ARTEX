@@ -29,6 +29,8 @@ type InterceptAudit struct {
 	ContextTruncated bool                    `json:"context_truncated,omitempty"`
 	CapturedAt       time.Time               `json:"captured_at"`
 	ModelFallback    bool                    `json:"model_fallback,omitempty"`
+	ModelInput       json.RawMessage         `json:"model_input,omitempty"`
+	ModelInputDigest string                  `json:"model_input_digest,omitempty"`
 	InitialAction    string                  `json:"initial_action"`
 	InitialReason    string                  `json:"initial_reason"`
 	EffectiveAction  string                  `json:"effective_action,omitempty"`

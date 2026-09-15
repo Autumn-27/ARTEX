@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,9 +25,9 @@ func (s *Server) chatGuard() *guard.Guard {
 // wireInterceptReviewer installs the LLM fallback judge into the interceptor. The
 // judge runs only on tool calls that matched no rule (see intercept.Judge). It
 // resolves the configured judge profile (0 → active/default), builds a provider,
-// runs a one-shot single-line classification, and parses ALLOW/ASK/DENY.
+// runs a one-shot JSON classification with an explanation for every verdict.
 func (s *Server) wireInterceptReviewer() {
-	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt, tool, command string) (intercept.Decision, error) {
+	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt string, input intercept.ReviewInput) (intercept.Decision, error) {
 		if profileID == 0 {
 			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 				profileID = p.ID
@@ -39,25 +40,35 @@ func (s *Server) wireInterceptReviewer() {
 		if !ok {
 			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
 		}
-		user := fmt.Sprintf("Tool: %s\nArguments:\n%s", tool, command)
-		text, err := streamCollectText(ctx, prov, prompt, user)
+		text, err := reviewCompletion(ctx, prov, prompt, input)
 		if err != nil {
 			return intercept.Decision{ProfileID: profileID}, err
 		}
 		v := intercept.ParseVerdict(text)
+		if v.Action == "" {
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("模型裁决格式无效，必须包含裁决、实际操作、成功后的后果和命中规则")
+		}
 		return intercept.Decision{Action: v.Action, Message: v.Reason, ProfileID: profileID}, nil
 	})
 }
 
+func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, input intercept.ReviewInput) (string, error) {
+	user, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return streamCollectText(ctx, prov, prompt, string(user))
+}
+
 // streamCollectText runs a single non-streaming-style completion (thinking off,
-// low temperature, tiny output) and returns the concatenated text. Used by the
-// LLM fallback judge, whose reply is one short line (ALLOW/ASK:.../DENY:...).
+// low temperature, bounded output) and returns the concatenated text. The
+// budget includes the explanation and complete closing JSON delimiters.
 func streamCollectText(ctx context.Context, prov llm.Provider, system, user string) (string, error) {
 	temp := 0.0
 	req := llm.CompletionRequest{
 		System:      []string{system},
 		Messages:    []llm.Message{llm.UserText(user)},
-		MaxTokens:   128,
+		MaxTokens:   1024,
 		Temperature: &temp,
 		Thinking:    "disabled",
 	}

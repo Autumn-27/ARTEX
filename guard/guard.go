@@ -75,13 +75,12 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		cmd = in.Text
 	}
 	g.record(ev.ToolName, "allow", "", cmd)
-	return g.applyIntercept(ctx, ev, cmd)
+	return g.applyIntercept(ctx, ev)
 }
 
 // applyIntercept evaluates user-configured intercept rules against the tool call.
-// It is called after all built-in safety checks pass. cmd is the extracted shell
-// surface (empty for non-shell tools), passed to the LLM fallback judge.
-func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) hook.Result {
+// Both rules and the fallback judge receive the complete tool input.
+func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
@@ -93,7 +92,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) h
 	if !matched {
 		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
 		// or unwired, keep current behavior and allow.
-		d, judged := g.interceptor.Judge(ctx, ev.ToolName, judgeSubject(cmd, ev.Input))
+		d, judged := g.interceptor.Judge(ctx, ev.ToolName, ev.Input)
 		if !judged {
 			return hook.Result{}
 		}
@@ -139,16 +138,6 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event, cmd string) h
 func systemBlockMessage(reason string) string {
 	return "【ARTEX 平台管控·非目标防御】此调用被平台拦截。" +
 		"原因：" + reason + "。此操作被禁止。"
-}
-
-// judgeSubject builds the text the LLM fallback judge evaluates: the shell
-// command for shell tools, or the raw tool input JSON for others (Write/Edit/…)
-// so the model sees what is being written/requested.
-func judgeSubject(cmd string, input []byte) string {
-	if cmd != "" {
-		return cmd
-	}
-	return string(input)
 }
 
 var reBlocked = regexp.MustCompile(`(?i)\b(403|forbidden|waf|blocked|rate.?limit|429|captcha|denied)\b`)

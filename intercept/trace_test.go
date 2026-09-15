@@ -34,7 +34,7 @@ func TestTraceExactCorrelationAndSnapshot(t *testing.T) {
 	}
 }
 
-// A rule/model allow is logged for auditability but must not carry the replay
+// A rule allow is logged for auditability but must not carry the replay
 // snapshot: with the fallback judge on those rows are emitted per tool call, and
 // keeping 24×8KiB of context plus a 32KiB prompt each would put hundreds of MB
 // into intercept_pending (and from there into the task archive). Decision
