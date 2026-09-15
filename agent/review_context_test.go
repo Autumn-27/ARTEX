@@ -115,12 +115,19 @@ func TestTaskReviewContextAcrossToolCalls(t *testing.T) {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}
 	for _, row := range rows {
-		if row.Status != "denied" {
-			continue
-		}
 		detail, err := d.GetInterceptDetail(row.ID)
-		if err != nil || detail.Audit == nil || len(detail.Audit.ModelInput) == 0 || detail.Audit.ExecutionStatus != "not_executed" {
-			t.Fatalf("denial lost model input or execution state: %+v err=%v", detail, err)
+		if err != nil || detail == nil || detail.Audit == nil || len(detail.Audit.ModelInput) == 0 {
+			t.Fatalf("verdict lost model input: %+v err=%v", detail, err)
+		}
+		var saved intercept.ReviewInput
+		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Task == nil || saved.TurnInput != first.TurnInput {
+			t.Fatal("stored review input cannot reconstruct the actual task context")
+		}
+		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || len(saved.Task.Constraints) != 0) {
+			t.Fatal("automatic allow lost execution result or its original constraint snapshot")
+		}
+		if row.Status == "denied" && detail.Audit.ExecutionStatus != "not_executed" {
+			t.Fatal("denial recorded an execution")
 		}
 	}
 

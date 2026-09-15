@@ -139,13 +139,9 @@ func TestReviewInputBoundsAndInvalidContext(t *testing.T) {
 func TestReviewInputAuditRetention(t *testing.T) {
 	input := json.RawMessage(`{"version":1,"history":[],"tool_name":"Read","arguments":{}}`)
 	dec := Decision{Action: "allow", ModelInput: input, ModelInputDigest: digestInput(input)}
-	a := auditFor(t.Context(), dec, []byte(`{}`), "allowed")
-	if len(a.ModelInput) != 0 || a.ModelInputDigest == "" {
-		t.Fatal("automatic allow must retain only review fingerprint")
-	}
-	for _, status := range []string{"pending", "denied"} {
-		a = auditFor(t.Context(), dec, []byte(`{}`), status)
-		if string(a.ModelInput) != string(input) {
+	for _, status := range []string{"allowed", "pending", "denied"} {
+		a := auditFor(t.Context(), dec, []byte(`{}`), status)
+		if string(a.ModelInput) != string(input) || a.ModelInputDigest != digestInput(input) {
 			t.Fatal("review snapshot lost")
 		}
 	}
@@ -154,7 +150,31 @@ func TestReviewInputAuditRetention(t *testing.T) {
 func TestEffectiveJudgePromptPreservesCustomPolicy(t *testing.T) {
 	custom := "自定义策略：禁止对真实用户发送请求。"
 	prompt := EffectiveJudgePrompt(custom)
-	if !strings.HasPrefix(prompt, custom) || strings.Count(EffectiveJudgePrompt(prompt), JudgeContextBoundary) != 1 {
+	if !strings.HasPrefix(prompt, custom) || strings.Count(EffectiveJudgePrompt(prompt), JudgeContextBoundary) != 1 || strings.Count(EffectiveJudgePrompt(prompt), JudgeOutputContract) != 1 {
 		t.Fatal("custom prompt changed or input boundary duplicated")
+	}
+}
+
+func TestAutomaticAllowRetainsActualReviewContext(t *testing.T) {
+	ctx, trace := WithTrace(t.Context(), "请读取刚创建的文件", []db.InterceptContextEntry{
+		{Kind: "tool_use", ToolUseID: "prior", Tool: "Write", Text: `{"file_path":"probe.txt"}`},
+		{Kind: "tool_result", ToolUseID: "prior", Text: "Created probe.txt"},
+	})
+	args := json.RawMessage(`{"command":"cat probe.txt"}`)
+	trace.Start("current", "Bash", args)
+	ctx = WithCall(ctx, "Bash", args)
+	input, err := BuildReviewInput(ctx, "Bash", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(input)
+	reason := "实际操作：读取测试文件；成功后的后果：返回文件内容；命中规则：A5"
+	a := auditFor(ctx, Decision{Action: "allow", Message: reason, ModelInput: raw, ModelInputDigest: digestInput(raw)}, args, "allowed")
+	var saved ReviewInput
+	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.TurnInput != "请读取刚创建的文件" || len(saved.History) != 1 || saved.History[0].ToolUseID != "prior" || a.InitialReason != reason {
+		t.Fatal("automatic allow lost the model's input or explanation")
+	}
+	if a.Context != nil || a.UserMessage != "" {
+		t.Fatal("automatic allow redundantly retained the larger raw transcript")
 	}
 }

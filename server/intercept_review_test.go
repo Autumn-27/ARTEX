@@ -17,7 +17,7 @@ type reviewCaptureProvider struct{ request llm.CompletionRequest }
 func (p *reviewCaptureProvider) Stream(_ context.Context, request llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	p.request = request
 	return func(yield func(llm.StreamEvent, error) bool) {
-		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "ASK:测试文件归属未确认"}, nil)
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: `{"decision":"ask","comment":"实际操作：删除文件；成功后的后果：文件会丢失，归属尚未确认；命中规则：ASK（归属不明）"}`}, nil)
 	}
 }
 func (p *reviewCaptureProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
@@ -43,11 +43,14 @@ func TestReviewCompletionSendsTaskAndPairedContext(t *testing.T) {
 	p := &reviewCaptureProvider{}
 	prompt := intercept.EffectiveJudgePrompt(intercept.DefaultJudgePrompt)
 	reply, err := reviewCompletion(ctx, p, prompt, input)
-	if err != nil || !strings.HasPrefix(reply, "ASK:") {
+	if err != nil || intercept.ParseVerdict(reply).Action != "ask" {
 		t.Fatalf("%s %v", reply, err)
 	}
 	if len(p.request.System) != 1 || p.request.System[0] != prompt || len(p.request.Messages) != 1 {
 		t.Fatal("wrong review request roles")
+	}
+	if !strings.Contains(prompt, intercept.JudgeOutputContract) || p.request.MaxTokens < 1024 {
+		t.Fatal("review request cannot return a complete explanation")
 	}
 	body := p.request.Messages[0].Content[0].Text
 	var got intercept.ReviewInput

@@ -24,7 +24,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { InterceptApprovalRow, InterceptAudit, InterceptDetail } from "@/lib/types";
+import type { InterceptApprovalRow, InterceptAudit, InterceptDetail, InterceptReviewInput } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function fmtTime(value?: string) {
@@ -118,6 +118,66 @@ const executionLabels: Record<InterceptAudit["execution_status"], string> = {
   failed: "执行失败",
   unknown: "执行结果未知",
 };
+
+function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
+  return (
+    <section className="flex min-w-0 flex-col gap-4" aria-label="模型审查上下文">
+      <div className="flex flex-col gap-2">
+        <h3 className="font-medium text-sm">模型审查上下文</h3>
+        <p className="text-muted-foreground text-xs">
+          以下为本次实际发送给审查模型的输入快照，包含当时可用的任务背景与执行记录。
+          {input.task ? "当前轮输入可能由调度器生成，不等同于原始用户消息。" : "当前轮输入为本次 Agent 收到的消息。"}
+        </p>
+      </div>
+      {input.turn_input ? (
+        <CodeBlock label="当前轮输入" text={input.turn_input} truncated={input.background_truncated} />
+      ) : (
+        <p className="text-muted-foreground text-xs">本次审查输入未包含当前轮消息。</p>
+      )}
+      {input.task ? (
+        <>
+          <CodeBlock label="任务描述" text={input.task.description} truncated={input.task.truncated} />
+          <CodeBlock label="任务目标" text={input.task.goal} truncated={input.task.truncated} />
+          <CodeBlock label="任务操作约束" text={JSON.stringify(input.task.constraints, null, 2)} />
+        </>
+      ) : null}
+      {input.worker_intent ? (
+        <CodeBlock label="Worker 意图" text={input.worker_intent} truncated={input.background_truncated} />
+      ) : null}
+      {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
+      <div className="flex min-w-0 flex-col gap-3">
+        <h4 className="font-medium text-muted-foreground text-xs">提供给模型的近期工具执行记录</h4>
+        {input.history?.length ? (
+          input.history.map((entry) => (
+            <div key={entry.tool_use_id} className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+              <p className="break-words font-medium text-xs">
+                {entry.tool} · {entry.status === "succeeded" ? "成功" : "失败（可能有部分副作用）"}
+              </p>
+              <CodeBlock label="历史调用参数" text={entry.arguments_preview} truncated={entry.truncated} />
+              <CodeBlock label="历史执行结果" text={entry.result} truncated={entry.truncated} />
+            </div>
+          ))
+        ) : (
+          <p className="text-muted-foreground text-xs">本次未提供可配对的历史工具执行记录。</p>
+        )}
+        {input.history_truncated ? (
+          <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
+        ) : null}
+      </div>
+      <Collapsible>
+        <CollapsibleTrigger asChild>
+          <Button variant="outline" size="sm" className="self-start">
+            <ChevronDownIcon data-icon="inline-start" />
+            查看完整模型审查输入 JSON
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="pt-3">
+          <CodeBlock label="模型审查输入" text={JSON.stringify(input, null, 2)} />
+        </CollapsibleContent>
+      </Collapsible>
+    </section>
+  );
+}
 
 type Decide = (id: number, decision: "allowed" | "denied") => Promise<void>;
 
@@ -234,7 +294,12 @@ export function ApprovalDetail({
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">来源</dt>
             <dd className="break-words">
-              {current.conv_title || (current.task_id ? `任务 ${current.task_id}` : current.conversation_id ? `对话 #${current.conversation_id}` : current.agent_name || "未记录")}
+              {current.conv_title ||
+                (current.task_id
+                  ? `任务 ${current.task_id}`
+                  : current.conversation_id
+                    ? `对话 #${current.conversation_id}`
+                    : current.agent_name || "未记录")}
             </dd>
             <dt className="text-muted-foreground">申请时间</dt>
             <dd>{fmtTime(row.created_at)}</dd>
@@ -284,37 +349,59 @@ export function ApprovalDetail({
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-4">
             <div className="flex min-w-0 flex-col gap-5">
-              <CodeBlock label="用户消息 / 当前轮输入" text={audit.user_message} truncated={audit.user_truncated} />
-              <section className="flex min-w-0 flex-col gap-3">
-                <h3 className="font-medium text-muted-foreground text-xs">可见会话上下文</h3>
-                <p className="text-muted-foreground text-xs">
-                  保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型实际使用的内容以“模型审查输入”为准。
-                </p>
-                {audit.context_truncated ? (
-                  <p className="text-muted-foreground text-xs">仅保存最近的上下文，部分内容已截断。</p>
-                ) : null}
-                {audit.context?.length ? (
-                  audit.context.map((entry, index) => (
-                    <CodeBlock
-                      key={`${entry.kind}-${entry.tool_use_id || index}`}
-                      label={`${contextLabels[entry.kind] ?? entry.kind}${entry.tool ? ` · ${entry.tool}` : ""}${entry.is_error ? " · 异常" : ""}`}
-                      text={entry.text}
-                      truncated={entry.truncated}
-                    />
-                  ))
-                ) : (
-                  <p className="text-muted-foreground text-sm">未记录可关联的上下文</p>
-                )}
-              </section>
               {audit.model_input ? (
-                <CodeBlock label="模型审查输入" text={JSON.stringify(audit.model_input, null, 2)} />
+                <ModelReviewContext input={audit.model_input} />
               ) : (
-                <p className="text-muted-foreground text-xs">
-                  {audit.model_input_digest
-                    ? "本次自动放行仅保留审查输入指纹，未保存完整模型输入。"
-                    : "此记录未保存模型审查输入，可能由规则直接裁决或产生于旧版本。"}
-                </p>
+                <Alert>
+                  <AlertDescription>
+                    {audit.model_input_digest
+                      ? "此历史记录仅保存审查输入指纹，未保存输入原文，无法还原当时发给模型的上下文。这不代表审查时没有上下文；新产生的模型裁决会保留输入快照。"
+                      : "此记录没有保存模型审查输入，可能由规则直接裁决、模型调用前发生异常或产生于旧版本。"}
+                  </AlertDescription>
+                </Alert>
               )}
+              {audit.user_message || audit.context?.length ? (
+                <Collapsible>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" size="sm">
+                      <ChevronDownIcon data-icon="inline-start" />
+                      查看会话审计片段
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="pt-3">
+                    <div className="flex min-w-0 flex-col gap-3">
+                      {audit.user_message ? (
+                        <CodeBlock
+                          label="会话当前轮输入（审计片段）"
+                          text={audit.user_message}
+                          truncated={audit.user_truncated}
+                        />
+                      ) : null}
+                      <section className="flex min-w-0 flex-col gap-3">
+                        <h3 className="font-medium text-muted-foreground text-xs">可见会话上下文</h3>
+                        <p className="text-muted-foreground text-xs">
+                          保存于 {fmtTime(audit.captured_at)} 的会话记录片段。模型实际使用的内容以“模型审查输入”为准。
+                        </p>
+                        {audit.context_truncated ? (
+                          <p className="text-muted-foreground text-xs">仅保存最近的上下文，部分内容已截断。</p>
+                        ) : null}
+                        {audit.context?.length ? (
+                          audit.context.map((entry, index) => (
+                            <CodeBlock
+                              key={`${entry.kind}-${entry.tool_use_id || index}`}
+                              label={`${contextLabels[entry.kind] ?? entry.kind}${entry.tool ? ` · ${entry.tool}` : ""}${entry.is_error ? " · 异常" : ""}`}
+                              text={entry.text}
+                              truncated={entry.truncated}
+                            />
+                          ))
+                        ) : (
+                          <p className="text-muted-foreground text-sm">未记录可关联的上下文</p>
+                        )}
+                      </section>
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+              ) : null}
               <CodeBlock
                 label={`${initialLabel}：${actionLabels[audit.initial_action] ?? audit.initial_action}`}
                 text={audit.initial_reason.replace(/^\[模型\]\s*/, "")}

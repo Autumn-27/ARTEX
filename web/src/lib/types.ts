@@ -1280,9 +1280,37 @@ export interface LLMTask {
   count: number;
 }
 
+// The exact JSON sent to the review model, retained for all model verdicts.
+export interface InterceptReviewInput {
+  version: number;
+  task?: {
+    task_id: number;
+    description: string;
+    goal: string;
+    constraints: { id: number; kind: string; text: string; origin: string; created_at: number }[];
+    truncated?: boolean;
+  };
+  working_directory?: string;
+  worker_intent?: string;
+  turn_input?: string;
+  background_truncated?: boolean;
+  history: {
+    tool_use_id: string;
+    tool: string;
+    arguments_preview: string;
+    result: string;
+    status: "succeeded" | "failed";
+    truncated?: boolean;
+  }[];
+  history_truncated?: boolean;
+  correlation: "exact" | "ambiguous" | "unavailable";
+  tool_name: string;
+  arguments: Record<string, unknown>;
+}
+
 // Immutable review snapshot plus separately recorded execution outcome.
 export interface InterceptAudit {
-  model_input?: Record<string, unknown>;
+  model_input?: InterceptReviewInput;
   model_input_digest?: string;
   run_id?: string;
   tool_use_id?: string;
