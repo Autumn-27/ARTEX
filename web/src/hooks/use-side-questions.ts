@@ -128,24 +128,37 @@ export function useSideQuestions(parent: string | null) {
   useEffect(() => {
     if (!runningID) return;
     const version = epoch.current;
-    const stream = new EventSource(sseUrl(`/api/side-questions/${runningID}/events`));
-    stream.addEventListener("snapshot", (event) => {
-      if (version !== epoch.current) return;
-      try {
-        const item = JSON.parse((event as MessageEvent).data) as SideExchange;
-        if (item.id !== runningID) return;
-        setItems((old) => merge(old, [item]));
-        restoreFailedDraft([item]);
-        if (item.status !== "running") stream.close();
-      } catch {
-        setError("旁路数据解析失败，请重新打开面板");
-      }
-    });
-    stream.addEventListener("cleared", () => {
-      stream.close();
-      if (version === epoch.current) setItems([]);
-    });
-    return () => stream.close();
+    let stream: EventSource | null = null;
+    let cancelled = false;
+    // F6:SSE 凭据是 60s 一次性 ticket;断流后不再自动重连,由 2s 轮询兜底。
+    void sseUrl(`/api/side-questions/${runningID}/events`)
+      .then((url) => {
+        if (cancelled) return;
+        stream = new EventSource(url);
+        stream.addEventListener("snapshot", (event) => {
+          if (version !== epoch.current) return;
+          try {
+            const item = JSON.parse((event as MessageEvent).data) as SideExchange;
+            if (item.id !== runningID) return;
+            setItems((old) => merge(old, [item]));
+            restoreFailedDraft([item]);
+            if (item.status !== "running") stream?.close();
+          } catch {
+            setError("旁路数据解析失败，请重新打开面板");
+          }
+        });
+        stream.addEventListener("cleared", () => {
+          stream?.close();
+          if (version === epoch.current) setItems([]);
+        });
+      })
+      .catch(() => {
+        // 换票失败(如 token 刚过期)——轮询仍在跑,不视为致命。
+      });
+    return () => {
+      cancelled = true;
+      stream?.close();
+    };
   }, [runningID, streamEpoch, restoreFailedDraft]);
 
   const ask = async (input: string) => {

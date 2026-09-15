@@ -10,6 +10,7 @@ import {
   ClockIcon,
   CoinsIcon,
   ListChecksIcon,
+  NetworkIcon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -19,6 +20,7 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +32,7 @@ import { api } from "@/lib/api";
 import type {
   Finding,
   ModelTokenStat,
+  PendingScopeRow,
   Stats,
   Task,
   TaskConstraint,
@@ -159,6 +162,43 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       // 忽略：无 asset store 时接口 503，范围卡片自然为空
     }
   }, [taskId]);
+
+  // 待授权网段：引擎在授权边界外探测到的网段，批准后写入任务 scope 放行。
+  const [pendingScope, setPendingScope] = React.useState<PendingScopeRow[]>([]);
+  // 正在决定的条目 id，用于禁用按钮 + 防重复点击。
+  const [deciding, setDeciding] = React.useState<Set<number>>(new Set());
+
+  const loadPendingScope = React.useCallback(async () => {
+    try {
+      setPendingScope(await api.pendingScope(taskId));
+    } catch {
+      // 忽略：瞬时错误，下次轮询重试；无数据时区块不渲染
+    }
+  }, [taskId]);
+
+  const decideScope = async (row: PendingScopeRow, action: "approve" | "dismiss") => {
+    setDeciding((prev) => new Set(prev).add(row.id));
+    try {
+      await api.decidePendingScope(row.id, action);
+      if (action === "approve") {
+        toast.success(`已批准 ${row.value} 加入测试范围`);
+        await loadScope(); // 新 scope 行出现在下方测试范围卡片里
+      } else {
+        toast.success(`已忽略 ${row.value}`);
+      }
+      await loadPendingScope();
+    } catch (e) {
+      // 409 等冲突：刷新列表，以服务端决定为准
+      toast.error(e instanceof Error ? e.message : "操作失败");
+      await loadPendingScope().catch(() => {});
+    } finally {
+      setDeciding((prev) => {
+        const next = new Set(prev);
+        next.delete(row.id);
+        return next;
+      });
+    }
+  };
 
   const loadGoals = React.useCallback(async () => {
     try {
@@ -394,6 +434,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
     void load();
     void loadScope();
+    void loadPendingScope();
     void loadTokens();
     void loadGoals();
     void loadConstraints();
@@ -402,12 +443,13 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       void loadTokens();
       void loadGoals();
       void loadConstraints();
+      void loadPendingScope();
     }, 3000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
+  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints, loadPendingScope]);
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
@@ -801,6 +843,54 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
+      {/* 待授权网段：引擎在授权边界外反复探测到的网段。批准 = 写入任务 scope，
+          guard 后续放行;忽略 = 不再提示。空态(无 pending)不渲染本卡片。 */}
+      {pendingScope.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <NetworkIcon className="size-4 text-amber-500" /> 待授权网段
+              <span className="text-muted-foreground text-xs font-normal">
+                （边界外探测到的网段，批准后放行，共 {pendingScope.length} 条）
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-1.5">
+            {pendingScope.map((row) => (
+              <div key={row.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
+                <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
+                  {row.kind || "网段"}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-xs" title={row.value}>
+                  {row.value}
+                </span>
+                <span className="text-muted-foreground shrink-0 text-xs tabular-nums">命中 {row.hits} 次</span>
+                <span className="text-muted-foreground shrink-0 text-xs">
+                  最近 {row.last_seen ? new Date(row.last_seen).toLocaleString("zh-CN") : "—"}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 shrink-0"
+                  disabled={deciding.has(row.id)}
+                  onClick={() => void decideScope(row, "approve")}
+                >
+                  批准扩 scope
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 shrink-0"
+                  disabled={deciding.has(row.id)}
+                  onClick={() => void decideScope(row, "dismiss")}
+                >
+                  忽略
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
       {/* 测试范围：覆盖度分母 + 授权边界，可手动增删。 */}
       <Card>
         <CardHeader>

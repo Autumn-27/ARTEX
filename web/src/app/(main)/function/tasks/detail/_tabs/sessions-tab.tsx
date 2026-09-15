@@ -887,6 +887,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const token = (reqTokenRef.current.mainboot ?? 0) + 1;
     reqTokenRef.current.mainboot = token;
     let bootKey = mainSessionKey(0);
+    // F6: SSE 凭据是 60s 一次性 ticket(见 api.ts sseUrl),EventSource 自带的
+    // 自动重连第二次握手必然 401——连接彻底关闭后重新换票重连;snapshot 游标
+    // 回放 + mergeBySeq 按 seq 去重补偿空窗,等价于原来的 Last-Event-ID 续传。
+    let sseRetry: ReturnType<typeof setTimeout> | undefined;
+    const openStreamRef = { current: null as null | (() => void) };
     // Resolve the main-agent segments first, then load the CURRENT segment's history and
     // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
     // frame by session_key (main:<seg>), so switching segments needs no new stream.
@@ -920,69 +925,86 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           };
         });
         // Open the single task SSE from the snapshot cursor.
-        const es = new EventSource(
-          sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
-        );
-        esRef.current = es;
-        es.onopen = () => setSseLive(true);
-        es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
-        es.onmessage = (e) => {
-          let a: Activity;
-          try {
-            a = JSON.parse(e.data) as Activity;
-          } catch {
-            return; // ignore malformed frame
-          }
-          if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
-            llmToastSeqRef.current.add(a.seq);
-            const transition = a.metadata?.llm_transition;
-            if (transition?.mode === "exhausted" || a.is_error) {
-              toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            } else if (transition?.mode === "automatic") {
-              toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            } else {
-              toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            }
-            void api
-              .taskLLMResolution(taskId)
-              .then((value) => {
-                if (alive) setLLMResolutions(value);
-              })
-              .catch(() => {
-                // The periodic resolver poll will retry if this event-triggered refresh fails.
-              });
-          }
-          const k = sessionKeyOf(a);
-          setStore((prev) => {
-            const cur = prev[k] ?? emptyState();
-            const activeK = activeKeyRef.current;
-            // Merge into sessions that are loaded, actively loading, or the current
-            // view (so returning is instant + a frame that lands mid-load isn't lost).
-            // A cold, inactive session also keeps a tiny accounting tail so the
-            // sidebar can add the latest unfinished usage without loading history.
-            if (!cur.loaded && !cur.loading && k !== activeK) {
-              const accountingItems =
-                a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
-              return {
-                ...prev,
-                [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+        openStreamRef.current = () => {
+          void sseUrl(
+            `/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`,
+          )
+            .then((url) => {
+              if (!alive) return;
+              const es = new EventSource(url);
+              esRef.current = es;
+              es.onopen = () => setSseLive(true);
+              es.onerror = () => {
+                setSseLive(false);
+                // 一次性 ticket 不支持浏览器自动重连(重试即 401);彻底关闭后换票重连。
+                if (es.readyState === EventSource.CLOSED && alive && esRef.current === es) {
+                  esRef.current = null;
+                  sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
+                }
               };
-            }
-            let items = mergeBySeq(cur.items, [a]);
-            // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
-            // but never while the user is reading this session's history (scrolled up).
-            let hasMore = cur.hasMore;
-            let earliestSeq = cur.earliestSeq;
-            const trimmable = k !== activeK || atBottomRef.current;
-            if (trimmable && items.length > MAX_KEEP) {
-              items = items.slice(items.length - MAX_KEEP);
-              hasMore = true;
-              earliestSeq = items[0].seq;
-            }
-            const unread = k === activeK ? 0 : cur.unread + 1;
-            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
-          });
+              es.onmessage = (e) => {
+                let a: Activity;
+                try {
+                  a = JSON.parse(e.data) as Activity;
+                } catch {
+                  return; // ignore malformed frame
+                }
+                if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
+                  llmToastSeqRef.current.add(a.seq);
+                  const transition = a.metadata?.llm_transition;
+                  if (transition?.mode === "exhausted" || a.is_error) {
+                    toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  } else if (transition?.mode === "automatic") {
+                    toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  } else {
+                    toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  }
+                  void api
+                    .taskLLMResolution(taskId)
+                    .then((value) => {
+                      if (alive) setLLMResolutions(value);
+                    })
+                    .catch(() => {
+                      // The periodic resolver poll will retry if this event-triggered refresh fails.
+                    });
+                }
+                const k = sessionKeyOf(a);
+                setStore((prev) => {
+                  const cur = prev[k] ?? emptyState();
+                  const activeK = activeKeyRef.current;
+                  // Merge into sessions that are loaded, actively loading, or the current
+                  // view (so returning is instant + a frame that lands mid-load isn't lost).
+                  // A cold, inactive session also keeps a tiny accounting tail so the
+                  // sidebar can add the latest unfinished usage without loading history.
+                  if (!cur.loaded && !cur.loading && k !== activeK) {
+                    const accountingItems =
+                      a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
+                    return {
+                      ...prev,
+                      [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+                    };
+                  }
+                  let items = mergeBySeq(cur.items, [a]);
+                  // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
+                  // but never while the user is reading this session's history (scrolled up).
+                  let hasMore = cur.hasMore;
+                  let earliestSeq = cur.earliestSeq;
+                  const trimmable = k !== activeK || atBottomRef.current;
+                  if (trimmable && items.length > MAX_KEEP) {
+                    items = items.slice(items.length - MAX_KEEP);
+                    hasMore = true;
+                    earliestSeq = items[0].seq;
+                  }
+                  const unread = k === activeK ? 0 : cur.unread + 1;
+                  return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
+                });
+              };
+            })
+            .catch(() => {
+              if (alive) sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
+            });
         };
+        openStreamRef.current();
       })
       .catch((err) => {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
@@ -993,6 +1015,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
     return () => {
       alive = false;
+      if (sseRetry) clearTimeout(sseRetry);
       esRef.current?.close();
       esRef.current = null;
     };

@@ -1,5 +1,9 @@
 const TOKEN_KEY = "artex_token";
-const COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 天（秒）
+// SESSION_COOKIE 只是一个“已登录”标记(无凭据内容),供 Next proxy(middleware)
+// 在开发模式下做服务端跳转;真正的 access token 只走 localStorage + Authorization
+// 头,refresh token 是 HttpOnly cookie,JS 均不可读(F6:不再有 JS 可写的 token
+// 镜像 cookie)。
+const SESSION_COOKIE = "artex_session";
 
 export interface CurrentUser {
   id: string;
@@ -19,13 +23,13 @@ export const auth = {
 
   setToken(token: string): void {
     localStorage.setItem(TOKEN_KEY, token);
-    // 同步写 cookie，供 Next.js middleware 服务端读取
-    document.cookie = `${TOKEN_KEY}=${encodeURIComponent(token)}; path=/; max-age=${COOKIE_MAX_AGE}; SameSite=Lax`;
+    // 只写登录标记 cookie(非敏感),供 Next.js middleware 服务端读取
+    document.cookie = `${SESSION_COOKIE}=1; path=/; SameSite=Lax`;
   },
 
   clearToken(): void {
     localStorage.removeItem(TOKEN_KEY);
-    document.cookie = `${TOKEN_KEY}=; path=/; max-age=0`;
+    document.cookie = `${SESSION_COOKIE}=; path=/; max-age=0`;
   },
 
   // 从 JWT payload 的 sub 字段解析当前用户，仅用于展示，不做签名验证。
