@@ -14,8 +14,8 @@ import (
 	"github.com/Autumn-27/norma/tool"
 )
 
-// Real PostgreSQL + SDK hooks: each review receives only the current call and
-// selected background. Prior execution stays in the separate audit record.
+// Real PostgreSQL + SDK hooks: Worker reviews receive the current call only.
+// Intent summaries, inherited background and prior execution are excluded.
 func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	dsn, _, err := db.DSN()
 	if err != nil {
@@ -85,6 +85,7 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	})
 	workDir := t.TempDir()
 	ctx := intercept.WithTaskContext(t.Context(), taskID, "test-agent", nil)
+	ctx = intercept.WithReviewContext(ctx, "/parent", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: "PARENT_BACKGROUND_SENTINEL"})
 	intentPayload := map[string]any{"summary": "创建并清理", "extra": "FULL_INTENT_SENTINEL"}
 	intentID, err := ts.AddNode("intent", intentPayload, 0, "running", "planner", nil)
 	if err != nil {
@@ -102,11 +103,11 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 	}
 	first, second := inputs[0], inputs[1]
 	for _, in := range inputs {
-		if in.Version != 3 || in.Background == nil || in.Background.Source != intercept.BackgroundWorkerSummary || in.Background.Text != "创建并清理" || in.WorkingDir != runDir {
-			t.Fatalf("wrong selected background: %+v", in)
+		if in.Version != 4 || in.Background != nil || in.WorkingDir != runDir {
+			t.Fatalf("unexpected Worker background: %+v", in)
 		}
 		raw, _ := json.Marshal(in)
-		for _, forbidden := range []string{"只操作隔离测试目录", "验证创建和清理", "禁止后续清理", "FULL_INTENT_SENTINEL", "全局探索态势", `"task_id"`, `"task"`, `"turn_input"`, `"worker_intent"`, `"history"`, `"history_truncated"`, `"correlation"`, "Created a new fixture"} {
+		for _, forbidden := range []string{"创建并清理", "PARENT_BACKGROUND_SENTINEL", `"background"`, "只操作隔离测试目录", "验证创建和清理", "禁止后续清理", "FULL_INTENT_SENTINEL", "全局探索态势", `"task_id"`, `"task"`, `"turn_input"`, `"worker_intent"`, `"history"`, `"history_truncated"`, `"correlation"`, "Created a new fixture"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Fatalf("unexpected review data: %s", forbidden)
 			}
@@ -130,10 +131,10 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 			t.Fatalf("verdict lost model input: %+v err=%v", detail, err)
 		}
 		var saved intercept.ReviewInput
-		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background == nil || *saved.Background != *first.Background {
-			t.Fatal("stored review input cannot reconstruct the actual selected background")
+		if json.Unmarshal(detail.Audit.ModelInput, &saved) != nil || saved.Background != nil || saved.Version != 4 {
+			t.Fatal("stored Worker review input retained a background")
 		}
-		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 3) {
+		if row.Status == "allowed" && (detail.Audit.ExecutionStatus != "succeeded" || saved.Version != 4) {
 			t.Fatal("automatic allow lost execution result or its original background snapshot")
 		}
 		if detail.Audit.Correlation != "exact" {
@@ -155,39 +156,4 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 		}
 	}
 
-}
-
-func TestWorkerBackgroundSelection(t *testing.T) {
-	for _, tc := range []struct{ name, payload, want string }{
-		{"summary_only", `{"summary":"已有的摘要","goal":"do not attach","other":{"text":"do not attach"}}`, "已有的摘要"},
-		{"missing", `{"goal":"do not attach"}`, ""},
-		{"empty", `{"summary":""}`, ""},
-		{"whitespace", `{"summary":"   "}`, ""},
-		{"null", `{"summary":null}`, ""},
-		{"non_string", `{"summary":{"text":"do not stringify"}}`, ""},
-		{"malformed", `{"summary":"partial"`, ""},
-		{"nil_intent", "", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var intent *db.Node
-			if tc.payload != "" {
-				intent = &db.Node{Payload: json.RawMessage(tc.payload)}
-			}
-			ctx := withWorkerReviewContext(t.Context(), "/tmp/worker", intent)
-			ctx, trace := intercept.WithTrace(ctx, "GLOBAL_OVERVIEW_FALLBACK_MUST_NOT_BE_USED", nil)
-			args := json.RawMessage(`{"command":"pwd"}`)
-			trace.Start("current", "Bash", args)
-			in, err := intercept.BuildReviewInput(intercept.WithCall(ctx, "Bash", args), "Bash", args)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.want == "" {
-				if in.Background != nil {
-					t.Fatalf("unexpected fallback: %+v", in.Background)
-				}
-			} else if in.Background == nil || in.Background.Source != intercept.BackgroundWorkerSummary || in.Background.Text != tc.want {
-				t.Fatal("summary selection changed the existing text")
-			}
-		})
-	}
 }

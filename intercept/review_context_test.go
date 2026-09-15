@@ -59,7 +59,7 @@ func TestReviewInputIgnoresAuditHistoryAndPreservesCurrentCall(t *testing.T) {
 }
 
 func TestReviewInputExplicitBackgroundOnly(t *testing.T) {
-	for _, source := range []string{BackgroundUserMessage, BackgroundWorkerSummary, "", "scheduler"} {
+	for _, source := range []string{BackgroundUserMessage, "worker_summary", "", "scheduler"} {
 		t.Run(source, func(t *testing.T) {
 			ctx := WithReviewContext(t.Context(), "/tmp/task-1", ReviewBackground{Source: source, Text: "验证访客注册"})
 			ctx, trace := WithTrace(ctx, "GLOBAL_OVERVIEW_NOT_FOR_REVIEW", nil)
@@ -69,10 +69,10 @@ func TestReviewInputExplicitBackgroundOnly(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if in.Version != 3 || in.WorkingDir != "/tmp/task-1" {
+			if in.Version != 4 || in.WorkingDir != "/tmp/task-1" {
 				t.Fatalf("wrong environment: %+v", in)
 			}
-			if source == BackgroundUserMessage || source == BackgroundWorkerSummary {
+			if source == BackgroundUserMessage {
 				if in.Background == nil || in.Background.Source != source || in.Background.Text != "验证访客注册" {
 					t.Fatal("lost selected background")
 				}
@@ -116,7 +116,8 @@ func TestReviewInputAuditRetention(t *testing.T) {
 	for _, input := range []json.RawMessage{
 		json.RawMessage(`{"version":1,"history":[],"turn_input":"old input","tool_name":"Read","arguments":{}}`),
 		json.RawMessage(`{"version":2,"history":[{"tool_use_id":"old"}],"correlation":"exact","tool_name":"Read","arguments":{}}`),
-		json.RawMessage(`{"version":3,"tool_name":"Read","arguments":{}}`),
+		json.RawMessage(`{"version":3,"background":{"source":"worker_summary","text":"old summary"},"tool_name":"Read","arguments":{}}`),
+		json.RawMessage(`{"version":4,"tool_name":"Read","arguments":{}}`),
 	} {
 		dec := Decision{Action: "allow", ModelInput: input, ModelInputDigest: digestInput(input)}
 		for _, status := range []string{"allowed", "pending", "denied"} {
@@ -153,7 +154,7 @@ func TestAutomaticAllowRetainsActualReviewContext(t *testing.T) {
 	reason := "实际操作：读取测试文件；成功后的后果：返回文件内容；命中规则：A5"
 	a := auditFor(ctx, Decision{Action: "allow", Message: reason, ModelInput: raw, ModelInputDigest: digestInput(raw)}, args, "allowed")
 	var saved ReviewInput
-	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.Background == nil || saved.Background.Text != "请读取刚创建的文件" || saved.Version != 3 || a.Correlation != "exact" || a.ToolUseID != "current" || a.InitialReason != reason {
+	if json.Unmarshal(a.ModelInput, &saved) != nil || saved.Background == nil || saved.Background.Text != "请读取刚创建的文件" || saved.Version != 4 || a.Correlation != "exact" || a.ToolUseID != "current" || a.InitialReason != reason {
 		t.Fatal("automatic allow lost the model's input or explanation")
 	}
 	if a.Context != nil || a.UserMessage != "" {

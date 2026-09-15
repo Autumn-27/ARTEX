@@ -9,14 +9,10 @@ import (
 
 const reviewTextLimit = 4000
 
-const (
-	BackgroundUserMessage   = "user_message"
-	BackgroundWorkerSummary = "worker_summary"
-)
+const BackgroundUserMessage = "user_message"
 
-// ReviewBackground is selected by the application from an existing message or
-// the current intent's summary. Worker summaries are planner-authored, not human
-// instructions. Neither source can override the reviewer's own action policy.
+// ReviewBackground is explicitly bound from the current human message. Generated
+// Worker summaries are not accepted. Background cannot override review policy.
 type ReviewBackground struct {
 	Source    string `json:"source"`
 	Text      string `json:"text"`
@@ -59,11 +55,11 @@ func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessag
 	if !json.Valid(arguments) {
 		return ReviewInput{}, fmt.Errorf("工具参数不是有效 JSON")
 	}
-	in := ReviewInput{Version: 3, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...)}
+	in := ReviewInput{Version: 4, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...)}
 	if env, ok := ctx.Value(reviewContextKey{}).(reviewEnvironment); ok {
 		in.WorkingDir = env.workingDir
 		background := env.background
-		if (background.Source == BackgroundUserMessage || background.Source == BackgroundWorkerSummary) && strings.TrimSpace(background.Text) != "" {
+		if background.Source == BackgroundUserMessage && strings.TrimSpace(background.Text) != "" {
 			var cut bool
 			background.Text, cut = bounded(background.Text, reviewTextLimit)
 			background.Truncated = background.Truncated || cut

@@ -29,6 +29,7 @@ import { toast } from "sonner";
 
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -469,7 +470,37 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
 }
 
 export function SessionsTab({ taskId }: { taskId: string }) {
-  const [activeId, setActiveId] = React.useState(MAIN_ID);
+  const approvalFocus = useApprovalFocus({ taskId });
+  const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
+  const focusSession = React.useMemo<Session | undefined>(() => {
+    const source = approvalFocus.state?.source;
+    if (!source) return undefined;
+    if (source.session.startsWith("main:")) {
+      const seg = Number(source.session.slice(5));
+      return { ...MAIN_SESSION, id: mainSessionId(seg), seg, title: mainSessionTitle(seg), live: false };
+    }
+    if (source.session === "plan") return { ...PLANNER_SESSION, live: false };
+    if (source.session.startsWith("intent:")) {
+      const id = source.session.slice(7);
+      return {
+        id,
+        role: "worker",
+        intent_id: id,
+        title: `Worker #${id}`,
+        status: "done",
+        live: false,
+        last_activity: source.items[0]?.ts ?? "",
+      };
+    }
+    return undefined;
+  }, [approvalFocus.state?.source]);
+  // Keep a located archived/older session selectable after leaving focus mode.
+  const [locatedSession, setLocatedSession] = React.useState<{ taskId: string; session: Session }>();
+  React.useEffect(() => {
+    if (focusSession) setLocatedSession({ taskId, session: focusSession });
+  }, [taskId, focusSession]);
+  const retainedSession = locatedSession?.taskId === taskId ? locatedSession.session : undefined;
+  const activeId = focusSession?.id ?? selectedSessionId;
   // Main-agent conversation segments (newest-first); currentSeg is the writable one.
   const [mainSegs, setMainSegs] = React.useState<{ seq: number; created_at: string }[]>([{ seq: 0, created_at: "" }]);
   const [currentSeg, setCurrentSeg] = React.useState(0);
@@ -1198,10 +1229,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     [mainSegs, liveMainSeg],
   );
 
-  const sessions = React.useMemo(
-    () => [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION],
-    [mainSessions, workerSessions, plannerLive],
-  );
+  const sessions = React.useMemo(() => {
+    const items = [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION];
+    const located = focusSession ?? retainedSession;
+    if (located && !items.some((s) => s.id === located.id)) items.push(located);
+    return items;
+  }, [mainSessions, workerSessions, plannerLive, focusSession, retainedSession]);
 
   const grouped = {
     mainagent: sessions.filter((s) => s.role === "mainagent"),
@@ -1252,6 +1285,21 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       patchStore(activeKey, (s) => ({ ...s, unread: 0 }));
     }
   }, [activeKey]);
+
+  const focusKey = approvalFocus.state?.source?.session;
+  const loadFocusPage = React.useCallback((before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE), [taskId, focusKey]);
+  const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
+    if (!focusKey) return;
+    patchStore(focusKey, (s) => {
+      const items = mergeBySeq(page.items, s.items);
+      return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
+    });
+  }, [focusKey, patchStore]);
+  const focusHistory = useApprovalHistory(approvalFocus.state?.source, !!focusKey && !!store[focusKey]?.loaded,
+    focusKey ? store[focusKey]?.items ?? [] : [], loadFocusPage, mergeFocusPage);
+  React.useEffect(() => {
+    if (approvalFocus.state) atBottomRef.current = false;
+  }, [approvalFocus.state]);
 
   // Main agent is the human↔orchestrator CONSOLE: only the conversation (user msgs +
   // the main agent's own replies/steps). Planner session shows planner steps; a
@@ -1367,28 +1415,29 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
+      if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) loadEarlier(activeKeyRef.current, viewport); // near top → older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, activeId, loadEarlier]);
+  }, [viewport, activeId, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a session → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: activeId intentionally scrolls a newly selected session.
   React.useLayoutEffect(() => {
     const vp = viewport();
-    if (vp) {
+    if (vp && !approvalFocus.state) {
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
-  }, [activeId, viewport]);
+  }, [activeId, viewport, approvalFocus.state]);
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: activity growth intentionally drives live-edge scrolling.
   React.useLayoutEffect(() => {
-    if (!atBottomRef.current) return;
+    if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [activity, viewport]);
+  }, [activity, viewport, approvalFocus.state]);
   // Lazy detail loads (AnswerBlock / ToolBlock / Markdown) grow the content AFTER the
   // activity array settles, WITHOUT changing its reference — so the layout effects
   // above never re-fire and a freshly opened session would leave its last message
@@ -1402,13 +1451,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const el = contentRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
-      if (!atBottomRef.current) return;
+      if (approvalFocus.state || !atBottomRef.current) return;
       const vp = viewport();
       if (vp) vp.scrollTop = vp.scrollHeight;
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [activeId, viewport]);
+  }, [activeId, viewport, approvalFocus.state]);
 
   function stop() {
     if (stopping) return;
@@ -1616,6 +1665,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           hasPending={hasPendingForSession(s)}
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => {
+                            approvalFocus.close();
                             setActiveId(s.id);
                             setListOpen(false); // 手机端选完即收起，把高度还给会话记录
                             setWorkerMessage("");
@@ -1777,6 +1827,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 </div>
               );
             })()}
+            <ApprovalExecutionFocus focus={{ ...approvalFocus, close: () => {
+              setActiveId(activeId);
+              approvalFocus.close();
+            } }} history={focusHistory} />
             {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
@@ -1808,7 +1862,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     </Button>
                   </div>
                 ) : activity.length ? (
-                  <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
+                  <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
                 ) : (
                   <div className="pl-9 text-xs text-muted-foreground">
                     {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}

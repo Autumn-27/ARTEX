@@ -1284,6 +1284,7 @@ export interface LLMTask {
 export interface InterceptReviewInput {
   version: number;
   background?: {
+    // worker_summary is retained only for immutable v2/v3 snapshots.
     source: "user_message" | "worker_summary";
     text: string;
     truncated?: boolean;
@@ -1437,4 +1438,13 @@ export interface UpdateProgress {
   message: string;
   version?: string;
   error?: string;
+}
+
+// Original execution selected from an approval, never submitted to the reviewer.
+export interface InterceptExecution {
+  conversation_id: number | null;
+  task_id: string | null;
+  session: string;
+  seq: number;
+  items: Activity[];
 }

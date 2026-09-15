@@ -26,7 +26,7 @@ func (p *reviewCaptureProvider) Complete(ctx context.Context, req llm.Completion
 
 // Assert the actual model request, rather than merely the envelope helper.
 func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
-	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", intercept.ReviewBackground{Source: intercept.BackgroundWorkerSummary, Text: "清理本次测试文件"})
+	ctx := intercept.WithReviewContext(t.Context(), "/tmp/review-fixture", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: "清理本次测试文件"})
 	ctx, trace := intercept.WithTrace(ctx, "GLOBAL_OVERVIEW_SENTINEL", []db.InterceptContextEntry{
 		{Kind: "tool_use", Tool: "Write", ToolUseID: "created", Text: `{"path":"probe.txt"}`},
 		{Kind: "tool_result", ToolUseID: "created", Text: "file created"},
@@ -70,7 +70,7 @@ func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
 	if strings.Contains(body, "file created") || strings.Contains(body, `"path"`) {
 		t.Fatal("history leaked into actual model request")
 	}
-	if got.Version != 3 || got.Background == nil || got.Background.Source != intercept.BackgroundWorkerSummary || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
+	if got.Version != 4 || got.Background == nil || got.Background.Source != intercept.BackgroundUserMessage || got.Background.Text != "清理本次测试文件" || got.WorkingDir != "/tmp/review-fixture" || string(got.Arguments) != string(args) || strings.Contains(body, "worker speculation") || strings.Contains(body, "GLOBAL_OVERVIEW_SENTINEL") {
 		t.Fatalf("wrong model input: %s", body)
 	}
 }
