@@ -119,7 +119,7 @@ func (p *pendingManager) remove(id int64) {
 // as a Decision (Action ∈ allow|ask|deny; empty Action means the reply could not
 // be parsed). It is injected by the server layer so the intercept package stays
 // free of any llm dependency. profileID == 0 means "use the active/default profile".
-type Reviewer func(ctx context.Context, profileID int64, prompt, tool, command string) (Decision, error)
+type Reviewer func(ctx context.Context, profileID int64, prompt string, input ReviewInput) (Decision, error)
 
 // Interceptor loads intercept rules from the database and evaluates them on
 // tool calls. It is safe for concurrent use.
@@ -291,16 +291,18 @@ func (i *Interceptor) SetEnabledTools(tools []string) error {
 
 // Decision is the outcome of a successful rule match.
 type Decision struct {
-	ModelFallback  bool
-	RuleName       string
-	ConfigDigest   string
-	ProfileID      int64
-	Action         string // "allow" | "deny" | "ask"
-	Message        string
-	RuleID         int64
-	TimeoutEnabled bool
-	TimeoutSeconds int
-	TimeoutAction  string // "deny" | "allow"
+	ModelInput       json.RawMessage
+	ModelInputDigest string
+	ModelFallback    bool
+	RuleName         string
+	ConfigDigest     string
+	ProfileID        int64
+	Action           string // "allow" | "deny" | "ask"
+	Message          string
+	RuleID           int64
+	TimeoutEnabled   bool
+	TimeoutSeconds   int
+	TimeoutAction    string // "deny" | "allow"
 }
 
 // --- LLM fallback judge ---
@@ -434,7 +436,7 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 // keeps the current behavior: allow). On model error or an unparseable reply it
 // falls back to the configured FailAction. Ask verdicts carry the human-approval
 // timeout so the existing HandleAsk consumes them unchanged.
-func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision, bool) {
+func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.RawMessage) (Decision, bool) {
 	cfg := i.judgeConfig()
 	i.mu.RLock()
 	rv := i.reviewer
@@ -450,7 +452,19 @@ func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision
 		defer cancel()
 	}
 
-	out, err := rv(cctx, cfg.ProfileID, cfg.Prompt, tool, command)
+	input, contextErr := BuildReviewInput(cctx, tool, arguments)
+	cfg.Prompt = EffectiveJudgePrompt(cfg.Prompt)
+	var out Decision
+	var err error
+	var modelInput []byte
+	if contextErr != nil {
+		// Missing task policy must not become an implicit permission via the
+		// model's configurable fail-open strategy. A human can resolve the gap.
+		out = Decision{Action: "ask", ModelFallback: true, Message: "审查上下文不完整，需要人工确认：" + contextErr.Error()}
+	} else {
+		modelInput, _ = json.Marshal(input)
+		out, err = rv(cctx, cfg.ProfileID, cfg.Prompt, input)
+	}
 	if err != nil {
 		out = Decision{ProfileID: out.ProfileID, ModelFallback: true, Action: cfg.FailAction, Message: "模型审批失败,按失败策略处理: " + err.Error()}
 	}
@@ -462,6 +476,10 @@ func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision
 	}
 	// A model verdict never carries a rule; keep RuleID 0 (→ NULL) for history.
 	out.RuleID = 0
+	if len(modelInput) > 0 {
+		out.ModelInput = modelInput
+		out.ModelInputDigest = digestInput(modelInput)
+	}
 	if out.ProfileID != 0 {
 		cfg.ProfileID = out.ProfileID
 	}

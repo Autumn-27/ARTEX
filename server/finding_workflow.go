@@ -10,10 +10,25 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
 func (s *Server) seedFindingWorkflowTools() {
+	const hostSearchDescriptionFlag = "finding_workflow_tools_v3_host_search_description"
+	if value, _, _ := s.m.pg.GetSetting(hostSearchDescriptionFlag); value != "true" {
+		// Only replace the original built-in text. A user-edited description is
+		// authoritative and must survive upgrades.
+		legacy := "查询记录代理已抓取的目标流量（必须指定 host，可再按 URL 子串或正文关键词过滤）。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符），可用来找响应里的密码、密钥、报错、内网地址等。仅返回极轻量索引(id/method/url/status/resp_len)，不含任何响应内容。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页（page=0 起）；要看某条的请求/响应原文用 traffic_get(id)。回看已访问资源、找端点先用它，避免重复 curl 同一 URL。"
+		if _, err := s.m.pg.Exec(`UPDATE tools SET description=$1,updated_at=now() WHERE key='traffic_search' AND system AND description=$2`, traffic.TrafficSearchDescription, legacy); err != nil {
+			// Log and leave the flag unset so the next startup retries; do not
+			// return, or a transient error here would also skip the reporter
+			// migration below — the two are independent.
+			log.Printf("[evidence] upgrade traffic_search description: %v", err)
+		} else {
+			_ = s.m.pg.SetSetting(hostSearchDescriptionFlag, "true")
+		}
+	}
 	const flag = "finding_workflow_tools_v2_reporter"
 	if value, _, _ := s.m.pg.GetSetting(flag); value == "true" {
 		return

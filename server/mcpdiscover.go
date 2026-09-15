@@ -6,13 +6,14 @@ import (
 	"log"
 	"time"
 
-	"github.com/Autumn-27/norma/mcp"
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/mcphttp"
+	"github.com/Autumn-27/norma/mcp"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
-// mcpClient is the shared surface of a connected MCP server (stdio or remote http),
+// mcpClient is the shared surface of a connected MCP server (stdio, Streamable HTTP,
+// or legacy SSE),
 // so tools/list and cleanup are handled uniformly regardless of transport.
 type mcpClient interface {
 	Tools(context.Context) ([]actool.CoreTool, error)
@@ -33,6 +34,11 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 		}
 		// env map doubles as HTTP headers (e.g. Authorization).
 		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+	case "sse":
+		if m.URL == "" {
+			return nil, fmt.Errorf("sse 传输缺少 URL")
+		}
+		return mcphttp.NewSSE(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
 	default:
 		return nil, fmt.Errorf("未知传输方式 %q", m.Transport)
 	}

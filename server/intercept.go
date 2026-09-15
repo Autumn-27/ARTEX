@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -79,9 +81,9 @@ func scopeRulesFromRows(rows []db.TaskScope) []guard.ScopeRule {
 // wireInterceptReviewer installs the LLM fallback judge into the interceptor. The
 // judge runs only on tool calls that matched no rule (see intercept.Judge). It
 // resolves the configured judge profile (0 → active/default), builds a provider,
-// runs a one-shot single-line classification, and parses ALLOW/ASK/DENY.
+// runs a one-shot JSON classification with an explanation for every verdict.
 func (s *Server) wireInterceptReviewer() {
-	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt, tool, command string) (intercept.Decision, error) {
+	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt string, input intercept.ReviewInput) (intercept.Decision, error) {
 		if profileID == 0 {
 			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 				profileID = p.ID
@@ -94,25 +96,37 @@ func (s *Server) wireInterceptReviewer() {
 		if !ok {
 			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
 		}
-		user := fmt.Sprintf("Tool: %s\nArguments:\n%s", tool, agent.WrapUntrustedData("tool-input", command))
-		text, err := streamCollectText(ctx, prov, prompt, user)
+		text, err := reviewCompletion(ctx, prov, prompt, input)
 		if err != nil {
 			return intercept.Decision{ProfileID: profileID}, err
 		}
 		v := intercept.ParseVerdict(text)
+		if v.Action == "" {
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("模型裁决格式无效，必须包含裁决、实际操作、成功后的后果和命中规则")
+		}
 		return intercept.Decision{Action: v.Action, Message: v.Reason, ProfileID: profileID}, nil
 	})
 }
 
+func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, input intercept.ReviewInput) (string, error) {
+	user, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	// 整个 ReviewInput(工具参数/历史/任务背景)都含目标侧可控文本,按不可信数据
+	// 包裹后再喂给裁判模型,防止其中的注入文本被当成指令。
+	return streamCollectText(ctx, prov, prompt, agent.WrapUntrustedData("tool-input", string(user)))
+}
+
 // streamCollectText runs a single non-streaming-style completion (thinking off,
-// low temperature, tiny output) and returns the concatenated text. Used by the
-// LLM fallback judge, whose reply is one short line (ALLOW/ASK:.../DENY:...).
+// low temperature, bounded output) and returns the concatenated text. The
+// budget includes the explanation and complete closing JSON delimiters.
 func streamCollectText(ctx context.Context, prov llm.Provider, system, user string) (string, error) {
 	temp := 0.0
 	req := llm.CompletionRequest{
 		System:      []string{system},
 		Messages:    []llm.Message{llm.UserText(user)},
-		MaxTokens:   128,
+		MaxTokens:   1024,
 		Temperature: &temp,
 		Thinking:    "disabled",
 	}
@@ -302,7 +316,21 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 400, "bad task id")
 		return
 	}
-	items, err := pg.ListTaskIntercepts(taskID)
+	q := r.URL.Query()
+	if q.Get("page") == "" && q.Get("size") == "" {
+		items, err := pg.ListTaskIntercepts(taskID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if items == nil {
+			items = []db.InterceptApprovalRow{}
+		}
+		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
+		return
+	}
+	page, size := interceptPageParams(q)
+	items, total, err := pg.ListTaskInterceptsPage(taskID, page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -310,7 +338,7 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 	if items == nil {
 		items = []db.InterceptApprovalRow{}
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
 }
 
 func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +346,21 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	items, err := pg.ListAllIntercepts(200)
+	q := r.URL.Query()
+	if q.Get("page") == "" && q.Get("size") == "" {
+		items, err := pg.ListAllIntercepts(200)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if items == nil {
+			items = []db.InterceptApprovalRow{}
+		}
+		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
+		return
+	}
+	page, size := interceptPageParams(q)
+	items, total, err := pg.ListAllInterceptsPage(page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -326,7 +368,22 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []db.InterceptApprovalRow{}
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
+}
+
+func interceptPageParams(q url.Values) (int, int) {
+	page := atoiDefault(q.Get("page"), 1)
+	size := atoiDefault(q.Get("size"), 20)
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+	return page, size
 }
 
 func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {

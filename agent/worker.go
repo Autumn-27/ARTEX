@@ -447,6 +447,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 期 3b:本任务有独立 MITM 实例时用它的地址+CA(上游=任务隧道 socks);
 	// 否则回落全局记录代理/全局出口代理。
 	proxyAddr, proxyCA := w.proxyForTask(taskID)
+	ctx = withTaskReviewContext(ctx, taskID, ts, runDir, intent)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(proxyAddr, proxyCA, w.workDir, runDir, w.intranetForTask(taskID))
 	if w.wantConstraints() {

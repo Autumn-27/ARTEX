@@ -373,6 +373,53 @@ func TestPageSearchesBodies(t *testing.T) {
 	}
 }
 
+func TestQueryHostPortAndURLForms(t *testing.T) {
+	tr, _ := openTraffic(t)
+	tr.record(newFlow("api.example.com:8082", "GET", "/admin", nil, []byte("8082")))
+	tr.record(newFlow("api.example.com:8088", "GET", "/admin", nil, []byte("8088")))
+	tr.record(newFlow("[2001:db8::1]:8443", "GET", "/admin", nil, []byte("8443")))
+
+	for _, tc := range []struct {
+		name string
+		host string
+		want int
+	}{
+		{name: "bare host", host: "api.example.com", want: 2},
+		{name: "host and port", host: "api.example.com:8082", want: 1},
+		{name: "full URL", host: "http://api.example.com:8088/admin", want: 1},
+		{name: "IPv6 host and port", host: "[2001:db8::1]:8443", want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := tr.query(tc.host, "", "", 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != tc.want {
+				t.Fatalf("query(%q) returned %d rows, want %d", tc.host, len(rows), tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeSearchHost(t *testing.T) {
+	for _, tc := range []struct {
+		raw, host, port string
+	}{
+		{raw: "API.Example.com", host: "api.example.com"},
+		{raw: "api.example.com:8088", host: "api.example.com", port: "8088"},
+		{raw: "https://[2001:db8::1]:8443/path", host: "2001:db8::1", port: "8443"},
+		{raw: "[2001:db8::1]", host: "2001:db8::1"},
+	} {
+		host, port, err := normalizeSearchHost(tc.raw)
+		if err != nil {
+			t.Fatalf("normalizeSearchHost(%q): %v", tc.raw, err)
+		}
+		if host != tc.host || port != tc.port {
+			t.Fatalf("normalizeSearchHost(%q)=(%q,%q), want (%q,%q)", tc.raw, host, port, tc.host, tc.port)
+		}
+	}
+}
+
 // TestTruncateUTF8 guards the preview cut: never split a multi-byte rune.
 func TestTruncateUTF8(t *testing.T) {
 	s := "内网测试账号"

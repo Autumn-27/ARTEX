@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -316,6 +317,13 @@ func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {
 	return out, rows.Err()
 }
 
+// ListAllInterceptsPage returns one 1-based page of approval records and the
+// total number of records. Records are ordered newest first, matching the
+// legacy capped list returned by ListAllIntercepts.
+func (d *DB) ListAllInterceptsPage(page, size int) ([]InterceptApprovalRow, int, error) {
+	return d.listInterceptsPage("", page, size)
+}
+
 // ListTaskIntercepts returns all intercept_pending rows for a specific task (newest first).
 func (d *DB) ListTaskIntercepts(taskID string) ([]InterceptApprovalRow, error) {
 	rows, err := d.Query(approvalRowSelect+` WHERE ip.task_id=$1 ORDER BY ip.created_at DESC`, taskID)
@@ -332,4 +340,54 @@ func (d *DB) ListTaskIntercepts(taskID string) ([]InterceptApprovalRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ListTaskInterceptsPage is the paginated variant of ListTaskIntercepts.
+func (d *DB) ListTaskInterceptsPage(taskID string, page, size int) ([]InterceptApprovalRow, int, error) {
+	return d.listInterceptsPage(taskID, page, size)
+}
+
+func (d *DB) listInterceptsPage(taskID string, page, size int) ([]InterceptApprovalRow, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+	offset := (page - 1) * size
+
+	where := ""
+	args := []any{}
+	if taskID != "" {
+		where = " WHERE ip.task_id=$1"
+		args = append(args, taskID)
+	}
+	var total int
+	if err := d.QueryRow("SELECT COUNT(*) FROM intercept_pending ip"+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limitArg := len(args) + 1
+	offsetArg := limitArg + 1
+	dataQ := approvalRowSelect + where +
+		" ORDER BY ip.created_at DESC, ip.id DESC LIMIT $" + fmt.Sprint(limitArg) +
+		" OFFSET $" + fmt.Sprint(offsetArg)
+	args = append(args, size, offset)
+	rows, err := d.Query(dataQ, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []InterceptApprovalRow{}
+	for rows.Next() {
+		var r InterceptApprovalRow
+		if err := scanInterceptApprovalRow(rows, &r); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
 }
