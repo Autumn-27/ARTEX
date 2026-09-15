@@ -87,13 +87,27 @@ func resolveWrapupTurns(agentKey string) int {
 	return WrapupTurnsDefault(agentKey)
 }
 
+// wrapupSelfCheck 是代码固定的收尾自检段(chains L1,CHAINS-INTEGRATION-DESIGN.md §4):
+// "反问"从知识变成工作流里的强制动作。与"先写回再总结"的既有分工一致——写回要求
+// 在正文里(DB 可编辑),这段自检拼在尾部、代码固定,后台改正文也改不掉它。
+// 只拼给 worker:四个问题都围绕"本意图"展开,planner/mainagent 没有单一意图。
+const wrapupSelfCheck = "\n\n结束前对照自检：① 本意图的结论已 record_fact？② 判据是否真实可复现（还是单次/间接证据）？③ 当前是「被墙」（同质响应/统一拦截）还是「此路不通」（原理不通）？④ 下一步建议换什么维度（参数/信道/漏洞类/入口）？把自检结论并入最后那句总结。"
+
+// withWrapupSelfCheck 给 worker 的收尾词追加代码固定的自检段;其它 agent 原样返回。
+func withWrapupSelfCheck(agentKey, prompt string) string {
+	if agentKey != "worker" {
+		return prompt
+	}
+	return prompt + wrapupSelfCheck
+}
+
 // wrapupSettlement builds the settlement config for an agent's run. Prompt and the
 // turn budget are admin-editable per agent; disabled tools are code-owned policy so
 // a user can't edit away the "stop probing" guardrail. Resolved fresh each run
 // (reads DB live), so edits apply on the next run without a restart.
 func wrapupSettlement(agentKey string, disabledTools []string) *harness.Settlement {
 	return &harness.Settlement{
-		Prompt:        resolveWrapup(agentKey),
+		Prompt:        withWrapupSelfCheck(agentKey, resolveWrapup(agentKey)),
 		DisabledTools: disabledTools,
 		MaxTurns:      resolveWrapupTurns(agentKey),
 	}
@@ -154,7 +168,7 @@ func resolveTaskTimeoutTurns(agentKey string) int {
 //
 // 交给 harness 的 PromptByReason 在收尾时按【实际】reason 现场挑，无 build 时错配。
 func wrapupSettlementForTask(agentKey string, disabledTools []string, clamped bool) *harness.Settlement {
-	perRun := resolveWrapup(agentKey)
+	perRun := withWrapupSelfCheck(agentKey, resolveWrapup(agentKey))
 	st := &harness.Settlement{
 		Prompt:        perRun, // 兜底(也是非 clamped 时两种 reason 的取值)
 		DisabledTools: disabledTools,
@@ -163,8 +177,8 @@ func wrapupSettlementForTask(agentKey string, disabledTools []string, clamped bo
 	if clamped {
 		if tt := resolveTaskTimeoutWrapup(agentKey); tt != "" {
 			st.PromptByReason = map[harness.TerminalReason]string{
-				harness.ReasonTimeout:  tt,     // 任务到点
-				harness.ReasonMaxTurns: perRun, // 步数先耗尽、任务还剩时间
+				harness.ReasonTimeout:  withWrapupSelfCheck(agentKey, tt), // 任务到点
+				harness.ReasonMaxTurns: perRun,                            // 步数先耗尽、任务还剩时间
 			}
 			st.MaxTurns = resolveTaskTimeoutTurns(agentKey)
 		}

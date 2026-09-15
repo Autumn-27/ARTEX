@@ -116,6 +116,10 @@ func BuiltinPromptSeeds() map[string]string {
 		"planner":   plannerDefaultTmpl,
 		"mainagent": mainAgentDefaultTmpl,
 		"worker":    workerDefaultTmpl,
+		// 期 4:内网期 worker 提示词变体(任务有立足点会话/活跃隧道时代替 worker
+		// 正文,见 worker.go workerSystem)。key 带 ".intranet" 后缀,seedBuiltins
+		// 里有同名 agents 行(db/db.go),seedPrompts 才能把正文种进 agent_prompts。
+		"worker.intranet": workerIntranetDefaultTmpl,
 		"auto":      autoDefaultTmpl,
 		"pentest":   pentestDefaultTmpl,
 	}

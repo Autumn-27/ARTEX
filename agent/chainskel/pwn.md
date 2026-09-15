@@ -1,0 +1,16 @@
+# chains-pwn L3 决策骨架(场景→判据→转向;蒸馏自 chains 语料,完整 Q&A 见 skills/chains-pwn/refs/)
+- 场景:拿到未知二进制不知从何下手|判据:file 看架构/静态/strip,checksec 看 Canary/NX/PIE/RELRO,strings 找 system//bin/sh,五个开关即定利用骨架|转向:先定性(远程服务/交互/静态 musl)再逆向,别通读全程序
+- 场景:checksec 全绿无从下手|判据:防护全开=题目必给泄露原语,规划"先 leak 后打"两阶段|转向:先找 fmt/越界读/栈残留泄 canary+基址;2h 无 leak 无崩就转逻辑洞
+- 场景:定位栈溢出偏移|判据:cyclic 发入,崩溃后取栈顶 pattern 反查(64 位看 RSP 指向的返回地址,非 PC);ROP 落地崩查 movaps 需 16 字节对齐|转向:链首加 ret 对齐;静态看不清就喂 pattern 让崩点指路
+- 场景:有 Canary 溢出被 __stack_chk_fail 拦|判据:fork 型服务 canary 不变可逐字节爆破(≤8×256 次);有输出原语则泄原值填回,低字节恒 \x00 是识别特征|转向:非 fork 无泄露就不碰返回地址,改函数指针/GOT 绕开 canary 战场
+- 场景:NX 在位,shellcode 不执行|判据:最省事优先:现成 system("/bin/sh")→ret2text;有 PLT+字符串→ret2libc;再不行纯 ROP;短溢出优先单跳/one_gadget|转向:空间不够→leave;ret 栈迁移到 bss 或 read 二次读入扩容;缺 pop rdx→ret2csu/SROP
+- 场景:PIE 在位地址全随机|判据:泄任意已知偏移地址反推 base,页对齐低 12 位固定是识别特征;只泄到 libc 就把利用全建在 libc 上|转向:零泄露→partial overwrite 改低 1.5~2 字节(同页零爆破,跨页 1/16);无 oracle→ret2dlresolve
+- 场景:远程 libc 版本未知|判据:泄 2~3 个 libc 函数地址,取低 12 位去 libc-database 指纹匹配|转向:查不到→ret2dlresolve 免 libc;全失败→纯程序内 gadget/SROP 把 libc 依赖降到零
+- 场景:seccomp 禁 execve,shell 起不来|判据:先 seccomp-tools dump 拿规则表,放行 ORW 就走 open/read/write;open 禁换 openat,只放 32 位号用 retfq 切架构|转向:ORW 全卡→逐条找漏过滤项,再不行在 prctl 安装前劫持
+- 场景:菜单式增删改查疑似堆题|判据:add/delete + 循环 switch + malloc/free 即定性堆题;free 后指针置空与否判 UAF,edit 长度 vs 分配 size 判溢出/off-by-one|转向:静态编译/musl 别套 glibc 打法,当未知 allocator 逆向
+- 场景:堆题定 glibc 版本(决定全部手法)|判据:2.27 引入 tcache;2.29 加 double-free key 与 size/prev_size 校验;2.32 safe-linking(fd=pos>>12^target);2.34 删 hook|转向:版本判错 poison 必 abort,先 patchelf 换同版本 libc 本地跑通再打远程
+- 场景:堆题清点原语与 bin 行为|判据:tcache 每桶≤7,size<0x420 进 tcache、≤0x80 fastbin,第 8 次 free 进 unsorted(fd/bk 指 main_arena 泄 libc);判 bin 用 chunk_size 非请求 size|转向:无 show→塞满 tcache 造 unsorted leak;calloc 不走 tcache
+- 场景:safe-linking(2.32+)poisoning 后 abort|判据:fd 必须写 (chunk>>12)^目标 且目标 0x10 对齐,故先 leak heap 再 leak libc;next 为 NULL 时 fd 左移 12 反解 heap 页|转向:leak 不到 heap→tcache stashing/fastbin/largebin attack 换打法
+- 场景:hook 被删(2.34+)/Full RELRO 封死 GOT|判据:转退出前必走到的间接调用点:_IO_list_all/stdout vtable(FSOP/house of apple)、__exit_funcs、栈返回地址(经 environ 泄栈)|转向:vtable check 拦→用 _IO_wfile_jumps 等合法 vtable 或劫持 _wide_data
+- 场景:多弱原语编排成链|判据:铁律"信息→能力→执行",leak 永远优先;canary/ASLR 每进程变,leak→compute→write 必须压在同一次交互内|转向:组合不成链=缺关键原语,回去专挖未初始化打印(补 leak)或函数指针调用点(补执行),别死磕残缺原语集
+- 场景:反复失败/本地通远程不通|判据:同一 crash pattern 3 次或 gdb 状态与预期根本不符即链条有问题;远程不通按序排:libc 版本→栈对齐→recvuntil 同步→硬编码地址|转向:pivot 保留 leak 前半段只换后半目标;单链死磕超 2h 换维度

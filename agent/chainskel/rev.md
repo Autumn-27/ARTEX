@@ -1,0 +1,15 @@
+# chains-rev L3 决策骨架(场景→判据→转向;蒸馏自 chains 语料,完整 Q&A 见 skills/chains-rev/refs/)
+- 场景:拿到陌生 ELF/PE 第一分钟|判据:三连 file(架构/strip)→checksec→strings,30 秒定路线|转向:strings 无可读串→测熵,熵>7.2 大段+UPX0/UPX1 节名=加壳,先脱壳再回静态
+- 场景:stripped 找 main|判据:__libc_start_main 第一参数(rdi)即 main;静态链接时 _start 首个被当参数传的地址即 main|转向:失效→xref read/scanf 倒推业务核心
+- 场景:分诊标准壳 vs 定制混淆|判据:标准壳(UPX)入口为小 stub、节名带特征,秒脱;定制混淆入口即正常代码但满花指令|转向:upx -d 报错→修 UPX! 魔数,或 ESP 定律到 OEP,dump+Scylla 修 IAT
+- 场景:VMP/Themida 虚拟化壳脱不动|判据:壳只保护特定函数,大部分逻辑仍原生执行,对外行为藏不住|转向:不脱壳,在输入/输出边界(比对、IO、syscall)hook,或抠函数用 Unicorn 当黑盒 oracle
+- 场景:花指令/控制流平坦化读不动|判据:不透明谓词不依赖输入且可静态求值=可安全 NOP;平坦化先消谓词再求 state 转移值还原 CFG|转向:量大→D810/deflat 脚本;再失效→动态 trace 只取真实执行的基本块
+- 场景:字符串/常量运行时加密|判据:xref 高熵密文块,引用它且带循环+异或的小函数即解密器|转向:简单→IDApython 批量解密;用完即焚→hook 解密函数 onLeave;hook 不上→抠出逻辑 Unicorn 单独模拟
+- 场景:一进调试器就退出/走假分支|判据:查 ptrace(PTRACE_TRACEME)、TracerPid、rdtsc 时间差;patch 判定跳转或改返回值最省事|转向:点多而散→LD_PRELOAD/ScyllaHide 批量中和
+- 场景:软断/patch 被自校验发现|判据:程序对 .text 扫 0xCC 或算 CRC,patch 落盘即崩|转向:改硬件断点(不改字节);自校验函数一并 patch 成恒过;全封→qiling/Unicorn 模拟
+- 场景:动静态何时切换|判据:有反调试/要落盘→静态起手;混淆重→动态 trace;求输入而非懂逻辑→angr find/avoid 快一个量级;单函数静态 15~20 分钟无进展强制换维度|转向:触发不到→符号执行反解条件
+- 场景:判断标准算法 vs 自研|判据:搜指纹常量:0x9e3779b9=TEA、0x6a09e667=SHA256、AES S-box;魔改只动 S-box/轮数/delta,骨架守恒 diff 差异即可|转向:无指纹→黑盒建模
+- 场景:自研算法黑盒定性|判据:差分测试:单字节改只影响密文局部=逐字节映射,建表秒破;有扩散可逆→符号执行求逆;不可逆 hash 逐字节独立→256 次/字节爆破|转向:强扩散宽输出→转攻密钥来源/实现误用
+- 场景:提取密钥/明文|判据:再强的加密在使用点必为明文,守加密函数入口与 key 参数|转向:用完即焚→hook 密钥生成瞬间;反调试拦→Unicorn 抽出解密函数单跑;依赖环境→直接抓解密后明文
+- 场景:crackme 找校验点|判据:不读 main,xref "Correct/Wrong" 串或 strcmp/memcmp 倒推,断比较函数读期望;短路比较→时间侧信道 256^n→256*n|转向:求通过→patch 判定跳转
+- 场景:断点与 watchpoint|判据:下数据边界(read 返回处、输出函数前),不盲单步;过频→加条件过滤;抓改写者→硬件 watchpoint|转向:全落空→catch syscall 锚定,finish 上浮业务层

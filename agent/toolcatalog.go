@@ -35,7 +35,10 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
 	return map[string][]actool.CoreTool{
 		"mainagent": ts.MainAgentTools(),
-		"planner":   ts.PlannerTools(),
+		// cancel_intent 不在 PlannerTools()(tools.go)里——它是 planner 装配层
+		// (Plan 的 capFrontierTools)追加的工具;seed 这里补上,DB 绑定才覆盖 planner,
+		// 运行时 ToolResolve 才不会把它从 planner 的工具列表里丢掉。
+		"planner":   append(ts.PlannerTools(), ts.cancelIntentTool()),
 		"worker":    ts.WorkerTools(),
 		// goals（目标拆解器）默认绑 set_goals + set_constraints：靠它们把拆出的目标、
 		// 抽出的操作约束写进库。与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。

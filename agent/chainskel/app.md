@@ -1,0 +1,16 @@
+# chains-app L3 决策骨架(场景→判据→转向;蒸馏自 chains 语料,完整 Q&A 见 skills/chains-app/refs/)
+- 场景:拿到未知 APK 抽接口/密钥|判据:先 unzip 扫目录:Manifest 看权限/exported、lib/ 看特征 so,5 分钟分诊"纯 Java"还是"核心在 native/壳"|转向:主 dex 无业务类、application:name 指向加固 SDK 即按加固
+- 场景:jadx 类名全是单字母|判据:混淆≠加固——搜 http/api/包名,搜到业务字符串是混淆,dex 只剩壳 SDK 是加固|转向:混淆走字符串驱动精读,加固先榨 assets/meta-data 明文再定脱壳
+- 场景:快速捞明文密钥|判据:搜 secret/appkey/ak/sk/BEGIN、云前缀 AKIA/LTAI/AKID、高熵串,中 60% 低垂果实;assets 最易漏|转向:按能否验活排序(CLI 最小调用),失效 key 当情报横向找同类
+- 场景:代理配好 App 无流量|判据:握手后立刻 close_notify=Pinning(logcat 有 SSLHandshakeException 铁证);完全无请求=不走系统代理;握手没到代理=非 HTTP|转向:分别绕 pin、tun 透明代理强抓、tcpdump 看端口;2~4 小时无明文转打服务端
+- 场景:确认 SSL Pinning|判据:通用 unpinning 脚本/objection 通杀 60%~90%;无效四层排查 TrustManager/CertificatePinner/Conscrypt/native,全不进=pin 在 BoringSSL|转向:native hook SSL_get_verify_result 返 0;mTLS 找 .p12 证书+hook KeyStore.load 拿口令;全堵改 hook 明文
+- 场景:纯静态要接口清单|判据:Retrofit 搜 @GET/@POST/@Path/@Body 注解,路径+base_url 拼全 URL,比抓包还全|转向:注解被 R8 裁掉退搜 /api/ 常量和 OkHttp Request.Builder 构造点
+- 场景:逻辑在 native so|判据:hook 拿结果<<逆算法——先黑盒 hook native 方法看入参返回,多数够用;OLLVM 别静态硬跟|转向:必须离线复现才上 IDA,从 JNI 导出名/字符串/加密 API 锚点切入;被挡转 unidbg
+- 场景:上 frida|判据:server 与 host 版本架构严格匹配,frida-ps -U 能列进程才算通;一 attach 就崩=反 frida(扫 27042/maps 里 gum/TracerPid)|转向:改端口+spawn 抢先注入+gadget 去特征;还崩换 LSPosed 或 unidbg
+- 场景:静态看不出算法|判据:广谱 hook 收口——Cipher.init 拿 key/iv、doFinal 拿明密文对、Mac/MessageDigest 拿签名输入,运行时自报算法|转向:字符串加密 hook 统一 decrypt 出口批量还原,无出口下沉 String 构造等底层
+- 场景:确认加固|判据:点状拿密钥 hook 就够,面状审代码才脱壳,设 1 小时时间盒;分叉整体 vs 抽取——方法 insns 长度 0、code_off 大量相同=抽取|转向:整体按 dex\n035 魔数 dump;抽取转 fart 主动调用回填;VMP 放弃还原纯黑盒
+- 场景:挖本地存储密钥|判据:按明文概率翻 shared_prefs(token 常明文)→databases(.tables 找 user/token 表)→files→/sdcard(免 root)|转向:加密别逆算法——SQLCipher 钩 openDatabase 拿 password;key 在 TEE 导不出就 hook doFinal 让 App 代解;无 root 走 adb backup
+- 场景:目标是微信小程序|判据:root 设备打开一次取加密 wxapkg,解出近乎明文 JS;直奔 request 域名(反查全量后端)、appid/云环境 ID、前端鉴权校验|转向:云开发转打云数据库直连(规则常过松可越权整表读写);真机受限用开发者工具或直接打后端
+- 场景:body 是密文|判据:长度 16 倍数=AES/SM4;0x1F8B=gzip/0x789C=zlib 只是压缩;特征常量秒判(MD5 0x67452301、SM4 CK/FK)|转向:已知明文反查加密点或 hook JSON 入口反查;算法复杂不逆,App 当加解密预言机
+- 场景:改参数报签名错误|判据:hook MessageDigest.update/Mac.doFinal,回溯"哪次 digest 返回等于 sign"得原文;总差查四点:时间戳精度、nonce、字段排序、隐藏字段|转向:不逆算法用 App 当签名 oracle;ts+nonce 实时重签——挡旧包挡不住实时签名
+- 场景:protobuf/私有二进制|判据:首字节 tag<<3|wiretype(0x08/0x10/0x1A),decode_raw 盲解骨架,schema 在 GeneratedMessage 类里;私有协议找长度前缀+magic 定帧|转向:无生成类 hook 序列化两端拿"对象↔字节"映射当编解码 RPC

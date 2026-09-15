@@ -280,7 +280,14 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
-	return llm.NewProvider(lc)
+	prov, err := llm.NewProvider(lc)
+	if err != nil {
+		return nil, err
+	}
+	// 整体墙钟(ARTEX_LLM_CALL_TIMEOUT):单次调用的最上层保险,防连接半开挂死冻住
+	// worker/planner。包在这里(组装处),recorder/pool 都在它之外,归一化错误可被
+	// llm_usage 记录并触发 llmpool 故障转移。0 = 不限,原样返回。
+	return wrapCallTimeout(prov, c), nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
