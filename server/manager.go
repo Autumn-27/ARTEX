@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,11 +17,13 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
+	"github.com/Autumn-27/artex/tunnel"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -245,6 +249,9 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// taskProxy 期 3b 按任务 MITM 实例管理器(见 taskproxy.go);nil = 关闭
+	// (ARTEX_TASK_PROXY=off 或端口池非法)。worker 流量经任务实例 → 任务隧道。
+	taskProxy *taskProxyManager
 }
 
 // Settings keys the UI toggles at runtime.
@@ -262,6 +269,11 @@ const (
 	settingGlobalProxy = "global_proxy"
 	settingWorkers     = "workers"
 	settingLLMRecord   = "llm_record"
+	// settingLLMRecordsRetentionDays 是 llm_records 的按天保留期:默认 30 天,
+	// 0 = 不清理。见 startLLMRecordsRetention 的每日清理。
+	settingLLMRecordsRetentionDays = "llm_records_retention_days"
+	// defaultLLMRecordsRetentionDays is the retention when the setting is unset.
+	defaultLLMRecordsRetentionDays = 30
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -335,6 +347,46 @@ func (m *Manager) SetWorkers(n int) error {
 // Enrich returns the asset auto-completion engine (may be nil if init failed).
 func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
+// llmRecordsRetentionDays reads settings.llm_records_retention_days (default 30,
+// 0 = keep forever). Unset/unparseable/negative → default.
+func (m *Manager) llmRecordsRetentionDays() int {
+	v, ok, err := m.pg.GetSetting(settingLLMRecordsRetentionDays)
+	if err != nil || !ok {
+		return defaultLLMRecordsRetentionDays
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return defaultLLMRecordsRetentionDays
+	}
+	return n
+}
+
+// startLLMRecordsRetention runs the llm_records retention cleanup once at startup
+// (idempotent — expired rows may predate the setting) and then every 24h, same
+// pattern as the other Manager-start background loops. Retention 0 disables it.
+func (m *Manager) startLLMRecordsRetention() {
+	clean := func() {
+		days := m.llmRecordsRetentionDays()
+		if days <= 0 {
+			return
+		}
+		n, err := m.pg.DeleteLLMRecordsBefore(time.Now().Add(-time.Duration(days) * 24 * time.Hour))
+		if err != nil {
+			log.Printf("[llmrec] retention cleanup: %v", err)
+		} else if n > 0 {
+			log.Printf("[llmrec] retention cleanup: deleted %d records older than %d days", n, days)
+		}
+	}
+	clean()
+	go func() {
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			clean()
+		}
+	}()
+}
+
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
 // traffic-recording proxy. PostgreSQL is required (it is the single data source).
 func NewManager(dir, proxyAddr string) (*Manager, error) {
@@ -363,6 +415,10 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		pg.Close()
 		return nil, fmt.Errorf("recover finding retests: %w", err)
 	}
+	if err := pg.RecoverFindingChecks(); err != nil {
+		pg.Close()
+		return nil, fmt.Errorf("recover finding checks: %w", err)
+	}
 	if err := pg.EnsureLLMRecordsTable(); err != nil {
 		log.Printf("[llmrec] create table: %v", err)
 	}
@@ -370,6 +426,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m.startLLMRecordsRetention()
+	m.startPortAudit() // F13 台账外监听端口审计(仅 Linux;只观测不处置)
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -396,7 +454,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if tr != nil {
 			m.traffic = tr
 			go func() {
-				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA)", proxyAddr, tr.ProxyAddr())
+				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA; 口令见 data/traffic/_auth, 不打日志)", proxyAddr, tr.ProxyAddrRedacted())
 				if err := tr.Start(); err != nil {
 					log.Printf("[traffic] proxy stopped: %v", err)
 				}
@@ -436,6 +494,15 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		}
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
+	// 期 3b:按任务懒建 MITM(worker 流量 → 任务实例 → 任务隧道 socks → 内网,
+	// 留痕链不断)。ARTEX_TASK_PROXY=off 关闭;端口池 ARTEX_TASK_PROXY_PORT_RANGE。
+	if config.TaskProxyEnabled() {
+		if pmin, pmax, err := tunnel.ParsePortRange(config.TaskProxyPortRange()); err != nil {
+			log.Printf("[taskproxy] 端口池非法,按任务 MITM 关闭: %v", err)
+		} else {
+			m.taskProxy = newTaskProxyManager(dir, pgdb.NewTunnelStore(pg), m.GlobalProxy, pmin, pmax)
+		}
+	}
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
@@ -617,9 +684,18 @@ const browserMCPName = "browser"
 
 // syncBrowserMCPProxy reconciles the seeded browser MCP's proxy args + CA env with
 // the current traffic-capture state: capture on → route Playwright through the
-// recording proxy (--proxy-server) and trust its MITM CA (NODE_EXTRA_CA_CERTS);
-// capture off → strip both. Idempotent, and a no-op if the user deleted/renamed the
-// MCP. Must be called WITHOUT m.mu held (ProxyAddr/ProxyCACert take the lock).
+// recording proxy and trust its MITM CA (NODE_EXTRA_CA_CERTS); capture off →
+// strip both. Idempotent, and a no-op if the user deleted/renamed the MCP.
+// Must be called WITHOUT m.mu held (ProxyAddr/ProxyCACert take the lock).
+//
+// When the proxy URL carries credentials (F2-1 proxy auth), they cannot go
+// through --proxy-server: playwright-mcp forwards that flag verbatim to
+// Chromium, which ignores userinfo in proxy URLs, and Playwright only answers
+// the 407 challenge from launchOptions.proxy.username/password. Those fields
+// exist only in the playwright-mcp JSON config file, so a managed config
+// (browserMCPProxyConfigPath, 0600 — it holds the password) is written and
+// attached via --config. CLI args keep precedence over the config file, so the
+// user's own flags (--headless etc.) still apply.
 func (m *Manager) syncBrowserMCPProxy() {
 	servers, err := m.pg.ListMCP()
 	if err != nil {
@@ -640,14 +716,41 @@ func (m *Manager) syncBrowserMCPProxy() {
 	proxy := m.ProxyAddr()  // "" when capture off
 	cert := m.ProxyCACert() // "" when capture off
 
-	args := stripProxyArgs(decodeStrSlice(srv.Args))
+	raw := decodeStrSlice(srv.Args)
+	args := stripProxyArgs(raw)
+	cfgPath := m.browserMCPProxyConfigPath()
+	args = stripManagedProxyConfig(args, cfgPath)
 	env := decodeStrMap(srv.Env)
 	delete(env, "NODE_EXTRA_CA_CERTS")
 	if proxy != "" {
-		args = append(args, "--proxy-server", proxy)
+		if u, perr := url.Parse(proxy); perr == nil && u.User != nil {
+			user := u.User.Username()
+			pass, _ := u.User.Password()
+			u.User = nil
+			switch {
+			case hasForeignProxyConfig(raw, cfgPath):
+				// A user-supplied --config would be fully overridden by ours
+				// (commander keeps the last occurrence). Rather than silently
+				// dropping their settings, leave the proxy unattached and warn.
+				log.Printf("[mcp] browser MCP 自带 --config，无法注入代理认证凭据；浏览器流量将不经过录制代理。请在其 config 的 browser.launchOptions.proxy 中配置 server=%s 及 username/password（口令见 data/traffic/_auth）", u.String())
+			default:
+				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass); err != nil {
+					log.Printf("[mcp] browser 代理同步: 写代理 config 失败: %v", err)
+				} else {
+					args = append(args, "--config", cfgPath)
+				}
+			}
+		} else {
+			args = append(args, "--proxy-server", proxy)
+		}
 		if cert != "" {
 			env["NODE_EXTRA_CA_CERTS"] = cert
 		}
+	}
+	// The managed config holds the proxy password; delete it once the args no
+	// longer reference it (capture off, or auth switched off).
+	if !referencesConfig(args, cfgPath) {
+		_ = os.Remove(cfgPath)
 	}
 	srv.Args = encodeJSON(args)
 	srv.Env = encodeJSON(env)
@@ -656,7 +759,7 @@ func (m *Manager) syncBrowserMCPProxy() {
 		return
 	}
 	if proxy != "" {
-		log.Printf("[mcp] browser MCP 已挂捕获代理 %s (CA %s)", proxy, cert)
+		log.Printf("[mcp] browser MCP 已挂捕获代理 %s (CA %s)", redactURL(proxy), cert)
 	} else {
 		log.Printf("[mcp] browser MCP 已移除捕获代理配置")
 	}
@@ -679,6 +782,96 @@ func stripProxyArgs(args []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// browserMCPProxyConfigPath is the playwright-mcp JSON config ARTEX manages to
+// carry proxy credentials (F2-1). It lives next to the data store and is
+// written 0600 because it contains the proxy password.
+func (m *Manager) browserMCPProxyConfigPath() string {
+	return filepath.Join(m.dir, "browser-mcp-proxy.json")
+}
+
+// writeBrowserMCPProxyConfig persists the minimal playwright-mcp config that
+// routes the browser through a credentialed proxy. CLI args keep precedence
+// over a config file, so this only needs the proxy block.
+func writeBrowserMCPProxyConfig(path, server, username, password string) error {
+	cfg := map[string]any{
+		"browser": map[string]any{
+			"launchOptions": map[string]any{
+				"proxy": map[string]string{
+					"server":   server,
+					"username": username,
+					"password": password,
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return err
+	}
+	_ = os.Chmod(path, 0o600) // umask backstop
+	return nil
+}
+
+// stripManagedProxyConfig removes a previously injected "--config <path>"
+// (both "--flag val" and "--flag=val" forms) so it can be re-added cleanly.
+// Only OUR path is stripped — a user-supplied --config is left untouched.
+func stripManagedProxyConfig(args []string, cfgPath string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) && args[i+1] == cfgPath {
+			i++ // skip our value too
+			continue
+		}
+		if args[i] == "--config="+cfgPath {
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+// hasForeignProxyConfig reports whether the args carry a --config that is not
+// the ARTEX-managed one.
+func hasForeignProxyConfig(args []string, cfgPath string) bool {
+	for i, a := range args {
+		if a == "--config" && i+1 < len(args) && args[i+1] != cfgPath {
+			return true
+		}
+		if strings.HasPrefix(a, "--config=") && a != "--config="+cfgPath {
+			return true
+		}
+	}
+	return false
+}
+
+// referencesConfig reports whether the args still attach the managed config.
+func referencesConfig(args []string, cfgPath string) bool {
+	for i, a := range args {
+		if a == "--config" && i+1 < len(args) && args[i+1] == cfgPath {
+			return true
+		}
+		if a == "--config="+cfgPath {
+			return true
+		}
+	}
+	return false
+}
+
+// redactURL masks the password in a proxy URL for logging.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if _, ok := u.User.Password(); ok {
+		u.User = url.UserPassword(u.User.Username(), "****")
+	}
+	return u.String()
 }
 
 func decodeStrSlice(raw json.RawMessage) []string {
@@ -756,6 +949,40 @@ func (m *Manager) GlobalProxy() string {
 	return m.globalProxy
 }
 
+// TaskProxyForTask is the worker's per-task proxy resolver (期 3b): when capture
+// is on and the task-proxy feature is enabled it lazily builds/returns the task's
+// own MITM instance (addr + CA); "" → the worker falls back to the global
+// SetProxy value. Runs on its own short-timeout context so a cancelled worker
+// run can't abort instance creation halfway.
+func (m *Manager) TaskProxyForTask(taskID int64) (addr, caCert string) {
+	if m.taskProxy == nil || !m.TrafficEnabled() {
+		return "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return m.taskProxy.ForTask(ctx, taskID)
+}
+
+// RefreshTaskProxy re-resolves one task's MITM upstream after a tunnel state
+// change (tunnel.Manager.OnStateChange). No-op when the feature is off or the
+// task has no live instance (lazy-build semantics).
+func (m *Manager) RefreshTaskProxy(taskID int64) {
+	if m.taskProxy == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	m.taskProxy.Refresh(ctx, taskID)
+}
+
+// CloseTaskProxy destroys a task's MITM instance (task deleted/archived). The
+// recorded tree (incl. CA dir) stays on disk — evidence is not instance lifetime.
+func (m *Manager) CloseTaskProxy(taskID int64) {
+	if m.taskProxy != nil {
+		m.taskProxy.CloseTask(taskID)
+	}
+}
+
 // SetGlobalProxy validates, persists and applies the global egress proxy
 // (http/https/socks5, optional user:pass; empty = direct). It updates the MITM's
 // upstream immediately; callers must rebuild agents (applyLLM) afterwards so the
@@ -778,6 +1005,12 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 			return err
 		}
 	}
+	// 无隧道任务的 MITM 实例以全局代理为回落上游——全局代理变了它们一起换。
+	if m.taskProxy != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		m.taskProxy.RefreshAll(ctx)
+		cancel()
+	}
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
 	return nil
@@ -786,6 +1019,9 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.taskProxy != nil {
+		m.taskProxy.Close()
+	}
 	if m.traffic != nil {
 		m.traffic.Close()
 	}
@@ -811,7 +1047,9 @@ func unixNanoOrZero(t *time.Time) int64 {
 	return t.UnixNano()
 }
 
-func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
+func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor, pg *pgdb.DB) *Task {
+	g := guard.NewWithInterceptor(ic)
+	g.SetRoE(newRoEConfig(pg)) // RoE 范围强制(F5):worker 的 Bash/HTTP 目标与 task_scope 比对
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,
@@ -829,7 +1067,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
-		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
+		Store: store, Guard: g, notify: make(chan struct{}, 1),
 	}
 }
 
@@ -880,7 +1118,7 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 	if err != nil {
 		return nil, err
 	}
-	t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor)
+	t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor, m.pg)
 	m.mu.Lock()
 	m.tasks[t.ID] = t
 	m.active = t.ID
@@ -1079,7 +1317,7 @@ func (m *Manager) LoadExisting() []*Task {
 		if _, ok := m.tasks[id]; ok {
 			continue
 		}
-		t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor)
+		t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor, m.pg)
 		m.tasks[id] = t
 		loaded = append(loaded, t)
 	}
@@ -1772,21 +2010,6 @@ func (t *Task) NotifyGoal(texts []string) {
 	}
 	t.trigMu.Lock()
 	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "goal", Goals: texts})
-	t.trigMu.Unlock()
-	t.Notify()
-}
-
-// NotifyHint records that one OR MORE hints were added in a single add_hint call —
-// by the human via the main agent, or by cross-task orchestration — then wakes the
-// planner, so the next round is told "人新增了 N 条战略提示：…" and looks at them
-// directly instead of having to spot the new hint folded into the graph overview.
-// One call → one trigger event (a batched add_hint counts as one, not one per hint).
-func (t *Task) NotifyHint(texts []string) {
-	if len(texts) == 0 {
-		return
-	}
-	t.trigMu.Lock()
-	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "hint", Hints: texts})
 	t.trigMu.Unlock()
 	t.Notify()
 }

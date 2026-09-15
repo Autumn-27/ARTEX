@@ -20,7 +20,10 @@ import (
 )
 
 func (s *Server) evidenceStore() *evidence.Store {
-	return evidence.New(s.m.pg, s.m.traffic, filepath.Join(s.m.dir, "evidence"))
+	store := evidence.New(s.m.pg, s.m.traffic, filepath.Join(s.m.dir, "evidence"))
+	// C2:档 A 合并(新证据并入已 confirmed 的 finding)后触发增量重验。
+	store.OnMerged = s.onFindingMerged
+	return store
 }
 
 // Add only new optional properties; preserve edited descriptions, existing

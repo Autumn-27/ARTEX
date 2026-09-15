@@ -527,6 +527,37 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 			}
 		}
 	}
+	// Same first-turn sealing for verifier checks (finding_checks pipeline).
+	if c.AgentKey == db.FindingVerifierAgentKey {
+		finishStatus, finishReason = "failed", "验证未能启动"
+		chk, err := s.m.pg.FindingCheckForConversation(context.Background(), c.ID)
+		if err != nil {
+			log.Printf("[conv %d] load check: %v", c.ID, err)
+			if err := s.m.pg.FailPendingCheckForConversation(c.ID, "验证状态读取失败，请重新发起"); err != nil {
+				log.Printf("[conv %d] seal check: %v", c.ID, err)
+			}
+			return
+		}
+		if chk != nil && chk.Status == "pending" {
+			defer func() {
+				if ctx.Err() != nil {
+					finishStatus, finishReason = "stopped", "验证已停止或服务已关闭"
+				}
+				s.finishCheck(chk.ID, finishStatus, finishReason)
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			started, err := s.m.pg.StartFindingCheck(ctx, chk.ID)
+			if err != nil {
+				finishReason = err.Error()
+				return
+			}
+			if !started {
+				return
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		return
 	}
