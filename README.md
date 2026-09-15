@@ -113,6 +113,23 @@ cp config.example.json config.json   # 填好 database 连接
 > 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
 > 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
 
+#### Linux 服务器：改用 systemd 托管（推荐）
+
+在有 systemd 的 Linux 上，可以把守护职责交给 systemd（崩溃自动拉起、开机自启、日志进 journal），不再套 `start.sh`：
+
+```bash
+# 方式 A：install.sh 本地编译路径末尾会问「安装为 systemd 服务?」，选 y 自动完成
+# 方式 B：手动安装
+sudo install -m644 packaging/artex.service /etc/systemd/system/artex.service
+# 编辑 unit：把 User= / WorkingDirectory= / ExecStart= 改成你的部署账号与安装目录
+sudo systemctl daemon-reload && sudo systemctl enable --now artex
+journalctl -u artex -f    # 看日志
+```
+
+- **何时用哪个**：有 systemd 的 Linux 服务器用 unit；macOS / Windows / Docker / 无 systemd 的精简环境继续用 `start.sh` / `start.bat`。两者守护逻辑等价（退出码 0 停、75 立即重拉、其它退避重拉），**不要叠加使用**。
+- **可选环境变量**（如 `ARTEX_CALLBACK_ADDR` 回连地址）写在 `/etc/artex.env`，改完 `systemctl restart artex` 生效。
+- **更新流程差异**：页面一键更新、`update.sh` 本地更新在 systemd 下照常工作——程序以退出码 75 退出时，`Restart=on-failure` 会像 `start.sh` 一样把它拉起并完成换装，无需额外操作。手动换二进制则用 `sudo systemctl restart artex` 代替「重启 ./start.sh」。
+
 ### 方式四：从源码编译单二进制
 
 ```bash
@@ -143,6 +160,36 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ---
 
+## 外部工具（军火库）与部署自检
+
+平台本身只有一个二进制，但渗透能力依赖一批外部工具，统一放在 **`data/tools/`** 下（隧道工具可用环境变量覆盖路径）：
+
+| 工具 | 用途 |
+| --- | --- |
+| suo5 / suo5-payloads | HTTP 隧道：目标无出网时经 webshell payload 建 socks5（`ARTEX_SUO5_PATH` / `ARTEX_SUO5_PAYLOADS_DIR` 可覆盖） |
+| chisel | 反向 TCP 隧道：目标能出网时建反向 socks5 / 端口转发（`ARTEX_CHISEL_PATH` 可覆盖） |
+| gogo / naabu | 端口扫描与服务识别 |
+| httpx / katana | HTTP 探活指纹 / Web 爬虫端点发现 |
+| fscan | 内网综合扫描（端口/服务/弱口令） |
+| impacket / nxc | Windows 协议利用（psexec/secretsdump 等）/ SMB、WinRM 执行与喷洒 |
+| mimikatz / pypykatz / laZagne | Windows 凭据与本机保存密码提取 |
+| ligolo | ligolo-ng 反向隧道 / 内网组网 |
+| peass | 权限提升枚举（linpeas/winpeas） |
+| penelope | 反弹 shell handler（期 5 reverse_listen） |
+
+**钉版清单**:`packaging/tools-manifest.json` 记录每个工具的名称、用途、版本、平台、sha256 与相对路径（相对 `data/`)。`sha256` 留空表示"未钉"——尚未确认正确哈希的工具一律留空，不编造。启动时平台会读清单做自检：存在的二进制且清单钉了哈希的才校验，结果打一行汇总日志（缺失是常态，不刷屏）；**哈希不匹配只警告不阻断**（可能是自编译/新版）。清单文件缺失（开发态）则静默跳过。确认某工具的正确哈希后，把 `sha256` 填进清单即完成钉版。
+
+**部署预检**：装完/升级后跑一遍 `artex doctor`（只读，不启动服务、不写库）：
+
+```bash
+./artex doctor            # 逐项检查并汇总；有 FAIL 退出码 1
+./artex doctor -addr 0.0.0.0:8787 -data /opt/artex/data   # 与主程序同义的 -addr/-data
+```
+
+检查项：PostgreSQL 可连接、LLM profile 已配置、data 目录可写、隧道工具（suo5/chisel）存在性与（钉版后）sha256、军火库存在性汇总（存在 X/Y)、伪装门控状态（非 loopback 监听时 ARTEX_GATE 是否生效）、`ARTEX_CALLBACK_ADDR` 回连地址是否设置。
+
+---
+
 ## 更新升级
 
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
@@ -159,6 +206,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 - **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
 - **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
 - 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
+- **systemd 托管下无需改动**：程序以退出码 75 退出后由 `Restart=on-failure` 拉起，与 `start.sh` 行为一致；手动替换二进制时用 `sudo systemctl restart artex` 生效。
 
 ### 方式二：一键更新脚本
 
