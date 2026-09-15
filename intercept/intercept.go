@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -144,6 +145,8 @@ var defaultEnabledTools = []string{
 	"Bash", "WebFetch", "web_search",
 	"shell_open", "shell_send",
 	"Write", "Edit", "MultiEdit",
+	// 立足点会话工具(期 1a):登记 webshell 与目标侧命令/文件操作,默认进拦截规则体系。
+	"register_session", "session_exec", "session_read", "session_write",
 }
 
 // New creates an Interceptor backed by d. The rule cache is lazy-loaded on
@@ -229,7 +232,9 @@ func (i *Interceptor) rules() ([]compiledRule, error) {
 
 // IsToolEnabled returns true if the named tool is in the intercept-enabled set
 // (i.e. it should enter the rule-matching path). Uses the same double-check lock
-// pattern as rules().
+// pattern as rules(). Fail-closed: if the configuration cannot be loaded the
+// tool is NOT exempted — it enters the intercept flow, where Match fails closed
+// on the same load error.
 func (i *Interceptor) IsToolEnabled(name string) bool {
 	i.mu.RLock()
 	if i.enabledTools != nil {
@@ -242,7 +247,10 @@ func (i *Interceptor) IsToolEnabled(name string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.enabledTools == nil {
-		_ = i.loadLocked()
+		if err := i.loadLocked(); err != nil {
+			log.Printf("[intercept] 启用工具列表加载失败,工具 %s 按 fail-closed 进入拦截流程: %v", name, err)
+			return true
+		}
 	}
 	return i.enabledTools[name]
 }
@@ -310,10 +318,12 @@ const (
 	settingJudgeAskTimeoutAction = "llm_judge_ask_timeout_action"
 )
 
-// Judge default values.
+// Judge default values. Fail-closed: a judge failure defaults to "ask" (a human
+// decides; unattended asks time out to deny — see defaultJudgeAskTimeoutAction),
+// never silently to "allow".
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
+	defaultJudgeFailAction       = "ask"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
 )
@@ -504,10 +514,21 @@ func judgeActionLabel(action string) string {
 
 // Match evaluates the rule list (priority DESC) against a tool call.
 // Returns (Decision, true) for the first matching enabled rule, or
-// (Decision{}, false) if no rule matches.
+// (Decision{}, false) if no rule matches. Fail-closed: a rule-load error is NOT
+// treated as "no rules" — it returns an explicit deny decision (and logs),
+// while an empty rule list (len==0, no error) still falls through to the LLM
+// judge / caller default.
 func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	rules, err := i.rules()
-	if err != nil || len(rules) == 0 {
+	if err != nil {
+		log.Printf("[intercept] 规则加载失败,工具 %s 按 fail-closed 拒绝: %v", toolName, err)
+		return Decision{
+			RuleName: "rule-load-error",
+			Action:   "deny",
+			Message:  "拦截规则加载失败,平台按 fail-closed 策略禁止执行此工具",
+		}, true
+	}
+	if len(rules) == 0 {
 		return Decision{}, false
 	}
 	for _, r := range rules {
@@ -577,11 +598,22 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 // (via /api/intercept/pending/{id}/decide) or the per-rule timeout elapses.
 // Returns true if the user approved.
 //
+// 一键放行(guard_auto_allow)启用中时不创建 pending 记录,直接批准并写历史
+// (decision_source = "auto_allow");到期后自动恢复人工审批。
+//
 // convID == 0 means no active conversation (background pentest task). The
 // pending record is still created (conversation_id = NULL) so the approvals
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
 func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+	// 一键放行(带时限):启用中直接放行,不进 pending;历史记 decision_source=
+	// "auto_allow"。每次裁决前 AutoAllowStatus 做惰性到期检查,过期自动关闭。
+	// 仅作用于 ask 审批;deny 规则在 guard 的 deny 分支拦截,不经过这里。
+	if i.AutoAllowStatus().Enabled {
+		i.autoAllowApprove(ctx, convID, dec, toolName, input)
+		return true
+	}
+
 	ruleID := dec.RuleID
 	taskID, agentName := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)

@@ -1,0 +1,19 @@
+# chains-ad L3 决策骨架(场景→判据→转向;蒸馏自 chains 语料,完整 Q&A 见 skills/chains-ad/refs/)
+- 场景:域内新立足点起手|判据:零主动流量自省(whoami /all、arp、netstat),答出域名/DC/网段/有无域凭据四问再动手;有凭据先LDAP不先扫|转向:被动枯竭转凭据测绘(LSASS/DPAPI)让LDAP合法化
+- 场景:无凭据仅网络可达|判据:先吃广播自曝(LLMNR/NBT-NS)与匿名口子(null session/RID/AXFR),30~60分钟无果再低速主动|转向:Responder毒化收NetNTLMv2,不可PtH只relay/爆破
+- 场景:开喷口令前|判据:先摸lockoutThreshold与观察窗口,每账号每窗口≤threshold−2发、按密码分批;threshold=0可放喷但4771≤10次/分|转向:摸不到策略按threshold=3、每天1~2发
+- 场景:喷洒选型与字典|判据:优先Kerberos AS-REQ(4771比4625安静,兼做存在性判定);协议共享badPwdCount别叠加;字典宁砍到400也要确认存在|转向:AD面全监控转非AD面(本地SAM/数据库)
+- 场景:发现DONT_REQ_PREAUTH账号|判据:直接AS-REQ取可离线爆的AS-REP,零凭据可做、不耗badPwdCount,全域批量roast总有弱口令|转向:一个都没有属常态,转Kerberoast或喷洒
+- 场景:有域账号Kerberoast|判据:只挑用户账号SPN,优先etype=23 RC4+pwdLastSet≥3年+高权组+svc命名;盲扫=送4769画像|转向:AES-only爆不动转AS-REP/委派/ADCS,SPN留作地图
+- 场景:发现非约束委派机(TRUSTED_FOR_DELEGATION)|判据:它缓存来访者TGT,需本机admin+coerce DC来认证收TGT|转向:目标在Protected Users则换不受保护账户
+- 场景:约束委派与RBCD|判据:约束委派(AllowedToDelegateTo)需T2A4D、票可altservice换cifs;RBCD=对目标GenericWrite+MAQ>0自建机器账户|转向:无写权先夺有写权账户
+- 场景:域内有企业CA选ESC|判据:ESC1四条件并列=ClientAuth EKU+ENROLLEE_SUPPLIES_SUBJECT+可enroll+免审批免签名|转向:无enroll权转ESC3代理/ESC4改模板
+- 场景:ESC1不通续选|判据:ESC6=CA级EDITF_ATTRIBUTESUBJECTALTNAME2则任意模板注SAN;ESC8=/certsrv可达+coerce即relay|转向:模板全硬/无CA回roast/委派/relay
+- 场景:做NTLM relay|判据:接收端弱校验才通:SMB看签名、LDAPS看channel binding,cme --gen-relay-list出图|转向:签名全强制转ESC8(/certsrv不吃绑定)
+- 场景:需强制目标认证(coerce)|判据:按DFSCoerce→PetitPotam→PrinterBug轮换触发;被coerce方身份定收益——逼DC$认证=直通DCSync|转向:coerce全被补转mitm6诱捕或委派/ADCS
+- 场景:是否直捣DC(Zerologon类)|判据:三条件齐才打=指纹确认未补丁+时间紧须速通+有机器账户密码还原预案;单DC别赌,不可逆动作放最后|转向:缺一则转凭据慢推;DC硬打周边或蹲域管跳板
+- 场景:已SYSTEM收割凭据|判据:先摸EDR与RunAsPPL再碰LSASS;EDR强走SAM/SYSTEM/SECURITY hive、DPAPI,拖回离线解析|转向:LSASS空=无人登录转coerce;有LAPS则PtH复用死
+- 场景:凭据横向落地|判据:优先network logon(type3)避免RDP留凭据;445关切WinRM5985/DCOM;先查LAPS再定PtH范围|转向:全封转借已有会话偷token,或GPO让目标反连
+- 场景:发起DCSync|判据:域根GetChanges+GetChangesAll两ACE缺一不可;0x00002105=无权立刻停;先定点同步krbtgt不全量|转向:提权DA/接管复制权账户/域根WriteDACL自授后即还原
+- 场景:拿到krbtgt收尾|判据:金票有效期设数小时~几天非默认10年,核对域SID与kvno;flag所需权限<域管就别动DCSync牛刀|转向:EDR抓金票转真hash或Diamond Ticket
+- 场景:受限链路穿隧道|判据:目标已知且少→端口转发,未知且多→SOCKS;RTT秒级即脚本化打包;Kerberos要DNS+时钟差≤5分钟,宜在立足点就近执行|转向:三次退避仍断换通道/协议/立足点

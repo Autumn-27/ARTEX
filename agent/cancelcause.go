@@ -43,6 +43,8 @@ var (
 	// Per-work context.
 	AbortKilledByPlanner = cause("killed_by_planner", "规划者终止了这条意图",
 		"规划者调用 kill_work 主动终止了这条意图，通常表示方向跑偏或已无继续价值；意图会标记为 stopped，不会自动重新领取")
+	AbortKilledByMainagent = cause("killed_by_mainagent", "主 Agent 终止了这条意图",
+		"主 Agent（人类操作员的接口）调用 kill_work 主动终止了这条意图，通常是人判断方向跑偏或已无继续价值；意图会标记为 stopped，不会自动重新领取")
 	AbortWorkPausedByUser = cause("work_paused_by_user", "用户暂停了这条 Worker 意图",
 		"用户暂停了正在运行的 Worker。本次调用被取消，意图转为 paused；已经登记的意图、事实、漏洞和活动记录全部保留，恢复后从头重新执行")
 	AbortWorkCancelledByUser = cause("work_cancelled_by_user", "用户取消了这条 Worker 意图",

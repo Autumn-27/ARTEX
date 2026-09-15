@@ -270,7 +270,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 	}
 	beforeFacts, _ := currentStore.ListByKind(db.KindFact, 100)
 	sourceIntentID, _ := json.Marshal(sourceIntent)
-	if _, err := tools.recordOneFact(factItem{Summary: "must not attach to inherited intent", IntentID: json.RawMessage(sourceIntentID)}, sourceIntent); err == nil {
+	if _, _, err := tools.recordOneFact(factItem{Summary: "must not attach to inherited intent", IntentID: json.RawMessage(sourceIntentID)}, sourceIntent); err == nil {
 		t.Fatal("record_fact must reject inherited intent")
 	}
 	afterFacts, _ := currentStore.ListByKind(db.KindFact, 100)

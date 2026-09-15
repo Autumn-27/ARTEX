@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/agent/chainskel"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/harness"
@@ -138,6 +139,10 @@ type Engine struct {
 	steerBox map[int64][]string
 
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
+
+	// P0 意图领取超时上报(红日 3 R2:决胜意图 #207 从未被领取)的冷却台账:
+	// taskID -> *sync.Map(intentID -> bool),同一意图只上报一次。见 intent_watchdog.go。
+	p0Reported sync.Map
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
 	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
@@ -280,6 +285,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.plannerRound.Delete(taskID)
+	e.p0Reported.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
 	e.stamped.Delete(taskID)
@@ -288,6 +294,13 @@ func (e *Engine) StopTask(taskID string) {
 	e.deleteMu.Lock()
 	e.deleting.Delete(taskID)
 	e.deleteMu.Unlock()
+
+	// 期 3b:任务删除/归档连带销毁其 MITM 实例(端口注销;CA/录制树保留)。
+	if e.m != nil {
+		if id, err := strconv.ParseInt(taskID, 10, 64); err == nil {
+			e.m.CloseTaskProxy(id)
+		}
+	}
 }
 
 // cancelExec cancels a task's current per-task exec context (any in-flight
@@ -527,7 +540,8 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 // before each tool call it drains a queued course-correction (if any) and blocks the
 // call, handing the message back to the model — which re-plans its next step instead
 // of running the tool. No queued message → the guard behaves exactly as before.
-// 它同时负责「空转回合」的续跑，见 Stop。
+// 它同时负责「空转回合」的续跑(见 Stop)与「同质响应停滞检测」(见 PostToolUse,
+// chains L1,CHAINS-INTEGRATION-DESIGN.md §3)。
 type steerHooks struct {
 	inner harness.HookRunner
 	drain func() (string, bool)
@@ -539,6 +553,14 @@ type steerHooks struct {
 	limit int
 	// label 形如 "worker-1 · #42"，只用于日志。
 	label string
+	// det 是同响应停滞检测器(chains L1,POSTMORTEM-RED-SUN-3.md R4):PostToolUse
+	// 喂入每步 tool_result,判定"信息梯度为零"后经 PreToolUse drain 注入转向指令。
+	// 指针,与 nudges 同理——且有意建在 model_error 重跑循环外(见 runIntent),一条
+	// 意图的触发额度(冷却/上限)跨重跑共享,重跑一轮不清零。nil = 关闭。
+	det *agent.StuckDetector
+	// onStuck 在检测器触发时回调(engine 接线:写 system activity + hint 挂探索图,
+	// 让 planner 感知)。nil = 只注入、不留痕。
+	onStuck func(ev *agent.StuckEvent)
 }
 
 // 空转回合(只有思考、既无正文也无工具调用)续跑次数的默认值，与 SDK 空响应重试的
@@ -580,6 +602,13 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 		return true, "【规划者实时纠偏】" + msg +
 			"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
 	}
+	// 停滞检测的干预消息排在规划者纠偏之后:都是"先别动手、听完再说",规划者的
+	// 指令优先级更高。消息自带完整上下文(签名/次数/未执行说明),无需再加前缀。
+	if h.det != nil {
+		if msg, ok := h.det.Drain(); ok {
+			return true, msg, nil
+		}
+	}
 	if h.inner != nil {
 		return h.inner.PreToolUse(ctx, name, input)
 	}
@@ -587,6 +616,16 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 }
 
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	// chains L1:每步 tool_result 先喂停滞检测器(纯函数,~0 成本);触发时注入消息
+	// 已由检测器排入 pending(下一次 PreToolUse drain),这里只负责留痕回调。
+	if h.det != nil {
+		if ev := h.det.Observe(name, string(result), isErr); ev != nil {
+			log.Printf("[work %s] 停滞检测触发(%s,连续 %d 次,签名 %s,第 %d 次)", h.label, ev.Kind, ev.Count, ev.Signature, ev.N)
+			if h.onStuck != nil {
+				h.onStuck(ev)
+			}
+		}
+	}
 	if h.inner != nil {
 		h.inner.PostToolUse(ctx, name, input, result, isErr)
 	}
@@ -622,13 +661,20 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 // KillWork cancels the in-flight work running intentID (planner's kill_work tool).
 // The work's agent-core session honors ctx cancellation and aborts promptly.
 func (e *Engine) KillWork(intentID int64) error {
+	return e.KillWorkAs(intentID, agent.AbortKilledByPlanner)
+}
+
+// KillWorkAs is KillWork with an explicit named cause, so the activity trace can
+// tell WHO terminated the work (planner vs main agent — cancelcause.go 的具名取消
+// 规范要求每个取消点都登记原因).
+func (e *Engine) KillWorkAs(intentID int64, cause *agent.AbortCause) error {
 	e.workMu.Lock()
 	run := e.work[intentID]
 	e.workMu.Unlock()
 	if run == nil {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
-	run.cancel(agent.AbortKilledByPlanner)
+	run.cancel(cause)
 	return nil
 }
 
@@ -915,10 +961,19 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.touch(t.ID)
 	}
 
+	// P0 意图领取超时巡检:独立于规划心跳(心跳间隔 ≥10min,而 P0 超时是 5min,
+	// 且全部 worker 忙碌时 worker 循环都在 runIntent 里,没人会发现 frontier 里的
+	// P0 积压)。纯 db 读 + 一次性 hint 写入,不触发 LLM 调用。见 intent_watchdog.go。
+	watchdog := time.NewTicker(p0WatchInterval)
+	defer watchdog.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-watchdog.C:
+			e.reportOverdueP0Intents(t)
+			continue // 巡检不是规划触发,不重臂规划心跳
 		case <-t.notify:
 			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
 		case <-heartbeat.C:
@@ -1029,6 +1084,30 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		nudges: &atomic.Int64{},
 		limit:  e.emptyTurnNudgeLimit(),
 		label:  label,
+	}
+	// chains L1 停滞检测器同理:建在重跑循环外,冷却/触发上限按「这条意图」计,
+	// 跨 model_error 重跑共享(见 steerHooks.det 注释)。触发时除注入转向指令外,
+	// 留两道痕供 planner 感知:
+	//  1) system activity —— 进 worker trace,planner 用 get_worker_output 能看到;
+	//  2) hint 节点挂探索图 —— TriggerEvent 没有 system 类事件(manager.go 的
+	//     pendingTriggers 只有 done/finding/goal*/cancelled),而 planner 每轮
+	//     graph overview 必读 hints(agent/tools.go graphOverviewData),这是
+	//     现有结构里检测信号进 planner 视野的既有通道(参照 add_hint 路径)。
+	hooks.det = agent.NewStuckDetector(agent.DefaultStuckConfig())
+	// chains L3 → L1:停滞触发时附上类别化转向建议(按意图 chain_tags 从对应类
+	// 骨架抽"转向"条目,无匹配则为空、维持通用措辞)。一次性算好,整条意图不变。
+	hooks.det.PivotHint = chainskel.PivotHintsForIntent(intent.Payload, 3)
+	hooks.onStuck = func(ev *agent.StuckEvent) {
+		taskEmit(db.Activity{Kind: "system", Tool: ev.Tool,
+			Summary: fmt.Sprintf("停滞检测:连续 %d 次同质响应(%s,签名 %s)", ev.Count, ev.Kind, ev.Signature),
+			Detail:  agent.StuckIntervention(*ev)})
+		if t.Store != nil {
+			if _, err := t.Store.AddNode(db.KindHint, map[string]any{"text": fmt.Sprintf(
+				"【停滞检测】意图 #%d 的 worker 连续 %d 次同质/相似失败响应(签名 %s,工具 %s),信息梯度为零,平台已注入转向指令(第 %d 次)。规划时请避开同轴方向(换参数/信道/漏洞类/入口),或确认该方向已榨干再收尾。",
+				iid, ev.Count, ev.Signature, ev.Tool, ev.N)}, 0, "active", "system", nil); err != nil {
+				log.Printf("[work %s] 停滞检测 hint 写图失败: %v", label, err)
+			}
+		}
 	}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)

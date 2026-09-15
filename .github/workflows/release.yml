@@ -7,7 +7,37 @@ permissions:
   contents: write # 创建 Release 需要
 
 jobs:
-  # ① 前端静态导出（一次），产物给交叉编译各平台复用
+  # ① Go 全量测试门：带真实 PostgreSQL 服务，db/agent/server 的 PG 测试不再
+  #    静默跳过（本地无 ARTEX_PG_DSN 时这些测试仍会 skip，见 db/testmain_test.go）。
+  #    注意：带 DSN 后会真实执行全部 PG 测试，若个别用例在 CI 环境暴露出既有
+  #    依赖问题，应修测试本身，而不是摘掉这个门。
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: artex
+          POSTGRES_PASSWORD: artex
+          POSTGRES_DB: artex
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U artex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex:artex@localhost:5432/artex?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+
+  # ② 前端静态导出（一次），产物给交叉编译各平台复用；tsc 类型检查一并入门
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -19,6 +49,14 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
+      # 类型检查是硬门；biome 全仓尚有百余个既有 lint error，先只对 src 出报告
+      # 不阻塞，待存量清理后再升级成硬门。
+      - run: npx tsc --noEmit
+        working-directory: web
+      - name: Biome lint report (src only, non-blocking)
+        working-directory: web
+        continue-on-error: true
+        run: npx biome check src
       - run: npm run build:static
         working-directory: web
       - uses: actions/upload-artifact@v4
@@ -26,9 +64,9 @@ jobs:
           name: web-dist
           path: web/out
 
-  # ② 五平台交叉编译（内嵌前端）+ 打 zip
+  # ③ 五平台交叉编译（内嵌前端）+ 打 zip
   binaries:
-    needs: frontend
+    needs: [test, frontend]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -76,7 +114,7 @@ jobs:
           name: bin-linux-${{ matrix.goarch }}
           path: dist/artex-linux-${{ matrix.goarch }}/artex
 
-  # ③ 汇总所有 zip → 创建 GitHub Release
+  # ④ 汇总所有 zip → 签名校验和 → 创建 GitHub Release
   release:
     needs: binaries
     runs-on: ubuntu-latest
@@ -89,14 +127,32 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip > SHA256SUMS
+      # 用 minisign 给 SHA256SUMS 签名，客户端（selfupdate）内置公钥验签，
+      # 缺签名或验不过一律拒装。MINISIGN_KEY 是 minisign 无口令私钥文件的完整
+      # 内容（两行），公钥硬编码在 selfupdate/minisign.go，两者必须成对更换。
+      # minisign 工具本身钉 0.12 并校验 SHA256，不用包管理器的浮动版本。
+      - name: Sign checksums with minisign
+        working-directory: dist
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  minisign.tar.gz" | sha256sum -c -
+          tar xzf minisign.tar.gz
+          printf '%s\n' "$MINISIGN_KEY" > minisign.key
+          chmod 600 minisign.key
+          ./minisign-linux/x86_64/minisign -S -s minisign.key -m SHA256SUMS
+          shred -u minisign.key
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
           generate_release_notes: true
 
-  # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
+  # ⑤ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
   #    镜像里只装工具 + 放二进制；arm64 仅需模拟 apt 层，构建快很多）
   docker:
     needs: binaries

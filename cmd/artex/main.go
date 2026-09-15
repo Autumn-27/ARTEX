@@ -1,6 +1,7 @@
-// Command artex runs the ARTEX backend: the dual SQLite graph stores,
-// the event-driven exploration engine, and the JSON HTTP API consumed by the
-// shadcn/ui frontend.
+// Command artex runs the ARTEX backend: the PostgreSQL stores (asset graph +
+// per-task exploration graphs), the event-driven exploration engine, and the
+// JSON HTTP API consumed by the shadcn/ui frontend. SQLite survives only as
+// the traffic recorder's local index (see traffic/).
 package main
 
 import (
@@ -51,10 +52,15 @@ func main() {
 }
 
 func run() int {
+	// `artex doctor` 部署预检（期 6)：只读检查，在解析服务 flag / 起任何子系统之前分流。
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		return runDoctor(os.Args[2:])
+	}
+
 	var (
-		addr    = flag.String("addr", ":8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
-		proxy   = flag.String("proxy", ":8788", "traffic recording proxy address (empty to disable)")
+		addr    = flag.String("addr", "127.0.0.1:8787", "HTTP listen address (loopback by default; pass 0.0.0.0:8787 explicitly to expose)")
+		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for the traffic recorder and other local state (default: data/ next to the executable)")
+		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (loopback by default; empty to disable)")
 	)
 	flag.Parse()
 
@@ -112,7 +118,24 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
+	// ARTEX_CALLBACK_ADDR:反弹 shell/隧道(期 3/5)回连平台用;期 1a 仅启动校验提示。
+	if cb := config.CallbackAddr(); cb != "" {
+		log.Printf("[config] 回连地址(ARTEX_CALLBACK_ADDR): %s", cb)
+	} else {
+		log.Printf("[config] ARTEX_CALLBACK_ADDR 未设置：反弹 shell/隧道(期 3/5)需要平台回连地址,立足点(webshell)功能不受影响")
+	}
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
+
+	// 反测绘伪装门控(F14):绑非 loopback 时默认开启,ARTEX_GATE=off 可关。
+	gate, err := server.NewGate(*addr, *dataDir, config.BaseDir())
+	if err != nil {
+		log.Fatalf("gate: %v", err)
+	}
+	srv.SetGate(gate)
+
+	// 受管暂存(F13)的下载 URL 复用主监听地址(工具返回里给 worker 一个可用的绝对 URL)。
+	srv.SetStageBaseURL(*addr)
+
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

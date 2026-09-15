@@ -9,8 +9,19 @@ import {
   PlusIcon,
   ShieldAlertIcon,
   Trash2Icon,
+  ZapIcon,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,7 +62,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { InterceptRule, InterceptAction, JudgeConfig, LLMProfile, Tool } from "@/lib/types";
+import type { AutoAllowState, InterceptRule, InterceptAction, JudgeConfig, LLMProfile, Tool } from "@/lib/types";
 
 // ---- tool scope ----
 
@@ -342,6 +353,141 @@ function JudgeCard() {
   );
 }
 
+// ---- auto-allow (一键放行) card ----
+
+const AUTO_ALLOW_HOURS = [2, 4, 8] as const;
+
+function autoAllowRemainingLabel(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.ceil((secs % 3600) / 60);
+  if (h <= 0) return `${Math.max(1, m)} 分钟`;
+  return m > 0 && m < 60 ? `${h} 小时 ${m} 分` : `${h + (m >= 60 ? 1 : 0)} 小时`;
+}
+
+function AutoAllowCard() {
+  const [st, setSt] = React.useState<AutoAllowState | null>(null);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [hours, setHours] = React.useState<number>(2);
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setSt(await api.getAutoAllow());
+    } catch {
+      // 状态条非关键,失败静默(30s 轮询会重试)
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load();
+    const t = setInterval(load, 30_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  async function enable() {
+    setBusy(true);
+    try {
+      setSt(await api.setAutoAllow(true, hours));
+      setConfirmOpen(false);
+      toast.success(`一键放行已开启(${hours} 小时后自动恢复拦截)`);
+    } catch (e) {
+      toast.error("开启失败: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disable() {
+    setBusy(true);
+    try {
+      setSt(await api.setAutoAllow(false, 0));
+      toast.success("一键放行已关闭,恢复人工审批");
+    } catch (e) {
+      toast.error("关闭失败: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const enabled = st?.enabled ?? false;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div
+        className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 ${
+          enabled ? "border-red-400/60 bg-red-50/50 dark:bg-red-950/20" : "bg-muted/40"
+        }`}
+      >
+        <div className="flex min-w-0 items-center gap-2 text-sm">
+          <ZapIcon className={`h-4 w-4 shrink-0 ${enabled ? "text-red-600" : "text-muted-foreground"}`} />
+          <span className="shrink-0 font-medium">一键放行</span>
+          <span className="truncate text-muted-foreground">
+            限时自动批准所有需审批操作,仅真·破坏性命令仍被拦截
+          </span>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={busy || st === null}
+          onCheckedChange={(v) => (v ? setConfirmOpen(true) : disable())}
+        />
+      </div>
+
+      {enabled && st && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-red-500/60 bg-red-100/60 px-4 py-2.5 dark:bg-red-950/40">
+          <p className="text-sm font-medium text-red-700 dark:text-red-400">
+            自动放行中 · 剩余 {autoAllowRemainingLabel(st.remaining_seconds)}(到期自动恢复拦截)
+          </p>
+          <Button variant="destructive" size="sm" className="shrink-0" onClick={disable} disabled={busy}>
+            关闭
+          </Button>
+        </div>
+      )}
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>开启一键放行?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>
+                  开启后,AI agent 的所有需审批操作(横向移动、隧道工具、爆破、临时服务等)将
+                  <span className="font-semibold text-red-600 dark:text-red-400">【无人值守自动放行】</span>
+                  ,仅真·破坏性命令仍被拦截。仅在授权靶场/授权测试环境使用。请选择有效时长。
+                </p>
+                <div className="flex items-center gap-2">
+                  {AUTO_ALLOW_HOURS.map((h) => (
+                    <Button
+                      key={h}
+                      variant={hours === h ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setHours(h)}
+                    >
+                      {h} 小时
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy}
+              onClick={(e) => {
+                e.preventDefault(); // 等接口返回后再关弹窗
+                enable();
+              }}
+            >
+              {busy ? "开启中…" : "确认开启"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
 // ---- page ----
 
 export default function InterceptPage() {
@@ -520,6 +666,9 @@ export default function InterceptPage() {
           </p>
         </div>
       </div>
+
+      {/* ---- 一键放行(带时限的 ask 自动批准) ---- */}
+      <AutoAllowCard />
 
       {/* ---- 拦截范围信息条（规则匹配与模型兜底共用：不在范围内的工具两者都不介入）---- */}
       <div

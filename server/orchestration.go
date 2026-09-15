@@ -40,7 +40,15 @@ func jsonResult(v any) (actool.Result, error) {
 func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools := append(s.m.HostTools(), s.orchestrationTools()...)
 	tools = append(tools, s.findingRetestTools()...)
-	tools = append(tools, s.platformTools()...) // 平台操作工具(建改 skill/工具/MCP，给 Auto 用)
+	tools = append(tools, s.findingCheckTools()...) // 反证验证(verifier)host 工具
+	tools = append(tools, s.platformTools()...)     // 平台操作工具(建改 skill/工具/MCP，给 Auto 用)
+	if s.stage != nil {
+		tools = append(tools, s.stageShareTool()) // 受管文件投递(F13),默认绑 worker
+	}
+	tools = append(tools, s.sessionTools()...) // 立足点会话工具(期 1a),默认绑 worker
+	tools = append(tools, s.credentialTools()...) // 凭据工具(期 2),默认绑 worker
+	tools = append(tools, s.tunnelTools()...)    // 隧道四件套(期 3a),默认绑 worker
+	tools = append(tools, s.reverseTools()...)   // 反弹监听(期 5),默认绑 worker
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -166,8 +174,7 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	if s.m.Assets() != nil {
 		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
 	}
-	tsx.SetNotify(t.Notify)         // 通用唤醒（无专用回调的写操作走它；读工具为 no-op）
-	tsx.SetNotifyHint(t.NotifyHint) // add_hint → 记一条「人新增了 N 条战略提示：…」触发并唤醒 planner
+	tsx.SetNotify(t.Notify) // hint writes wake this task's planner (no-op for read tools)
 	return pick(tsx).Call(ctx, inner, nil)
 }
 
@@ -491,8 +498,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
-	s.seedWorkerReadToolsUnbind() // list_facts/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
-	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
+	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
@@ -848,50 +854,26 @@ func (s *Server) seedCompanyScopeRebind() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// seedWorkerReadToolsUnbind strips the read-context tools off worker's default
-// binding ONCE on existing DBs (guarded by a settings flag): a worker executes one
-// intent and writes back — reading facts/companies and listing all workers' traces is
-// a planning/main concern, not the executor's. Fresh DBs already lack these via
-// WorkerTools(); this only backfills old rows without overriding a user who
-// deliberately re-binds worker. Each RemoveAgentFromTool is per-tool +
-// membership-guarded, so planner/mainagent bindings of the same tool are untouched.
-//
-// NOTE: search_all_worker_traces / get_worker_trace / node_detail are intentionally NOT
-// unbound — worker owns them for cross-work look-back + node drill-down (see WorkerTools).
-// They used to be in this list back when worker lacked them; seedWorkerReadbackRebind
-// repairs DBs whose old run stripped them.
+// seedWorkerReadToolsUnbind strips the read-context / cross-work tools off worker's
+// default binding ONCE on existing DBs (guarded by a settings flag): a worker executes
+// one intent and writes back — reading facts/nodes/companies and pulling other workers'
+// traces is a planning/main concern, not the executor's. Fresh DBs already lack these via
+// WorkerTools(); this only backfills old rows without overriding a user who deliberately
+// re-binds worker. Each RemoveAgentFromTool is per-tool + membership-guarded, so
+// planner/mainagent bindings of the same tool are untouched.
 func (s *Server) seedWorkerReadToolsUnbind() {
 	const flag = "worker_readtools_unbind_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
 	for _, k := range []string{
-		"list_facts", "list_companies", "list_worker_traces",
+		"list_facts", "node_detail", "list_companies",
+		"search_all_worker_traces", "list_worker_traces", "get_worker_trace",
 	} {
 		if err := s.m.pg.RemoveAgentFromTool("worker", k); err != nil {
 			log.Printf("[worker] %s 从 worker 解绑失败: %v", k, err)
 			return // 出错则不落 flag，下次启动重试
 		}
-	}
-	_ = s.m.pg.SetSetting(flag, "true")
-}
-
-// seedWorkerReadbackRebind re-binds the cross-work look-back / drill-down tools onto
-// worker ONCE (guarded by a settings flag): an earlier seedWorkerReadToolsUnbind wrongly
-// stripped search_all_worker_traces / get_worker_trace / node_detail from worker after
-// they had been added to WorkerTools(), so any DB that ran that migration lost them.
-// Fresh DBs already have them via WorkerTools() and this is a harmless no-op there.
-// One-shot + flag-guarded so a user who later deliberately unbinds them isn't overridden.
-func (s *Server) seedWorkerReadbackRebind() {
-	const flag = "worker_readback_rebind_v2" // v2: 追加 node_detail
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
-	if err := s.m.pg.AddAgentToToolBinding("worker", []string{
-		"search_all_worker_traces", "get_worker_trace", "node_detail",
-	}); err != nil {
-		log.Printf("[worker] 回看/详情工具补绑失败: %v", err)
-		return // 出错则不落 flag，下次启动重试
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 }

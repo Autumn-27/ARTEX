@@ -698,6 +698,24 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// FindingStatusByNodeID returns the triage status of the standalone finding row
+// behind an exploration node ("" when the node has no row — synthetic/legacy
+// nodes). C4: planner 语义按它区分待验证(pending)与已确认(confirmed)漏洞。
+func (d *DB) FindingStatusByNodeID(nodeID int64) (string, error) {
+	var status string
+	err := d.QueryRow(`SELECT COALESCE(status,'pending') FROM findings WHERE node_id=$1`, nodeID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return status, err
+}
+
+// FindingStatusByNodeID lets callers holding only an AssetStore (e.g. the agent
+// ToolSet) reach the triage status without a raw *DB.
+func (a *AssetStore) FindingStatusByNodeID(nodeID int64) (string, error) {
+	return a.db.FindingStatusByNodeID(nodeID)
+}
+
 // SetFindingReportByNodeID sets the Markdown report on the standalone finding row
 // whose node_id matches — report_finding returns that node id, so an agent tool
 // can address the finding it just created. Returns rows affected (0 when no row).

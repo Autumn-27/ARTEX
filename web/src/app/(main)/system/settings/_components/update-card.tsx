@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { api, sseUrl } from "@/lib/api";
+import { safeHref } from "@/lib/safe-href";
 import type { UpdateCheck, UpdateProgress } from "@/lib/types";
 
 /** 等待新版本上线的最长时间。一次升级要经过三次进程启动（暂存 → 换装 → 新版），
@@ -98,9 +99,10 @@ export function UpdateCard() {
   }, []);
 
   // 订阅更新进度。SSE 不走 Next 的 /api 重写（那层会缓冲，事件推不出来）。
+  // F6:凭据是 60s 一次性 ticket;更新过程后端会重启,不重连(交给 /api/health 轮询)。
   const openStream = React.useCallback(
-    (fromVersion: string) => {
-      const es = new EventSource(sseUrl("/api/update/stream"));
+    async (fromVersion: string) => {
+      const es = new EventSource(await sseUrl("/api/update/stream"));
       es.onmessage = (ev) => {
         let p: UpdateProgress;
         try {
@@ -145,13 +147,23 @@ export function UpdateCard() {
 
     setBusy(true);
     setProgress({ phase: "downloading", percent: 0, message: "准备中…" });
-    const es = openStream(from);
-    api.applyUpdate().catch((e) => {
-      es.close();
-      setBusy(false);
-      setProgress(null);
-      toast.error("启动更新失败：" + (e as Error).message);
-    });
+    void (async () => {
+      let es: EventSource;
+      try {
+        es = await openStream(from);
+      } catch (e) {
+        setBusy(false);
+        setProgress(null);
+        toast.error("打开更新进度流失败：" + (e as Error).message);
+        return;
+      }
+      api.applyUpdate().catch((e) => {
+        es.close();
+        setBusy(false);
+        setProgress(null);
+        toast.error("启动更新失败：" + (e as Error).message);
+      });
+    })();
   };
 
   const doRollback = () => {
@@ -182,6 +194,8 @@ export function UpdateCard() {
   // 时长不可知的阶段，进度条填满并加个脉冲动画表示"在忙但说不准还要多久"。
   const downloading = !restarting && phase === "downloading";
   const pct = downloading ? Math.max(progress?.percent ?? 0, 0) : 100;
+  // html_url 来自 GitHub API 响应,只允许 http(s) 进 href;异常值时不渲染链接。
+  const changelogHref = safeHref(info?.html_url);
 
   return (
     // 设置页是多列瀑布流布局，卡片自己负责行间距并禁止跨列断开（见 page.tsx 的注释）。
@@ -215,9 +229,9 @@ export function UpdateCard() {
               </Badge>
             </>
           )}
-          {info?.html_url && (
+          {changelogHref && (
             <a
-              href={info.html_url}
+              href={changelogHref}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:underline"

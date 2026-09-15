@@ -10,12 +10,48 @@ import { cn } from "@/lib/utils";
 
 // Mock demo：无后端 SSE，塞几行示例日志。
 const MOCK_LOGS: LogLine[] = [
-  { seq: 1, ts: "2026-07-26T03:55:00Z", level: "info", tag: "engine", text: "ARTEX v0.1.0 backend listening on :8787 (workers=3)" },
-  { seq: 2, ts: "2026-07-26T03:55:01Z", level: "info", tag: "config", text: "LLM configured from DB: anthropic / claude-opus-4-8" },
-  { seq: 3, ts: "2026-07-26T03:56:10Z", level: "info", tag: "planner", text: "task t-acme-web: 第 3 轮规划，生成意图 i-4" },
-  { seq: 4, ts: "2026-07-26T03:57:00Z", level: "warn", tag: "guard", text: "block bash: 目标越界 out.evil.example 不在 scope 内" },
-  { seq: 5, ts: "2026-07-26T03:57:30Z", level: "info", tag: "work#1", text: "report_finding: Default Credentials (high) 已落库" },
-  { seq: 6, ts: "2026-07-26T03:58:20Z", level: "error", tag: "work#3", text: "intercept: mysqldump 命中破坏性规则，等待人工审批" },
+  {
+    seq: 1,
+    ts: "2026-07-26T03:55:00Z",
+    level: "info",
+    tag: "engine",
+    text: "ARTEX v0.1.0 backend listening on :8787 (workers=3)",
+  },
+  {
+    seq: 2,
+    ts: "2026-07-26T03:55:01Z",
+    level: "info",
+    tag: "config",
+    text: "LLM configured from DB: anthropic / claude-opus-4-8",
+  },
+  {
+    seq: 3,
+    ts: "2026-07-26T03:56:10Z",
+    level: "info",
+    tag: "planner",
+    text: "task t-acme-web: 第 3 轮规划，生成意图 i-4",
+  },
+  {
+    seq: 4,
+    ts: "2026-07-26T03:57:00Z",
+    level: "warn",
+    tag: "guard",
+    text: "block bash: 目标越界 out.evil.example 不在 scope 内",
+  },
+  {
+    seq: 5,
+    ts: "2026-07-26T03:57:30Z",
+    level: "info",
+    tag: "work#1",
+    text: "report_finding: Default Credentials (high) 已落库",
+  },
+  {
+    seq: 6,
+    ts: "2026-07-26T03:58:20Z",
+    level: "error",
+    tag: "work#3",
+    text: "intercept: mysqldump 命中破坏性规则，等待人工审批",
+  },
 ];
 
 const levelTone: Record<LogLine["level"], string> = {
@@ -59,22 +95,47 @@ export default function LogsPage() {
 
   // Live tail via SSE. on connect, replays whatever is in the ring (includes
   // DB-restored history from the last 100 rows written before restart).
+  // F6:凭据是 60s 一次性 ticket,EventSource 自带的自动重连第二次握手必然 401,
+  // 所以在连接彻底关闭后重新换票重连(seq 去重,重放无害)。
   React.useEffect(() => {
     if (MOCK) {
       setLines(MOCK_LOGS);
       return;
     }
-    const es = new EventSource(sseUrl("/api/logs/stream?since=0"));
-    es.onmessage = (e) => {
-      if (pausedRef.current) return;
-      try {
-        const l = JSON.parse(e.data) as LogLine;
-        setLines((prev) => (prev.some((x) => x.seq === l.seq) ? prev : [...prev, l].slice(-3000)));
-      } catch {
-        /* ignore malformed frame */
+    let es: EventSource | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const connect = async () => {
+      const url = await sseUrl("/api/logs/stream?since=0").catch(() => null);
+      if (stopped) return;
+      if (!url) {
+        timer = setTimeout(connect, 3000);
+        return;
       }
+      es = new EventSource(url);
+      es.onmessage = (e) => {
+        if (pausedRef.current) return;
+        try {
+          const l = JSON.parse(e.data) as LogLine;
+          setLines((prev) => (prev.some((x) => x.seq === l.seq) ? prev : [...prev, l].slice(-3000)));
+        } catch {
+          /* ignore malformed frame */
+        }
+      };
+      es.onerror = () => {
+        if (es?.readyState === EventSource.CLOSED && !stopped) {
+          es.close();
+          es = null;
+          timer = setTimeout(connect, 3000);
+        }
+      };
     };
-    return () => es.close();
+    void connect();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      es?.close();
+    };
   }, []);
 
   // Mark "has more" once we have any db_id in view.
@@ -89,7 +150,7 @@ export default function LogsPage() {
       const params = minDbId > 0 ? `?before=${minDbId}&limit=200` : `?limit=200`;
       const res = await fetch(`/api/logs/history${params}`);
       if (!res.ok) return;
-      const data = await res.json() as { items: LogLine[]; has_more: boolean };
+      const data = (await res.json()) as { items: LogLine[]; has_more: boolean };
       if (data.items?.length) {
         // Assign synthetic seq numbers below current minimum to keep dedup working.
         setLines((prev) => {
@@ -178,8 +239,7 @@ export default function LogsPage() {
             清空
           </Button>
           <span className="ml-auto text-xs text-muted-foreground">
-            {counts.total} 行 ·{" "}
-            <span className="text-amber-600 dark:text-amber-400">{counts.warn} 警告</span> ·{" "}
+            {counts.total} 行 · <span className="text-amber-600 dark:text-amber-400">{counts.warn} 警告</span> ·{" "}
             <span className="text-red-600 dark:text-red-400">{counts.error} 错误</span>
           </span>
         </div>
@@ -209,9 +269,7 @@ export default function LogsPage() {
           ) : (
             filtered.map((l) => {
               const body =
-                l.tag && l.text.startsWith("[" + l.tag + "]")
-                  ? l.text.slice(l.tag.length + 2).trimStart()
-                  : l.text;
+                l.tag && l.text.startsWith("[" + l.tag + "]") ? l.text.slice(l.tag.length + 2).trimStart() : l.text;
               return (
                 <div key={l.seq} className="flex items-start gap-2 px-1 py-0.5 hover:bg-muted/40">
                   <span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", levelDot[l.level])} />

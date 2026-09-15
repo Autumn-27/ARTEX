@@ -24,6 +24,13 @@ type Store struct {
 	DB      *db.DB
 	Traffic *traffic.Traffic
 	Dir     string
+
+	// OnMerged, if set, is invoked once after Record commits a 档 A merge into an
+	// existing confirmed finding. The db layer cannot import server, so the caller
+	// (server 装配处) injects the C2 增量重验 hook here — same injection pattern
+	// as the agent ToolSet's notifyFinding. Errors inside the callback must not
+	// fail the already-committed record; implementors should log instead.
+	OnMerged func(findingID int64)
 }
 
 func New(pg *db.DB, tr *traffic.Traffic, dir string) *Store {
@@ -191,6 +198,10 @@ func (s *Store) Record(ctx context.Context, in db.RecordFindingInput, refs []db.
 		out, err = db.RecordFindingTx(tx, in, prepared)
 		return err
 	})
+	// C2:合并成功后触发对该 finding 的增量重验(事务已提交,回调失败不影响主流程)。
+	if err == nil && out != nil && out.Merged && s.OnMerged != nil {
+		s.OnMerged(out.FindingID)
+	}
 	return
 }
 

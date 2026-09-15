@@ -228,12 +228,22 @@ func statusOf(err error) int {
 // task-level timeout, and burning a backup key on it would both waste credit and
 // pollute the run's termination diagnosis. Never on 400 either: a malformed or
 // over-long request fails identically everywhere.
+//
+// The one nuance is DeadlineExceeded: if the CALLER's ctx is still alive, the
+// deadline came from a derived context below us — the per-call hard wall clock
+// (agent 包 ARTEX_LLM_CALL_TIMEOUT,归一化为 call_timeout 类)或 SDK 内部
+// per-attempt 超时。那是一次挂死/瞬时的传输失败,与 reset/DNS 同类,归「可转移
+// 的瞬时失败」(软熔断计数,非 hard)。若调用方 ctx 自己也已到期(用户停止 /
+// 任务级截止),第一个分支已经拦下,永不转移。
 func shouldFailover(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true // call_timeout:调用方未到期,超时来自下层派生 ctx,瞬时,可转移
 	}
 	switch code := statusOf(err); {
 	case code == 0:

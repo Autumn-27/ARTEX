@@ -572,17 +572,14 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
 		t.listFindings(),
 		t.addFinding(), t.recordFact(),
+		// confirm_fact：worker 用成熟工具复核了自己被降级的阴性结论后，升级为 confirmed。
+		t.confirmFact(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
 		t.insertAssets(), t.listAssets(),
-		// 跨 work 回看：worker 也可复用其他 work 的观察，避免重复劳动。
-		// search_all_worker_traces：不必先知道 intent_id，按关键字全局捞命中步骤；
-		// get_worker_trace：锁定某条 work 后列步骤/就地搜/取完整内容。
-		t.searchAllWorkerTraces(), t.getWorkerTrace(),
-		// node_detail：worker 拿到 intent_id/节点 id 后可查该节点完整详情（配合上面的回看）。
-		t.nodeDetail(),
-		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
-		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
+		// 以下工具【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
+		// worker 只做单条意图的执行与写回）：list_facts / node_detail / list_companies /
+		// 跨 work 检索 search_all_worker_traces / list_worker_traces / get_worker_trace。
 	}
 }
 
@@ -594,6 +591,12 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
 		// steer_work：人可对某条正在运行的意图(work)实时注入纠偏指令（不打断、不丢进展）。
 		t.steerWorkTool(),
+		// kill_work：人可立即终止某条正在运行的意图(work)。描述经 DecorateTool 改写,
+		// 明确与 steer_work(不打断)/cancel_intent(只作废 open) 的边界;handler 不变,
+		// engine 回调带 killed_by_mainagent 具名原因(server 接线)。
+		DecorateTool(t.killWorkTool(), "【立即终止】一条正在运行(running)的意图(work):worker 被立刻叫停,意图标记为 stopped、不再自动重领。用于人判断方向跑偏/已无继续价值时止损。与 steer_work 的区别:steer_work 不打断、只注入纠偏指令;与 cancel_intent 的区别:cancel_intent 只作废【未开始(open)】的意图,kill_work 终止【正在运行】的。先用 get_worker_output 看看它在干嘛再决定。", nil),
+		// cancel_intent：人可作废 frontier 里未开始(open)的积压意图(原因挂图留痕)。
+		t.cancelIntentTool(),
 		// set_goals：人可在运行时给本任务补一个新的最终目标（规划者据此重判是否达成）。
 		t.setGoals(),
 		// set_constraints：人可在运行时给本任务补/改操作约束（allow/deny），约束 planner/worker 的探索边界。

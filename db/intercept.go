@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,8 +23,10 @@ type InterceptRule struct {
 	TimeoutEnabled bool      `json:"timeout_enabled"`
 	TimeoutSeconds int       `json:"timeout_seconds"`
 	TimeoutAction  string    `json:"timeout_action"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	// Builtin 是平台底线规则标记(F13 起):builtin=true 的规则禁止删除/禁用。
+	Builtin   bool      `json:"builtin"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // InterceptPending is one row of intercept_pending.
@@ -42,14 +45,14 @@ type InterceptPending struct {
 	CreatedAt      time.Time       `json:"created_at"`
 }
 
-const interceptRuleCols = `id, name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, created_at, updated_at`
+const interceptRuleCols = `id, name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, builtin, created_at, updated_at`
 
 func scanInterceptRule(row interface{ Scan(...any) error }) (InterceptRule, error) {
 	var r InterceptRule
 	err := row.Scan(&r.ID, &r.Name, &r.Enabled, &r.Priority,
 		&r.MatchTarget, &r.MatchType, &r.Pattern, &r.Action, &r.Message,
 		&r.TimeoutEnabled, &r.TimeoutSeconds, &r.TimeoutAction,
-		&r.CreatedAt, &r.UpdatedAt)
+		&r.Builtin, &r.CreatedAt, &r.UpdatedAt)
 	return r, err
 }
 
@@ -82,7 +85,14 @@ RETURNING `+interceptRuleCols,
 }
 
 // UpdateInterceptRule replaces all editable fields of an existing rule.
+// 与 Toggle 同一底线:builtin=true 的规则不允许借 update 禁用。
 func (d *DB) UpdateInterceptRule(id int64, name, matchTarget, matchType, pattern, action, message string, priority int, enabled bool, timeoutEnabled bool, timeoutSeconds int, timeoutAction string) (InterceptRule, error) {
+	if !enabled {
+		var builtin bool
+		if err := d.QueryRow(`SELECT builtin FROM intercept_rules WHERE id=$1`, id).Scan(&builtin); err == nil && builtin {
+			return InterceptRule{}, ErrBuiltinRule
+		}
+	}
 	row := d.QueryRow(`
 UPDATE intercept_rules
    SET name=$2, enabled=$3, priority=$4, match_target=$5,
@@ -94,14 +104,34 @@ RETURNING `+interceptRuleCols,
 	return scanInterceptRule(row)
 }
 
-// DeleteInterceptRule removes a rule.
+// ErrBuiltinRule 表示试图删除/禁用 builtin=true 的平台底线规则(F13 起)。
+// server 层把该错误映射为 400 而非 500。
+var ErrBuiltinRule = errors.New("内置底线规则不可删除或禁用")
+
+// DeleteInterceptRule removes a rule. builtin=true 的底线规则拒绝删除。
 func (d *DB) DeleteInterceptRule(id int64) error {
-	_, err := d.Exec(`DELETE FROM intercept_rules WHERE id=$1`, id)
-	return err
+	res, err := d.Exec(`DELETE FROM intercept_rules WHERE id=$1 AND builtin=false`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var builtin bool
+		if err := d.QueryRow(`SELECT builtin FROM intercept_rules WHERE id=$1`, id).Scan(&builtin); err == nil && builtin {
+			return ErrBuiltinRule
+		}
+	}
+	return nil
 }
 
-// ToggleInterceptRule flips the enabled state of a rule.
+// ToggleInterceptRule flips the enabled state of a rule. builtin=true 的底线规则
+// 可以被重新启用,但拒绝禁用。
 func (d *DB) ToggleInterceptRule(id int64, enabled bool) error {
+	if !enabled {
+		var builtin bool
+		if err := d.QueryRow(`SELECT builtin FROM intercept_rules WHERE id=$1`, id).Scan(&builtin); err == nil && builtin {
+			return ErrBuiltinRule
+		}
+	}
 	_, err := d.Exec(`UPDATE intercept_rules SET enabled=$2 WHERE id=$1`, id, enabled)
 	return err
 }
@@ -146,6 +176,14 @@ func (d *DB) DecideInterceptPending(id int64, status string) error {
 // rule matches for observability — they don't block and need no user action, so unlike
 // CreateInterceptPending (which starts 'pending') this records the outcome directly.
 func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status, reason string, audits ...*InterceptAudit) (int64, error) {
+	return d.CreateDecidedInterceptWithSource(ruleID, convID, taskID, agentName, toolName, input, status, reason, interceptSource(ruleID, reason), audits...)
+}
+
+// CreateDecidedInterceptWithSource is CreateDecidedIntercept with an explicit
+// decision_source, bypassing interceptSource's ruleID/reason inference. Used by
+// the one-click auto-allow switch (source = "auto_allow") so the history row
+// shows the approval was unattended, not a human/model/rule decision.
+func (d *DB) CreateDecidedInterceptWithSource(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status, reason, source string, audits ...*InterceptAudit) (int64, error) {
 	raw := json.RawMessage(input)
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
@@ -167,7 +205,7 @@ func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, too
 	err := d.QueryRow(`
 INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, decision_source, audit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, source, firstAudit(audits)).Scan(&id)
 	return id, err
 }
 

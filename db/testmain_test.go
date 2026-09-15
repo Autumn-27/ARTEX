@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 
@@ -17,6 +18,13 @@ func TestMain(m *testing.M) {
 	dsn, _, err := DSN()
 	if err != nil {
 		// No DB configured — tests that need PG will skip themselves.
+		// WARNING: this makes `go test ./...` look green while every PG-backed
+		// test is silently skipped. Local dev keeps this lenient on purpose,
+		// but CI (release.yml `test` job) MUST provide ARTEX_PG_DSN so the
+		// suite actually runs — a green CI run with this warning in the log
+		// means the gate is broken, not that the tests passed.
+		fmt.Fprintf(os.Stderr,
+			"\n*** WARNING: db tests running without ARTEX_PG_DSN — all PostgreSQL-backed tests will SKIP silently. CI must set ARTEX_PG_DSN. ***\n\n")
 		os.Exit(m.Run())
 	}
 	conn, err := sql.Open("pgx", dsn)

@@ -1,0 +1,49 @@
+# ARTEX systemd unit —— 崩溃自动拉起 + 开机自启
+#
+# 安装（或由 install.sh 的 systemd 分支自动完成）：
+#   sudo install -m644 packaging/artex.service /etc/systemd/system/artex.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now artex
+#
+# 与 start.sh 的关系：
+#   systemd 模式下【不要】再套 start.sh —— 守护职责（崩溃重拉、退避、开机自启）
+#   已移交给 systemd， ExecStart 直接跑 artex 本体。页面「一键更新」的换装逻辑
+#   不受影响： artex 退出码 75（自更新/回滚就绪）是非零退出， Restart=on-failure
+#   会把它重新拉起，新版二进制由 artex 自己在启动时完成校验/换装（selfupdate 包）。
+#   退出码 0（用户正常停止 / systemctl stop）则视为正常退出，不再拉起。
+#   start.sh / start.bat 保留给无 systemd 的环境（macOS、Windows、Docker ENTRYPOINT）。
+[Unit]
+Description=ARTEX agentic pentest platform
+Documentation=https://github.com/Autumn-27/ARTEX
+# 弱依赖：有网络/Postgres 就先等它们，没有也不阻止启动（库可装在别的机器上）
+Wants=network-online.target postgresql.service
+After=network-online.target postgresql.service
+# 进程异常打满时的兜底：60s 内最多拉起 5 次，超出后进入 failed 态人工介入
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 运行账号：默认 artex（不存在请先 useradd -r -s /usr/sbin/nologin artex，
+# 或改成你的部署账号； install.sh 会自动替换为执行安装的用户）
+User=artex
+# 安装目录（含 artex 二进制、config.json、skills/、data/）。install.sh 会替换为实际路径
+WorkingDirectory=/opt/artex
+# 可选环境注入：文件不存在也不报错（行首的 -）。用于 ARTEX_CALLBACK_ADDR
+# （反弹 shell/隧道回连地址）等不便写进 config.json 的环境变量
+EnvironmentFile=-/etc/artex.env
+ExecStart=/opt/artex/artex -addr :8787 -proxy :8788
+# 崩溃/自更新重拉：固定 5s 间隔（systemd 无内置指数退避； v254+ 可改用
+#   RestartSteps=4 / RestartMaxDelaySec=60s 实现 5→60s 递增至上限）
+Restart=on-failure
+RestartSec=5s
+# 内存上限按需开启（默认不设）。探索任务吃内存时建议：
+# MemoryMax=2G
+# 流量录制会开大量连接
+LimitNOFILE=65535
+# 日志走 journal： journalctl -u artex -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=artex
+
+[Install]
+WantedBy=multi-user.target

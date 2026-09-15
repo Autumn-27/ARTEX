@@ -4,6 +4,10 @@
 // results back into the asset graph — creating IP/port nodes, resolves/exposes
 // edges, and filling attrs.dns / attrs.http. DNS is ungated; HTTP probing is gated
 // by RoE (§5.2).
+//
+// 注意:本包当前未接线——agent/tools.go 的 SetEnrich 在全仓没有任何调用点,
+// 在调用方接入之前本包不生效(见 AUDIT-REPORT.md M-项 /「异步补全(enrich)」)。
+// 上文描述的 RoE 门控是设计意图,尚不存在于任何执行路径。
 package enrich
 
 import (

@@ -333,6 +333,13 @@ type RecordedFinding struct {
 	FindingID int64           `json:"finding_id,string"`
 	NodeID    int64           `json:"finding_node_id,string"`
 	Traffic   *FindingTraffic `json:"traffic"`
+
+	// 档 A 同入口合并(db/finding_merge.go):命中既有 confirmed/pending finding
+	// 时不新增行/节点,Merged=true,MergedInto* 指向聚合目标(与
+	// FindingID/NodeID 相同,冗余字段只是让调用方无需比较即可判断走了合并)。
+	Merged              bool  `json:"merged"`
+	MergedIntoFindingID int64 `json:"merged_into_finding_id,string,omitempty"`
+	MergedIntoNodeID    int64 `json:"merged_into_node_id,string,omitempty"`
 }
 
 func RecordFindingTx(tx *sql.Tx, in RecordFindingInput, prepared []PreparedTrafficEvidence) (*RecordedFinding, error) {
@@ -356,6 +363,14 @@ func RecordFindingTx(tx *sql.Tx, in RecordFindingInput, prepared []PreparedTraff
 		if !ok {
 			return nil, errors.New("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
+	}
+	// 档 A 同入口合并:查重与插入同处本事务的任务级证据锁内,无并发双插窗口。
+	cand, merr := findMergeCandidateTx(tx, in)
+	if merr != nil {
+		return nil, merr
+	}
+	if cand != nil {
+		return mergeFindingTx(tx, cand, in, prepared)
 	}
 	payload, _ := json.Marshal(map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})
 	out := &RecordedFinding{}

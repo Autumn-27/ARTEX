@@ -206,6 +206,8 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 		}
 		ts.Net = v
 	case "icp", "keyword":
+		// 注意:keyword 范围行登记后不参与覆盖度分母(covTargetCTE 没有 keyword 的
+		// 匹配谓词),目前是死规则,见 ROADMAP.md;icp 有匹配谓词,正常计入。
 		parsed, err := ParseScopeInput(ScopeInput{Kind: kind, Value: value})
 		if err != nil {
 			return ts, err
@@ -300,6 +302,8 @@ func (s *AssetStore) CoverageEnabled(taskID int64) bool {
 }
 
 // task_scope→assets match predicate, reused by the count / by-type / untested queries. $1=taskID.
+// 注意:kind='keyword' 的范围行故意没有出现在这里——keyword 不参与覆盖度分母
+// (死规则,见 ROADMAP.md);但它仍计入 Coverage.ScopeRows(范围未锚定判定)。
 const covTargetCTE = `
 target AS (
   SELECT DISTINCT a.id, a.type,

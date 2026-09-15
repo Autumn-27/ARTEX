@@ -1,10 +1,10 @@
 // Package guard implements the safety boundary layer (docs §11): an audit log,
-// user-configured intercept-rule evaluation, and Observer/G5 failure attribution.
-// Every tool call passes through the PreToolUse hook before executing.
-// (The RoE authorization-scope mechanism was removed; a replacement may be added
-// later.) Destructive/exfil gating is no longer hard-coded here — it lives in the
-// DB intercept rules (seeded as ordinary [内置] rules, so users can disable or
-// delete them), evaluated via applyIntercept.
+// user-configured intercept-rule evaluation, RoE authorization-scope enforcement
+// (F5, see roe.go — Bash/HTTP 工具的交互目标与任务 task_scope 比对), and
+// Observer/G5 failure attribution. Every tool call passes through the PreToolUse
+// hook before executing. Destructive/exfil gating is no longer hard-coded here —
+// it lives in the DB intercept rules (seeded as ordinary [内置] rules, so users
+// can disable or delete them), evaluated via applyIntercept.
 package guard
 
 import (
@@ -34,6 +34,7 @@ type Guard struct {
 	attrib      map[string]int // failure attribution counts (Observer / G5)
 	reg         *hook.Registry
 	interceptor *intercept.Interceptor // optional; nil disables user-configured rules
+	roe         RoEConfig              // optional; Scope==nil disables the RoE check
 }
 
 // New creates a Guard without user-configured intercept rules (used for pentest
@@ -75,6 +76,11 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		cmd = in.Text
 	}
 	g.record(ev.ToolName, "allow", "", cmd)
+	// RoE 授权范围检查(F5):Bash/HTTP 类工具的交互目标与 task_scope 比对,
+	// 先于用户拦截规则;Out+strict 走 ask,Out+warn 只记审计。
+	if res, stop := g.checkRoE(ctx, ev, cmd); stop {
+		return res
+	}
 	return g.applyIntercept(ctx, ev)
 }
 

@@ -1191,6 +1191,29 @@ export interface JudgeConfig {
   ask_timeout_action: "allow" | "deny"; // 审批超时后的默认动作
 }
 
+// AutoAllowState: 一键放行(guard auto-allow)的当前状态。enabled=false 时
+// expires_at/remaining_seconds 均为 0;到期后后端惰性检查自动关闭。
+export interface AutoAllowState {
+  enabled: boolean;
+  expires_at: number; // unix 秒
+  remaining_seconds: number;
+}
+
+// PendingScopeRow: 引擎在授权边界外反复探测到的网段/主机,等待人工决定。
+// approve = 写入任务 scope(guard 后续放行);dismiss = 忽略。status 为已决态时
+// decided_at 有值;并发决定会返回 409,调用方刷新列表即可。
+export interface PendingScopeRow {
+  id: number;
+  task_id: number;
+  kind: string; // cidr | ip 等
+  value: string;
+  status: "pending" | "approved" | "dismissed";
+  hits: number;
+  first_seen: string;
+  last_seen: string;
+  decided_at?: string;
+}
+
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.
 export interface InterceptApprovalRow extends InterceptPending {
   conv_title: string; // "" if no linked conversation
@@ -1430,4 +1453,114 @@ export interface UpdateProgress {
   message: string;
   version?: string;
   error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// 内网作战（/intranet）：拓扑 / 会话（webshell) / 隧道 / 凭据。
+// 形状与后端契约一一对应；Go 侧 nil slice 序列化为 null,api 层统一 arr() 兜底。
+// ---------------------------------------------------------------------------
+
+/** GET /api/intranet/topology 的主机节点。 */
+export interface IntranetNode {
+  id: string;
+  ip: string;
+  segment: string;
+  /** 是否有存活会话（图上高亮/加边框）。 */
+  has_session: boolean;
+  alive_sessions: number;
+  /** 平台自身（回连端）节点，图上特殊标记。 */
+  is_callback: boolean;
+}
+
+/** GET /api/intranet/topology 的边（隧道链路）。state: alive / stopped / error。 */
+export interface IntranetEdge {
+  id: string;
+  kind: string;
+  from: string;
+  to: string;
+  state: string;
+}
+
+export interface IntranetSegment {
+  name: string;
+  color_key: string;
+}
+
+export interface IntranetTopology {
+  nodes: IntranetNode[];
+  edges: IntranetEdge[];
+  segments: IntranetSegment[];
+}
+
+/** GET /api/sessions 的会话（webshell）记录。status: alive / dead。 */
+export interface ShellSession {
+  id: string;
+  /** 马型，如 beholder / godzilla / antsword。 */
+  kind: string;
+  url: string;
+  lang: string;
+  platform: string;
+  /** 宿主标识（拓扑节点 id 或 ip）。 */
+  host_asset_id: string;
+  status: string;
+  last_beat: string;
+  /** 创建该会话的任务 id（后端 JSON number，omitempty；0/缺省 = 未关联）。 */
+  created_by_task?: number;
+}
+
+/** POST /api/sessions/{id}/exec 的结果。 */
+export interface SessionExecResult {
+  stdout: string;
+  stderr: string;
+  ms: number;
+  timed_out: boolean;
+  /** 通道侧错误（如会话已断），HTTP 层成功但执行失败时由后端填充。 */
+  error?: string;
+}
+
+/** POST /api/sessions/{id}/list 的目录项。 */
+export interface SessionFsEntry {
+  name: string;
+  is_dir: boolean;
+  size: number;
+}
+
+/** POST /api/sessions/{id}/read 的结果：文本 content 或 base64（二进制）二选一。 */
+export interface SessionReadResult {
+  content?: string;
+  content_base64?: string;
+  truncated: boolean;
+}
+
+/** GET /api/tunnels 的隧道台账。state: alive / stopped / error。 */
+export interface TunnelInfo {
+  id: string;
+  /** 归属任务 id（后端 JSON number；0 = 未关联）。 */
+  task_id: number;
+  kind: string;
+  state: string;
+  /** 平台侧入口（chisel server 绑定地址/端口）。 */
+  listen_host: string;
+  listen_port: number;
+  /** portfwd：经隧道访问的内网目标。 */
+  target_host?: string;
+  target_port?: number;
+  via_session_id: string;
+  last_check: string;
+  /** 探活/建链失败原因（state=error 时一般由后端填充）。 */
+  error?: string;
+}
+
+/** GET /api/credentials 的凭据记录（密钥已脱敏）。 */
+export interface Credential {
+  id: string;
+  cred_type: string;
+  username: string;
+  domain: string;
+  secret_masked: string;
+  source: string;
+  verified: boolean;
+  created_at: string;
+  /** 归属任务 id（后端 JSON number；0 = 未关联）。 */
+  task_id?: number;
 }

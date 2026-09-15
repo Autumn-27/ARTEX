@@ -11,6 +11,7 @@ import {
   MessageSquare,
   Network,
   Plug,
+  Radar,
   Radio,
   ScrollText,
   Settings2,
@@ -74,6 +75,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
+      { id: "intranet", title: "内网", url: "/intranet", icon: Radar },
     ],
   },
   {

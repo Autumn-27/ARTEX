@@ -18,9 +18,10 @@ import (
 //   ④ 等在跑 worker drain(受 grace) → ⑤ 终局一轮 planner 判定 → ⑥ 定终态(带守卫)
 
 const (
-	settleDrainGrace     = 90 * time.Second // 等在跑 worker 优雅收尾的上限;超过则硬 cancel
-	deadlinePollInterval = 2 * time.Second  // deadline 未盖章/LLM 未就绪时的轮询间隔
-	deadlineMaxSleep     = 30 * time.Second // 单次最长睡眠(便于周期复查终态)
+	settleDrainGrace      = 90 * time.Second // 等在跑 worker 优雅收尾的上限;超过则硬 cancel
+	deadlinePollInterval  = 2 * time.Second  // deadline 未盖章/LLM 未就绪时的轮询间隔
+	deadlineMaxSleep      = 30 * time.Second // 单次最长睡眠(便于周期复查终态)
+	freezeDetectThreshold = 60 * time.Second // 实际睡眠超计划睡眠该阈值才判定为冻结/挂起(正常轮询误差远小于此)
 )
 
 // ---------- settling 状态 ----------
@@ -146,37 +147,78 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.deadlineCoordinator(loopCtx, t) })
 }
 
+// detectFreeze 时钟跳变检测:比较本轮计划睡眠与实际经过时长。VM/宿主机睡眠冻结
+// 时 wall-clock 照走,实际睡眠会远超计划;超出阈值的部分即为被冤烧的预算,返回
+// 需要顺延的时长。正常轮询(2s/30s nap)误差远小于阈值,返回 0 不顺延;多次小跳
+// 各自不超阈值也不顺延(不累计)。
+func detectFreeze(planned, actual time.Duration) time.Duration {
+	overshoot := actual - planned
+	if overshoot < freezeDetectThreshold {
+		return 0
+	}
+	return overshoot
+}
+
+// extendDeadline 顺延内存中的 deadline 并打日志。顺延量只存进程内存,重启即丢
+// (重启后以 DB 的 deadline_at 为准;冻结冤杀防护只覆盖本进程存续期)。
+func (e *Engine) extendDeadline(taskID string, shift time.Duration) {
+	secs := int64(shift / time.Second)
+	if secs <= 0 {
+		return
+	}
+	for {
+		v, ok := e.deadline.Load(taskID)
+		if !ok {
+			return // 尚未盖章,没有可顺延的 deadline
+		}
+		old := v.(int64)
+		if e.deadline.CompareAndSwap(taskID, old, old+secs) {
+			log.Printf("[deadline] WARN task %s 检测到冻结 %s,deadline 顺延至 %s",
+				taskID, (time.Duration(secs) * time.Second).String(),
+				time.Unix(old+secs, 0).Format("2006-01-02 15:04:05"))
+			return
+		}
+	}
+}
+
 // deadlineCoordinator waits until the task's absolute deadline, then runs the settle
-// sequence. Absolute wall-clock: it keeps counting through pauses.
+// sequence. Absolute wall-clock: it keeps counting through pauses. 每次醒来先做
+// 时钟跳变检测:冻结/挂起造成的超睡部分顺延 deadline,避免 VM 冻结冤杀任务。
 func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
+	planned := time.Duration(0)
+	lastWake := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+		if shift := detectFreeze(planned, time.Since(lastWake)); shift > 0 {
+			e.extendDeadline(t.ID, shift)
+		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
 			return // already finished (goals met / failed) — nothing to time out
 		}
 		dl := e.taskDeadline(t)
+		var nap time.Duration
 		if dl <= 0 {
-			if sleepCtx(ctx, deadlinePollInterval) { // not yet stamped (task hasn't really run)
+			nap = deadlinePollInterval // not yet stamped (task hasn't really run)
+		} else {
+			remaining := time.Until(time.Unix(dl, 0))
+			if remaining <= 0 {
+				e.settleTask(ctx, t)
 				return
 			}
-			continue
-		}
-		if remaining := time.Until(time.Unix(dl, 0)); remaining > 0 {
-			nap := remaining
+			nap = remaining
 			if nap > deadlineMaxSleep {
 				nap = deadlineMaxSleep
 			}
-			if sleepCtx(ctx, nap) {
-				return
-			}
-			continue
 		}
-		e.settleTask(ctx, t)
-		return
+		planned = nap
+		lastWake = time.Now()
+		if sleepCtx(ctx, nap) {
+			return
+		}
 	}
 }
 
