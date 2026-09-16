@@ -602,14 +602,14 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
   }, [inView, step.seq, getDetail, step.summary, inline]);
   const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
-    <div ref={ref} className="mt-3 mb-2 flex justify-end gap-2">
-      <div className="flex max-w-[85%] flex-col items-end gap-1.5">
+    <div ref={ref} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
+      <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1.5">
         {attachments.length > 0 && (
-          <div className="flex flex-wrap justify-end gap-1.5">
+          <div className="flex min-w-0 max-w-full flex-wrap justify-end gap-1.5">
             {attachments.map((a) => (
               <div
                 key={a.path}
-                className="flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
+                className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
                 title={a.path}
               >
                 <PaperclipIcon className="size-3 shrink-0 text-primary" />
@@ -620,7 +620,7 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
           </div>
         )}
         {text && (
-          <div className="whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground">
+          <div className="min-w-0 max-w-full whitespace-pre-wrap rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground [overflow-wrap:anywhere]">
             {text}
           </div>
         )}
