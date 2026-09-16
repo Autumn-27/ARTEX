@@ -42,6 +42,7 @@ import type {
   FindingTraffic,
   FindingTrafficDetail,
   IntentAsset,
+  InterceptApprovalFilter,
   InterceptApprovalRow,
   InterceptDetail,
   InterceptPending,
@@ -202,6 +203,13 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   if (q.sort) p.set("sort", q.sort);
   if (q.assetScope) p.set("asset_scope", q.assetScope);
   return p;
+}
+
+function interceptPageQuery(page: number, size: number, filter: InterceptApprovalFilter) {
+  const query = new URLSearchParams({ page: String(page), size: String(size) });
+  if (filter.status) query.set("status", filter.status);
+  if (filter.decision_source) query.set("decision_source", filter.decision_source);
+  return query.toString();
 }
 
 export const api = {
@@ -1065,8 +1073,8 @@ export const api = {
     get<import("@/lib/types").InterceptExecution>(`/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`),
   interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
-  interceptHistoryPage: (page = 1, size = 20) =>
-    get<{ items: InterceptApprovalRow[]; total?: number }>(`/intercept/history?page=${page}&size=${size}`).then(
+  interceptHistoryPage: (page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>
+    get<{ items: InterceptApprovalRow[]; total?: number }>(`/intercept/history?${interceptPageQuery(page, size, filter)}`).then(
       (r) => ({
         items: arr(r.items),
         total: r.total ?? r.items?.length ?? 0,
@@ -1074,9 +1082,9 @@ export const api = {
     ),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
-  interceptTaskPage: (taskId: string, page = 1, size = 20) =>
+  interceptTaskPage: (taskId: string, page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>
     get<{ items: InterceptApprovalRow[]; total?: number }>(
-      `/intercept/task/${encodeURIComponent(taskId)}?page=${page}&size=${size}`,
+      `/intercept/task/${encodeURIComponent(taskId)}?${interceptPageQuery(page, size, filter)}`,
     ).then((r) => ({
       items: arr(r.items),
       total: r.total ?? r.items?.length ?? 0,

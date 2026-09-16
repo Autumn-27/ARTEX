@@ -21,10 +21,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { InterceptApprovalRow, InterceptAudit, InterceptDetail, InterceptReviewInput } from "@/lib/types";
+import type {
+  InterceptApprovalFilter,
+  InterceptApprovalRow,
+  InterceptAudit,
+  InterceptDetail,
+  InterceptReviewInput,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function fmtTime(value?: string) {
@@ -643,6 +651,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [total, setTotal] = React.useState(0);
+  const [filter, setFilter] = React.useState<InterceptApprovalFilter>({});
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -650,6 +659,8 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [revision, setRevision] = React.useState(0);
   const request = React.useRef(0);
   const decisionLock = React.useRef(false);
+  const filterID = React.useId();
+  const filtered = Boolean(filter.status || filter.decision_source);
 
   // A task can stay mounted while the user switches between task details.
   // Reset the cursor so the new scope always starts at its newest records.
@@ -664,8 +675,8 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       if (manual) setRefreshing(true);
       try {
         const result = taskId
-          ? await api.interceptTaskPage(taskId, page, pageSize)
-          : await api.interceptHistoryPage(page, pageSize);
+          ? await api.interceptTaskPage(taskId, page, pageSize, filter)
+          : await api.interceptHistoryPage(page, pageSize, filter);
         if (id !== request.current) return;
         setRows(result.items);
         setTotal(result.total);
@@ -680,8 +691,10 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         }
       }
     },
-    [taskId, page, pageSize],
+    [taskId, page, pageSize, filter],
   );
+  const latestLoad = React.useRef(load);
+  latestLoad.current = load;
 
   React.useEffect(() => {
     void load();
@@ -697,6 +710,17 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     setPage(1);
   };
 
+  const changeFilter = (next: InterceptApprovalFilter) => {
+    // An in-flight response for the old filter must not repopulate the table.
+    request.current++;
+    setFilter(next);
+    setPage(1);
+    setRows([]);
+    setTotal(0);
+    setError("");
+    setLoading(true);
+  };
+
   const decide: Decide = async (id, decision) => {
     if (decisionLock.current) return;
     decisionLock.current = true;
@@ -705,14 +729,13 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       await api.interceptDecide(id, decision);
       // Invalidate a list request started before this decision.
       request.current++;
-      setRows((prev) =>
-        prev.map((row) => (row.id === id ? { ...row, status: decision, decided_at: new Date().toISOString() } : row)),
-      );
       setRevision((v) => v + 1);
       toast.success(decision === "allowed" ? "已允许执行" : "已拒绝执行");
+      // Re-fetch counts and rows: a decided item may no longer match the filter.
+      await latestLoad.current(true);
     } catch (e) {
       toast.error((e as Error).message);
-      await load(true);
+      await latestLoad.current(true);
     } finally {
       decisionLock.current = false;
       setDeciding(false);
@@ -735,6 +758,62 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         </Button>
       </div>
       <p className="text-muted-foreground text-sm">展开记录查看工具请求和审批裁决，以及当时的上下文与执行结果。</p>
+      <FieldGroup className="flex-row flex-wrap items-end gap-3" aria-label="审批记录筛选">
+        <Field className="w-full sm:w-40">
+          <FieldLabel htmlFor={`${filterID}-status`}>审批状态</FieldLabel>
+          <Select
+            value={filter.status ?? "all"}
+            onValueChange={(value) =>
+              changeFilter({
+                ...filter,
+                status: value === "all" ? undefined : (value as InterceptApprovalFilter["status"]),
+              })
+            }
+          >
+            <SelectTrigger id={`${filterID}-status`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="denied">已拒绝</SelectItem>
+                <SelectItem value="pending">待审批</SelectItem>
+                <SelectItem value="allowed">已允许</SelectItem>
+                <SelectItem value="timeout">已超时</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field className="w-full sm:w-40">
+          <FieldLabel htmlFor={`${filterID}-source`}>判定来源</FieldLabel>
+          <Select
+            value={filter.decision_source ?? "all"}
+            onValueChange={(value) =>
+              changeFilter({
+                ...filter,
+                decision_source: value === "all" ? undefined : (value as InterceptApprovalFilter["decision_source"]),
+              })
+            }
+          >
+            <SelectTrigger id={`${filterID}-source`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部来源</SelectItem>
+                <SelectItem value="model">模型判定</SelectItem>
+                <SelectItem value="rule">规则判定</SelectItem>
+                <SelectItem value="unknown">来源未知</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        {filtered ? (
+          <Button variant="ghost" size="sm" onClick={() => changeFilter({})}>
+            清除筛选
+          </Button>
+        ) : null}
+      </FieldGroup>
       {error ? (
         <Alert variant="destructive">
           <AlertDescription>记录加载失败：{error}。请点击刷新重试。</AlertDescription>
@@ -750,7 +829,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         </section>
       ) : null}
       <section className="overflow-hidden rounded-xl border">
-        <div className="border-b px-4 py-3 font-medium text-sm">全部记录（{total}）</div>
+        <div className="border-b px-4 py-3 font-medium text-sm">
+          {filtered ? "筛选结果" : "全部记录"}（{total}）
+        </div>
         {loading ? (
           <div className="flex flex-col gap-3 p-4">
             <Skeleton className="h-10 w-full" />
@@ -764,8 +845,12 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
               <EmptyMedia variant="icon">
                 <ClipboardListIcon />
               </EmptyMedia>
-              <EmptyTitle>暂无审批记录</EmptyTitle>
-              <EmptyDescription>规则或模型作出审批决定后，记录将显示在这里。</EmptyDescription>
+              <EmptyTitle>{filtered ? "没有符合筛选条件的审批记录" : "暂无审批记录"}</EmptyTitle>
+              <EmptyDescription>
+                {filtered
+                  ? "请调整审批状态或判定来源，或清除筛选查看全部记录。"
+                  : "规则或模型作出审批决定后，记录将显示在这里。"}
+              </EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : null}

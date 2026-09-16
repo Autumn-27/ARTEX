@@ -2076,21 +2076,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
     return mockInterceptPending.find((p) => p.id === Number(seg[2])) ?? null;
-  if (path === "/intercept/history") {
-    if (!q.has("page") && !q.has("size")) return { items: mockInterceptHistory, total: mockInterceptHistory.length };
-    const page = Math.max(1, Number(q.get("page")) || 1);
-    const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
-    const offset = (page - 1) * size;
-    return {
-      items: mockInterceptHistory.slice(offset, offset + size),
-      total: mockInterceptHistory.length,
-      page,
-      page_size: size,
-    };
-  }
-  if (seg[0] === "intercept" && seg[1] === "task") {
-    const filtered = mockInterceptHistory.filter((r) => r.task_id === seg[2]);
-    if (!q.has("page") && !q.has("size")) return { items: filtered, total: filtered.length };
+  if (path === "/intercept/history" || (seg[0] === "intercept" && seg[1] === "task")) {
+    const status = q.get("status") || "";
+    const decisionSource = q.get("decision_source") || "";
+    if (status && !["pending", "allowed", "denied", "timeout"].includes(status)) throw new Error("无效审批状态");
+    if (decisionSource && !["model", "rule", "unknown"].includes(decisionSource)) throw new Error("无效判定来源");
+    const filtered = mockInterceptHistory.filter((row) => {
+      const source = row.decision_source || (row.rule_id ? "rule" : row.reason?.startsWith("[模型]") ? "model" : "unknown");
+      return (seg[1] !== "task" || row.task_id === decodeURIComponent(seg[2])) &&
+        (!status || row.status === status) && (!decisionSource || source === decisionSource);
+    });
+    if (!q.has("page") && !q.has("size") && !status && !decisionSource) return { items: filtered, total: filtered.length };
     const page = Math.max(1, Number(q.get("page")) || 1);
     const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
     const offset = (page - 1) * size;
