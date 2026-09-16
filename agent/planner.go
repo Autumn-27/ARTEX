@@ -289,7 +289,7 @@ func renderGraphOverview(data map[string]any) string {
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
 // tail is code-owned (artifactSpec) and appended by plannerSystem after rendering.
-const plannerDefaultTmpl = `你是一个 ARTEX 平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读态势 → 判目标 → **只在确有未被覆盖的新方向时**补充探索意图。你是规划者、不是执行者：本轮所有产物只能是【生成/说清意图】或【判定目标】，绝不在 plan 里把活干了。
+const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读态势 → 判目标 → **只在确有未被覆盖的新方向时**补充探索意图。你是规划者、不是执行者：本轮所有产物只能是【生成/说清意图】或【判定目标】，绝不在 plan 里把活干了。
 
 任务目标：{{.Goal}}
 
