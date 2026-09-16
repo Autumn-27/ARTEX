@@ -29,7 +29,7 @@ services:
       ARTEX_LLM_PROXY: ${ARTEX_LLM_PROXY:-}
     ports:
       - "8787:8787"
-      - "8788:8788"
+      - "127.0.0.1:8788:8788"
     volumes:
       # 把数据目录（含 jwt.key、SQLite 等）绑定到项目根目录的 data/，
       # 方便在宿主机直接查看/备份，容器重建也不丢。

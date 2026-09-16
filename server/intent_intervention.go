@@ -119,11 +119,15 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "仅已暂停的 Worker 可以发送消息，请先暂停")
 		return
 	}
+	agentMessage, ok := s.prepareChatMentionMessage(w, message)
+	if !ok {
+		return
+	}
 
 	// runDetachedIntent transitions paused->running, emits the user turn and starts a
 	// dedicated run. Root the run at s.ctx so a disconnected browser cannot strand it
 	// while task pause/delete/shutdown still stop it.
-	if err := s.engine.runDetachedIntent(s.ctx, t, iid, requestID, message); err != nil {
+	if err := s.engine.runDetachedIntent(s.ctx, t, iid, requestID, message, agentMessage); err != nil {
 		switch {
 		case errors.Is(err, db.ErrIntentStateConflict):
 			writeErr(w, http.StatusConflict, err.Error())

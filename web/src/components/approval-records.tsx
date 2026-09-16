@@ -24,7 +24,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { InterceptApprovalRow, InterceptAudit, InterceptDetail, InterceptReviewInput } from "@/lib/types";
+import type { InterceptApprovalRow, InterceptAudit, InterceptDetail, InterceptPending, InterceptReviewInput } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function fmtTime(value?: string) {
@@ -640,12 +640,14 @@ function ApprovalTable({
 
 export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [rows, setRows] = React.useState<InterceptApprovalRow[]>([]);
+  const [pendingRows, setPendingRows] = React.useState<InterceptPending[]>([]);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [pendingError, setPendingError] = React.useState("");
   const [deciding, setDeciding] = React.useState(false);
   const [revision, setRevision] = React.useState(0);
   const request = React.useRef(0);
@@ -663,13 +665,26 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       const id = ++request.current;
       if (manual) setRefreshing(true);
       try {
-        const result = taskId
-          ? await api.interceptTaskPage(taskId, page, pageSize)
-          : await api.interceptHistoryPage(page, pageSize);
+        // The approval queue is independent of the current history page. Older
+        // requests must remain actionable even when newer decisions fill it.
+        const [history, pending] = await Promise.allSettled([
+          taskId ? api.interceptTaskPage(taskId, page, pageSize) : api.interceptHistoryPage(page, pageSize),
+          api.interceptPending(),
+        ]);
         if (id !== request.current) return;
-        setRows(result.items);
-        setTotal(result.total);
-        setError("");
+        if (history.status === "fulfilled") {
+          setRows(history.value.items);
+          setTotal(history.value.total);
+          setError("");
+        } else {
+          setError((history.reason as Error).message || "加载失败");
+        }
+        if (pending.status === "fulfilled") {
+          setPendingRows(pending.value);
+          setPendingError("");
+        } else {
+          setPendingError((pending.reason as Error).message || "加载失败");
+        }
         if (manual) setRevision((v) => v + 1);
       } catch (e) {
         if (id === request.current) setError((e as Error).message || "加载失败");
@@ -708,6 +723,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       setRows((prev) =>
         prev.map((row) => (row.id === id ? { ...row, status: decision, decided_at: new Date().toISOString() } : row)),
       );
+      setPendingRows((prev) => prev.filter((row) => row.id !== id));
       setRevision((v) => v + 1);
       toast.success(decision === "allowed" ? "已允许执行" : "已拒绝执行");
     } catch (e) {
@@ -719,7 +735,16 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     }
   };
 
-  const pending = rows.filter((row) => row.status === "pending");
+  const historyById = new Map(rows.map((row) => [row.id, row]));
+  const pending: InterceptApprovalRow[] = pendingRows
+    .filter((row) => !taskId || row.task_id === taskId)
+    .map((row) => ({
+      conv_title: "",
+      conv_agent_key: "",
+      rule_name: row.rule_id ? `规则 #${row.rule_id}` : "",
+      ...historyById.get(row.id),
+      ...row,
+    }));
   const title = taskId ? "拦截审批" : "审批记录";
   return (
     <div className="flex min-w-0 flex-col gap-5">
@@ -738,6 +763,11 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       {error ? (
         <Alert variant="destructive">
           <AlertDescription>记录加载失败：{error}。请点击刷新重试。</AlertDescription>
+        </Alert>
+      ) : null}
+      {pendingError ? (
+        <Alert variant="destructive">
+          <AlertDescription>待审批加载失败：{pendingError}。请点击刷新重试。</AlertDescription>
         </Alert>
       ) : null}
       {pending.length ? (

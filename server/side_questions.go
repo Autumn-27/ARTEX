@@ -395,6 +395,10 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		writeErr(w, 429, "旁路请求已达并发上限，请稍后重试")
 		return
 	}
+	agentQuestion, ok := s.prepareChatMentionMessage(w, in.Question)
+	if !ok {
+		return
+	}
 	if err = s.m.pg.SaveSideSnapshot(r.Context(), *snap); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -409,12 +413,12 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		s.side.mu.Lock()
 		s.side.runs[e.ID] = sideRun{key: key, parent: p, cancel: cancel, done: make(chan struct{})}
 		s.side.mu.Unlock()
-		go s.runSide(ctx, cancel, *e, p, provider, *snap)
+		go s.runSide(ctx, cancel, *e, p, provider, *snap, agentQuestion)
 	}
 	writeJSON(w, 202, e)
 }
 
-func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sidequestion.Exchange, parent sidequestion.Parent, provider llm.Provider, snapshot sidequestion.Snapshot) {
+func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sidequestion.Exchange, parent sidequestion.Parent, provider llm.Provider, snapshot sidequestion.Snapshot, agentQuestion string) {
 	defer cancel()
 	defer func() {
 		s.side.mu.Lock()
@@ -461,7 +465,7 @@ func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sideq
 	memory, runErr := s.m.pg.SideMemory(ctx, e)
 	var answer sidequestion.Answer
 	if runErr == nil {
-		answer, e.Context, runErr = (sidequestion.SideQuestionService{Provider: provider}).Respond(ctx, snapshot, e.Question, sidequestion.Replay{
+		answer, e.Context, runErr = (sidequestion.SideQuestionService{Provider: provider}).Respond(ctx, snapshot, agentQuestion, sidequestion.Replay{
 			Memory: memory,
 			Load: func(ctx context.Context, after int64) ([]sidequestion.Exchange, error) {
 				return s.m.pg.SideReplayPage(ctx, e, after)

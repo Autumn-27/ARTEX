@@ -57,3 +57,24 @@ func TestSetUpstreamProxyStoreClear(t *testing.T) {
 		t.Fatalf("invalid set mutated upstream to %v, want nil", got)
 	}
 }
+
+func TestProxyAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want string
+	}{
+		// Bare :port means "bind all interfaces" — the legacy default. The URL
+		// agents consume must still point at loopback so they reach the local proxy.
+		{":8788", "http://127.0.0.1:8788"},
+		// Explicit loopback — the current default since #129 (open proxy exposure).
+		{"127.0.0.1:8788", "http://127.0.0.1:8788"},
+		// Explicit all-interface bind is still supported (remote capture via SSH).
+		{"0.0.0.0:8788", "http://0.0.0.0:8788"},
+	}
+	for _, c := range cases {
+		got := (&Traffic{addr: c.addr}).ProxyAddr()
+		if got != c.want {
+			t.Errorf("ProxyAddr(%q) = %q, want %q", c.addr, got, c.want)
+		}
+	}
+}
