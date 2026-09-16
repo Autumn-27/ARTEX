@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
@@ -51,7 +52,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
@@ -237,13 +237,13 @@ function Composer({
             </Button>
           </>
         )}
-        <Textarea
+        <MentionTextarea
           className="max-h-40 min-h-10 min-w-0 flex-1 resize-none"
           rows={1}
           placeholder={placeholder}
           value={value}
-          disabled={disabled && !allowBtw}
-          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled && !(running && allowBtw)}
+          onValueChange={onChange}
           onKeyDown={onKeyDown}
         />
         {running && allowBtw && isBtwCommand(value) && (
@@ -456,7 +456,7 @@ function DraftChat({
         onChange={setInput}
         onSend={send}
         disabled={sending || uploading || !agentKey}
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+        placeholder="输入消息，@ 引用记录，Enter 发送"
         leftSlot={agentPicker}
         onPickFiles={pickFiles}
         uploading={uploading}
@@ -811,9 +811,9 @@ function ChatView({
         value={input}
         onChange={setInput}
         onSend={send}
-        disabled={running}
+        disabled={running || sending}
         allowBtw
-        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，Enter 发送，Shift+Enter 换行"}
+        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，@ 引用记录，Enter 发送"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}
