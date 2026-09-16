@@ -248,7 +248,12 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	q := r.URL.Query()
-	if q.Get("page") == "" && q.Get("size") == "" {
+	filter, err := interceptFilterParams(q)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if q.Get("page") == "" && q.Get("size") == "" && filter == (db.InterceptApprovalFilter{}) {
 		items, err := pg.ListTaskIntercepts(taskID)
 		if err != nil {
 			writeErr(w, 500, err.Error())
@@ -261,7 +266,7 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	page, size := interceptPageParams(q)
-	items, total, err := pg.ListTaskInterceptsPage(taskID, page, size)
+	items, total, err := pg.ListTaskInterceptsPage(taskID, page, size, filter)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -278,7 +283,12 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	if q.Get("page") == "" && q.Get("size") == "" {
+	filter, err := interceptFilterParams(q)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if q.Get("page") == "" && q.Get("size") == "" && filter == (db.InterceptApprovalFilter{}) {
 		items, err := pg.ListAllIntercepts(200)
 		if err != nil {
 			writeErr(w, 500, err.Error())
@@ -291,7 +301,7 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, size := interceptPageParams(q)
-	items, total, err := pg.ListAllInterceptsPage(page, size)
+	items, total, err := pg.ListAllInterceptsPage(page, size, filter)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -300,6 +310,21 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 		items = []db.InterceptApprovalRow{}
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
+}
+
+func interceptFilterParams(q url.Values) (db.InterceptApprovalFilter, error) {
+	filter := db.InterceptApprovalFilter{Status: q.Get("status"), DecisionSource: q.Get("decision_source")}
+	switch filter.Status {
+	case "", "pending", "allowed", "denied", "timeout":
+	default:
+		return filter, fmt.Errorf("status 必须是 pending、allowed、denied 或 timeout")
+	}
+	switch filter.DecisionSource {
+	case "", "model", "rule", "unknown":
+	default:
+		return filter, fmt.Errorf("decision_source 必须是 model、rule 或 unknown")
+	}
+	return filter, nil
 }
 
 func interceptPageParams(q url.Values) (int, int) {

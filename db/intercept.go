@@ -225,8 +225,13 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 	)
 }
 
+// Keep legacy rows without decision_source consistent with their displayed source.
+const approvalDecisionSource = `COALESCE(NULLIF(ip.decision_source,''), CASE
+ WHEN ip.rule_id IS NOT NULL THEN 'rule'
+ WHEN ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)`
+
 const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
-       ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ip.decision_source,
+       ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ` + approvalDecisionSource + `,
        COALESCE(c.title,'') AS conv_title,
        COALESCE(c.agent_key,'') AS conv_agent_key,
        COALESCE(ir.name,'') AS rule_name`
@@ -279,11 +284,16 @@ func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {
 	return out, rows.Err()
 }
 
-// ListAllInterceptsPage returns one 1-based page of approval records and the
-// total number of records. Records are ordered newest first, matching the
-// legacy capped list returned by ListAllIntercepts.
-func (d *DB) ListAllInterceptsPage(page, size int) ([]InterceptApprovalRow, int, error) {
-	return d.listInterceptsPage("", page, size)
+// InterceptApprovalFilter combines exact status and decision-source filters.
+// Empty fields include all values.
+type InterceptApprovalFilter struct {
+	Status         string
+	DecisionSource string
+}
+
+// ListAllInterceptsPage returns one 1-based page and the total matching count.
+func (d *DB) ListAllInterceptsPage(page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
+	return d.listInterceptsPage("", page, size, filter)
 }
 
 // ListTaskIntercepts returns all intercept_pending rows for a specific task (newest first).
@@ -305,11 +315,11 @@ func (d *DB) ListTaskIntercepts(taskID string) ([]InterceptApprovalRow, error) {
 }
 
 // ListTaskInterceptsPage is the paginated variant of ListTaskIntercepts.
-func (d *DB) ListTaskInterceptsPage(taskID string, page, size int) ([]InterceptApprovalRow, int, error) {
-	return d.listInterceptsPage(taskID, page, size)
+func (d *DB) ListTaskInterceptsPage(taskID string, page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
+	return d.listInterceptsPage(taskID, page, size, filter)
 }
 
-func (d *DB) listInterceptsPage(taskID string, page, size int) ([]InterceptApprovalRow, int, error) {
+func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -321,11 +331,20 @@ func (d *DB) listInterceptsPage(taskID string, page, size int) ([]InterceptAppro
 	}
 	offset := (page - 1) * size
 
-	where := ""
+	conditions := []string{}
 	args := []any{}
-	if taskID != "" {
-		where = " WHERE ip.task_id=$1"
-		args = append(args, taskID)
+	add := func(column, value string) {
+		if value != "" {
+			args = append(args, value)
+			conditions = append(conditions, column+"=$"+fmt.Sprint(len(args)))
+		}
+	}
+	add("ip.task_id", taskID)
+	add("ip.status", filter.Status)
+	add(approvalDecisionSource, filter.DecisionSource)
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
 	}
 	var total int
 	if err := d.QueryRow("SELECT COUNT(*) FROM intercept_pending ip"+where, args...).Scan(&total); err != nil {

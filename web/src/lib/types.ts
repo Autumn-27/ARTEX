@@ -1195,6 +1195,11 @@ export interface JudgeConfig {
   ask_timeout_action: "allow" | "deny"; // 审批超时后的默认动作
 }
 
+export interface InterceptApprovalFilter {
+  status?: InterceptPending["status"];
+  decision_source?: "rule" | "model" | "unknown";
+}
+
 // InterceptApprovalRow enriches InterceptPending with conversation/task and rule context.
 export interface InterceptApprovalRow extends InterceptPending {
   conv_title: string; // "" if no linked conversation
