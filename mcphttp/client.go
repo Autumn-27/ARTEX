@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -102,8 +103,13 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 		return nil, err
 	}
 	hc := &http.Client{Timeout: 120 * time.Second}
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	{
+		tr := &http.Transport{}
+		if insecure {
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
+		netguard.ProtectTransport(tr) // 防云元数据/禁网段（MCP URL 用户可配）
+		hc.Transport = tr
 	}
 	c := &Client{
 		server:   server,
@@ -127,8 +133,13 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		return nil, err
 	}
 	hc := &http.Client{} // the SSE stream is intentionally long-lived.
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	{
+		tr := &http.Transport{}
+		if insecure {
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
+		netguard.ProtectTransport(tr)
+		hc.Transport = tr
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)

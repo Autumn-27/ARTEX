@@ -17,9 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 )
 
 // 本文件实现自定义工具执行器(docs/自定义工具设计.md)。system=false 的 tools 行按
@@ -443,7 +444,16 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	}
 	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000)}
 	if tr := s.httpProxyTransport(spec); tr != nil {
+		netguard.ProtectTransport(tr) // 代理路径同样校验目标 IP（防元数据等禁网段）
 		client.Transport = tr
+	} else {
+		// 直连路径也要做 SSRF 出口校验（URL 由用户配置，模板参数来自 LLM/用户）。
+		tr := &http.Transport{}
+		netguard.ProtectTransport(tr)
+		client.Transport = tr
+	}
+	if err := netguard.CheckURL(rawURL); err != nil {
+		return actool.Errorf(err.Error()), nil
 	}
 	resp, err := client.Do(req)
 	if err != nil {
