@@ -403,6 +403,10 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
+	agentMessage, ok := s.prepareChatMentionMessage(w, msg)
+	if !ok {
+		return
+	}
 	// Same resolution as the background runner: honour the agent binding / this
 	// conversation's chosen profile before falling back to the global config, so a
 	// conversation that picked a valid LLM is not rejected just because no global
@@ -450,7 +454,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(msg, req.Attachments, baseDir), busyKey, msg)
+	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 

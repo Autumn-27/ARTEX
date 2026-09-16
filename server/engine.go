@@ -1185,7 +1185,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // server root, never the HTTP request, so a disconnect cannot strand the run while
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
-func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message string) error {
+func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1216,14 +1216,14 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	node.State, node.Owner = "running", "chat"
 	// Record the human turn as a visible activity BEFORE the run starts, so it is
 	// ordered ahead of any worker step and never appears without the run happening.
-	// This is the UI copy; ExecuteWithMessage separately writes it into the intent
-	// transcript as the LLM input.
+	// Keep the UI copy concise; ExecuteWithMessage writes the server-resolved
+	// reference snapshot into the intent transcript as the LLM input.
 	uid := intentID
 	e.emitActivity(t, db.Activity{NodeID: &uid, Worker: "user", Kind: "user", Summary: message, Detail: message})
 	release = false // ownership of the admission passes to the goroutine
 	go func() {
 		defer e.decInflight(t.ID)
-		e.runIntent(ctx, t, "chat", worker, node, requestID, message)
+		e.runIntent(ctx, t, "chat", worker, node, requestID, agentMessage)
 	}()
 	return nil
 }

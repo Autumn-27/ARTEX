@@ -42,8 +42,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { Button } from "@/components/ui/button";
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
+import { InputGroup, InputGroupAddon, InputGroupButton } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -1903,12 +1904,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   onChange={(e) => void pickFiles(e.target.files)}
                 />
                 <InputGroup className="min-h-9 has-disabled:opacity-100">
-                  <InputGroupTextarea
+                  <MentionTextarea
+                    inputGroup
                     rows={1}
                     aria-label="给主 Agent 发消息"
-                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，引导探索方向…"}
+                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    disabled={sending}
+                    onValueChange={setInput}
                     onKeyDown={(e) => {
                       if (!shouldSubmitOnKey(e, sendMode)) return;
                       e.preventDefault();
@@ -1965,13 +1968,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               (active.status === "running" || active.status === "paused") ? (
               <div className="border-t p-3">
                 <InputGroup className="min-h-9 has-disabled:opacity-100">
-                  <InputGroupTextarea
+                  <MentionTextarea
+                    inputGroup
                     rows={1}
                     aria-label={`给 Worker #${active.intent_id} 发消息`}
-                    placeholder={`给 Worker #${active.intent_id} 发消息，调整执行方向…`}
+                    placeholder={`给 Worker #${active.intent_id} 发消息，@ 引用记录，调整执行方向…`}
                     value={workerMessage}
-                    onChange={(event) => {
-                      setWorkerMessage(event.target.value);
+                    onValueChange={(value) => {
+                      setWorkerMessage(value);
                       setWorkerMessageRequestId("");
                     }}
                     onKeyDown={(event) => {

@@ -880,6 +880,20 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
 function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Record<string, unknown>): unknown {
   const task = q.get("task") ?? undefined;
 
+  if (path === "/chat/mentions" && m === "GET") {
+    const kind = q.get("kind") ?? "";
+    const query = (q.get("q") ?? "").trim().toLowerCase();
+    const candidates = [
+      ...D.findings.map((finding, index) => ({ kind: "finding", id: index + 1, label: finding.name || finding.vulnclass, description: `${finding.severity} · ${finding.summary}` })),
+      ...D.companies.map((company) => ({ kind: "company", id: company.id, label: company.name, description: "企业" })),
+      ...D.assets.map((asset) => ({ kind: asset.type, id: asset.id, label: asset.type === "endpoint" ? `${asset.method || "GET"} ${asset.url}` : asset.app_name || asset.url || asset.domain || asset.ip || asset.bundle_id || `资产 #${asset.id}`, description: [asset.type, asset.page_title, asset.service_name, asset.bundle_id, asset.ip].filter(Boolean).join(" · ") })),
+    ];
+    const filtered = candidates.filter((item) => (!kind || kind === item.kind || (kind === "asset" && item.kind !== "finding" && item.kind !== "company")) && (!query || String(item.id) === query || `${item.label} ${item.description}`.toLowerCase().includes(query)))
+      .sort((a, b) => Number(String(b.id) === query) - Number(String(a.id) === query) || b.id - a.id || a.kind.localeCompare(b.kind));
+    const offset = Math.max(0, Number(q.get("cursor")) || 0);
+    return { items: filtered.slice(offset, offset + 20), next_cursor: offset + 20 < filtered.length ? String(offset + 20) : undefined };
+  }
+
   // ── auth：让 demo 直接进主界面 ──
   if (path === "/auth/status") return { initialized: true };
   if (path === "/auth/login" || path === "/auth/init") return { token: "mock-demo" };
