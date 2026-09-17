@@ -51,7 +51,6 @@ type Server struct {
 	concMu sync.Mutex
 
 	cfgMu     sync.Mutex
-	mainAgent *agent.MainAgent // nil when no LLM provider is configured
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	// llmProv is the fully-decorated global provider (recorder + failover chain)
 	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
@@ -87,21 +86,17 @@ type Server struct {
 	triggerActive map[string]int
 	triggerCfg    map[string]triggerBehavior
 
-	// profAgents caches the dedicated planner/worker built for a specific (non-active)
-	// LLM profile, keyed by profile id, so tasks pinned to that profile share one
-	// provider (and its rate limiter). Built lazily on first use; invalidated when any
-	// profile is saved/activated/deleted so edits take effect. The active-profile path
-	// stays on the global engine planner/worker (applyLLM).
+	// profChatAgents caches a per-profile ChatAgent (chat page), keyed by profile id.
+	// Built lazily on first use; invalidated when any profile is saved/activated/deleted
+	// so edits take effect.
 	profMu         sync.Mutex
-	profAgents     map[int64]*profBundle
 	profChatAgents map[int64]*agent.ChatAgent // per-profile ChatAgent cache (chat page)
 
 	// provByProfile caches ONE provider per LLM profile id so every agent bound or
 	// pinned to the same profile shares a single provider instance — hence one rate
-	// limiter. Separate from profAgents (whole planner/worker pairs). applyLLM also
-	// resolves the persisted global-active profile through this cache, so global
-	// fallback and task chains do not accidentally double the configured request rate.
-	// Cleared alongside profAgents on profile edits, then repopulated by active reapply.
+	// limiter. applyLLM also resolves the persisted global-active profile through this
+	// cache, so global fallback and task chains do not accidentally double the
+	// configured request rate. Cleared on profile edits, then repopulated by active reapply.
 	provCacheMu   sync.Mutex
 	provByProfile map[int64]*provEntry
 	provCacheGen  uint64
@@ -123,12 +118,6 @@ type Server struct {
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
 	side        *sideQuestionState
-}
-
-// profBundle is a planner/worker pair built from one LLM profile.
-type profBundle struct {
-	pl *agent.Planner
-	wk *agent.Worker
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -158,7 +147,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
-		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
+		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
@@ -414,7 +403,7 @@ func (s *Server) webSearchFor(key string) agent.WebSearchOpts {
 // and worker can run on different models (e.g. a stronger planner, a cheaper worker).
 // pinID is the task's pinned profile (nil on the global active path). With no agent
 // binding and no pin, both fall back to gProv/gCfg — identical to the previous single-
-// provider behavior. Shared by applyLLM (global) and agentsForProfile (per-task pin).
+// provider behavior. Called by applyLLM (global active pair).
 func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent.Config) (*agent.Planner, *agent.Worker) {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts")) // raw LLM conversation logs
 	// traffic host tools flow through ToolAugment for every agent and are filtered by
@@ -499,19 +488,11 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
-	// mainagent resolves its own binding (→ global fallback); chat stays the GLOBAL
-	// fallback since one ChatAgent serves many agent keys — its per-agent binding is
-	// resolved at Chat time (runConversationSync → chatAgentForProfile).
-	mProv, mCfg := s.providerForAgent("mainagent", nil, prov, cfg)
+	// chat stays the GLOBAL fallback since one ChatAgent serves many agent keys — its
+	// per-agent binding is resolved at Chat time (runConversationSync →
+	// chatAgentForProfile). The main-agent has no global instance: each task builds its
+	// own via agentsForTask (task-routed), so nothing is constructed for it here.
 	s.cfgMu.Lock()
-	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
-	s.mainAgent.SetFindingRecorder(s.evidenceStore())
-	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
-	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
-	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
-	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
-	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
-	s.mainAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -656,34 +637,6 @@ func (s *Server) providerForAgent(agentKey string, pinID *int64, gProv llm.Provi
 	return gProv, gCfg
 }
 
-// agentsForProfile returns the dedicated planner/worker for a task pinned to a specific
-// LLM profile, built + cached on first use (tasks on the same pin share one pair). Each
-// agent still honors its own binding first (via buildPlannerWorker), falling back to this
-// pinned profile. nil,nil when the profile is invalid → caller uses the global active pair.
-func (s *Server) agentsForProfile(id int64) (*agent.Planner, *agent.Worker) {
-	s.profMu.Lock()
-	b := s.profAgents[id]
-	s.profMu.Unlock()
-	if b != nil {
-		return b.pl, b.wk
-	}
-	prov, cfg, ok := s.providerForProfile(id)
-	if !ok {
-		return nil, nil
-	}
-	// The pin is the fallback for agents without their own binding — same
-	// exclusive-by-default rule, so route it through poolForBinding too.
-	pl, wk := s.buildPlannerWorker(&id, s.poolForBinding(id, prov, cfg), cfg)
-	s.profMu.Lock()
-	if ex := s.profAgents[id]; ex != nil { // lost the race → keep the winner
-		pl, wk = ex.pl, ex.wk
-	} else {
-		s.profAgents[id] = &profBundle{pl: pl, wk: wk}
-	}
-	s.profMu.Unlock()
-	return pl, wk
-}
-
 // chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached
 // per profile id. Returns nil if the profile is missing or has no API key.
 func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
@@ -715,12 +668,11 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	return ca
 }
 
-// invalidateProfileAgents drops the per-profile agent + provider caches so a profile
-// save/activate/delete — or an agent's binding change — rebuilds pinned tasks' planner/
-// worker (and re-resolves each agent's bound model) on their next round.
+// invalidateProfileAgents drops the per-profile ChatAgent + provider caches so a profile
+// save/activate/delete — or an agent's binding change — rebuilds pinned tasks' agents
+// (and re-resolves each agent's bound model) on their next round.
 func (s *Server) invalidateProfileAgents() {
 	s.profMu.Lock()
-	s.profAgents = map[int64]*profBundle{}
 	s.profChatAgents = map[int64]*agent.ChatAgent{}
 	s.profMu.Unlock()
 	s.provCacheMu.Lock()
@@ -728,12 +680,6 @@ func (s *Server) invalidateProfileAgents() {
 	s.provByProfile = map[int64]*provEntry{}
 	s.provCacheMu.Unlock()
 	s.invalidateTaskAgents()
-}
-
-func (s *Server) mainAgentRef() *agent.MainAgent {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-	return s.mainAgent
 }
 
 func (s *Server) chatAgentRef() *agent.ChatAgent {
