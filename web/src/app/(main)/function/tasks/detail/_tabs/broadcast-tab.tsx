@@ -24,12 +24,14 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter } from "@/components/ui/card";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { type Tone, toneClasses, toneDot } from "@/lib/status";
-import type { Edge, ExploreKind, TaskNode } from "@/lib/types";
+import { taskAssetTypeLabel } from "@/lib/task-assets";
+import type { Edge, ExploreKind, FindingAsset, NewAssetType, TaskNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZES = [20, 50, 100];
@@ -207,15 +209,79 @@ function KindChip({ kind }: { kind: string }) {
   );
 }
 
+// 节点锚定的资产:类型标签 + 可辨识文本。数据随播报页一起下发(node id → 资产),
+// 展开时直接展示,不额外请求。
+function AssetList({ assets, dense = false }: { assets: FindingAsset[]; dense?: boolean }) {
+  if (assets.length === 0) return null;
+  return (
+    <div>
+      <div className="mb-1.5 text-xs font-medium text-muted-foreground">涉及资产 · {assets.length}</div>
+      <ul className="flex flex-wrap gap-1.5">
+        {assets.map((a) => {
+          // 运行时 a.type 可能是标签表未覆盖的类型,退回原始字符串。转一层类型让回退不被判成多余。
+          const typeLabel =
+            (taskAssetTypeLabel as (t: NewAssetType) => string | undefined)(a.type as NewAssetType) || a.type;
+          return (
+            <li
+              key={a.id}
+              className={cn(
+                "inline-flex max-w-full items-center gap-1.5 rounded-md border bg-background px-2 py-0.5",
+                dense && "text-xs",
+              )}
+              title={`${typeLabel} · ${a.label}`}
+            >
+              <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">{typeLabel}</span>
+              <code className="truncate font-mono text-xs">{a.label}</code>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+// 悬停在上下游条目上时弹出的节点名片:类型/状态/来源/时间 + 摘要 + payload 片段 + 涉及资产。
+// 数据来自本页已经拿到的 refs,不额外发请求——播报接口已经把邻居节点整份带回来了。
+function RelatedNodeCard({ node, assets }: { node: TaskNode; assets: FindingAsset[] }) {
+  const kind = viewKind(node);
+  const meta = KIND_META[kind] ?? KIND_META.fact;
+  const ts = Date.parse(node.ts);
+  const summary = summaryOf(node);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <KindChip kind={kind} />
+        <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">#{node.id}</code>
+        <NodeStateBadge node={node} />
+        {node.priority > 0 && (kind === "goal" || kind === "intent") && (
+          <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">P{node.priority}</span>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+        <span>类型 {meta.label}</span>
+        <span>来源 {node.origin || "system"}</span>
+        <span>{Number.isNaN(ts) ? node.ts : new Date(ts).toLocaleString("zh-CN")}</span>
+      </div>
+      <p className="line-clamp-4 text-xs break-words">{summary || "（无摘要）"}</p>
+      <AssetList assets={assets} dense />
+      <pre className="max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] whitespace-pre-wrap">
+        {prettyPayload(node.payload)}
+      </pre>
+    </div>
+  );
+}
+
 // 一条播报涉及的上下游:上游 = 指向本节点的边,下游 = 本节点指出去的边。
 function RelatedList({
   title,
   rows,
   refs,
+  assets,
 }: {
   title: string;
   rows: Array<{ rel: string; id: string }>;
   refs: Record<string, TaskNode>;
+  assets: Record<string, FindingAsset[]>;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -230,12 +296,20 @@ function RelatedList({
                 {REL_LABEL[row.rel] ?? row.rel}
               </span>
               {node ? (
-                <>
-                  <KindChip kind={viewKind(node)} />
-                  <span className="truncate" title={summaryOf(node)}>
-                    {summaryOf(node) || `节点 #${node.id}`}
-                  </span>
-                </>
+                <HoverCard openDelay={150} closeDelay={100}>
+                  <HoverCardTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex min-w-0 cursor-help items-center gap-2 text-left hover:underline"
+                    >
+                      <KindChip kind={viewKind(node)} />
+                      <span className="truncate">{summaryOf(node) || `节点 #${node.id}`}</span>
+                    </button>
+                  </HoverCardTrigger>
+                  <HoverCardContent align="start" className="w-96">
+                    <RelatedNodeCard node={node} assets={assets[node.id] ?? []} />
+                  </HoverCardContent>
+                </HoverCard>
               ) : (
                 <span className="text-muted-foreground">节点 #{row.id}</span>
               )}
@@ -251,12 +325,14 @@ function BroadcastRow({
   node,
   edges,
   refs,
+  assets,
   now,
   fresh,
 }: {
   node: TaskNode;
   edges: Edge[];
   refs: Record<string, TaskNode>;
+  assets: Record<string, FindingAsset[]>;
   now: number;
   fresh: boolean;
 }) {
@@ -303,9 +379,7 @@ function BroadcastRow({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <KindChip kind={kind} />
-              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
-                #{node.id}
-              </code>
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">#{node.id}</code>
               <NodeStateBadge node={node} />
               {node.priority > 0 && (kind === "goal" || kind === "intent") && (
                 <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">P{node.priority}</span>
@@ -331,10 +405,11 @@ function BroadcastRow({
               <span>来源 {node.origin || "system"}</span>
               <span>{Number.isNaN(ts) ? node.ts : new Date(ts).toLocaleString("zh-CN")}</span>
             </div>
+            <AssetList assets={assets[node.id] ?? []} />
             {(upstream.length > 0 || downstream.length > 0) && (
               <div className="flex flex-col gap-3 sm:flex-row">
-                <RelatedList title="上游 · 由此而来" rows={upstream} refs={refs} />
-                <RelatedList title="下游 · 由此产生" rows={downstream} refs={refs} />
+                <RelatedList title="上游 · 由此而来" rows={upstream} refs={refs} assets={assets} />
+                <RelatedList title="下游 · 由此产生" rows={downstream} refs={refs} assets={assets} />
               </div>
             )}
             <div>
@@ -362,6 +437,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
   const [items, setItems] = React.useState<TaskNode[]>([]);
   const [edges, setEdges] = React.useState<Edge[]>([]);
   const [refs, setRefs] = React.useState<Record<string, TaskNode>>({});
+  const [assets, setAssets] = React.useState<Record<string, FindingAsset[]>>({});
   const [total, setTotal] = React.useState(0);
   const [loaded, setLoaded] = React.useState(false);
   const [freshIDs, setFreshIDs] = React.useState<Set<string>>(new Set());
@@ -413,6 +489,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
             setItems(r.items);
             setEdges(r.edges);
             setRefs(r.refs);
+            setAssets(r.assets);
           }
           setTotal(r.total);
           if (atLive) {
@@ -453,6 +530,14 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
     setOrder("desc");
     setPending(0);
   };
+
+  // 服务端的 refs 只补「不在本页的邻居」,同页节点之间的引用要靠 items 自己兜底,
+  // 否则相邻两条播报互相引用时会退化成光秃秃的「节点 #id」。
+  const nodeIndex = React.useMemo(() => {
+    const idx: Record<string, TaskNode> = { ...refs };
+    for (const n of items) idx[n.id] = n;
+    return idx;
+  }, [refs, items]);
 
   const pageCount = Math.max(1, Math.ceil(total / size));
   const start = total === 0 ? 0 : (page - 1) * size + 1;
@@ -579,7 +664,8 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
                   key={node.id}
                   node={node}
                   edges={edges}
-                  refs={refs}
+                  refs={nodeIndex}
+                  assets={assets}
                   now={now}
                   fresh={freshIDs.has(node.id)}
                 />

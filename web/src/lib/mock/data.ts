@@ -3060,8 +3060,17 @@ export const llmConfig = {
 // ── Agents ───────────────────────────────────────────────────────────────────
 export const agents: Agent[] = [
   {
-    id: "1001", key: "retester", name: "漏洞复测", role: "assistant", builtin: false, enabled: true,
-    description: "从漏洞详情手动启动，保存独立复测结论", max_turns: 0, mcp_count: 0, skill_count: 0, tool_count: 2,
+    id: "1001",
+    key: "retester",
+    name: "漏洞复测",
+    role: "assistant",
+    builtin: false,
+    enabled: true,
+    description: "从漏洞详情手动启动，保存独立复测结论",
+    max_turns: 0,
+    mcp_count: 0,
+    skill_count: 0,
+    tool_count: 2,
   },
   {
     id: "1",
@@ -3478,35 +3487,65 @@ export const interceptHistory: InterceptApprovalRow[] = [
 
 // Approval detail fixtures use harmless report-writing examples.
 interceptHistory.unshift({
-  id: 94, task_id: "t-acme-web", agent_name: "work#1", tool_name: "Write",
+  id: 94,
+  task_id: "t-acme-web",
+  agent_name: "work#1",
+  tool_name: "Write",
   tool_input: { path: "reports/summary.md", content: "# 检查摘要\n\n本轮验证已完成，整理已有证据与后续建议。" },
-  status: "allowed", decision_source: "model", reason: "[模型] 将已有检查结论写入本地报告，不修改业务数据。",
-  created_at: T("2026-07-26T08:00:00Z"), decided_at: T("2026-07-26T08:00:02Z"),
-  conv_title: "", conv_agent_key: "", rule_name: "",
+  status: "allowed",
+  decision_source: "model",
+  reason: "[模型] 将已有检查结论写入本地报告，不修改业务数据。",
+  created_at: T("2026-07-26T08:00:00Z"),
+  decided_at: T("2026-07-26T08:00:02Z"),
+  conv_title: "",
+  conv_agent_key: "",
+  rule_name: "",
 });
 
 export const interceptDetails: Record<number, InterceptAudit> = {
   94: {
-    run_id: "demo-run-report", tool_use_id: "call-write-report", correlation: "exact",
+    run_id: "demo-run-report",
+    tool_use_id: "call-write-report",
+    correlation: "exact",
     input_digest: "a3b458eca3b458eca3b458eca3b458eca3b458eca3b458eca3b458eca3b458ec1234",
     user_message: "请整理已经完成的检查，将结论和证据索引写入 reports/summary.md。\n保留待验证项，不修改业务数据。",
     context: [
       { kind: "user", text: "汇总本轮已有证据，生成检查摘要。" },
-      { kind: "tool_use", tool: "Read", tool_use_id: "call-read-evidence", text: '{"path":"reports/evidence-index.json"}' },
-      { kind: "tool_result", tool: "Read", tool_use_id: "call-read-evidence", text: "已读取 3 条证据索引。\n记录包含请求时间、结果摘要和本地文件位置。" },
+      {
+        kind: "tool_use",
+        tool: "Read",
+        tool_use_id: "call-read-evidence",
+        text: '{"path":"reports/evidence-index.json"}',
+      },
+      {
+        kind: "tool_result",
+        tool: "Read",
+        tool_use_id: "call-read-evidence",
+        text: "已读取 3 条证据索引。\n记录包含请求时间、结果摘要和本地文件位置。",
+      },
     ],
-    captured_at: T("2026-07-26T08:00:00Z"), initial_action: "allow",
-    initial_reason: "[模型] 将已有检查结论写入本地报告，不修改业务数据。", effective_action: "allow",
+    captured_at: T("2026-07-26T08:00:00Z"),
+    initial_action: "allow",
+    initial_reason: "[模型] 将已有检查结论写入本地报告，不修改业务数据。",
+    effective_action: "allow",
     config_digest: "b4c569fdb4c569fdb4c569fdb4c569fdb4c569fdb4c569fdb4c569fdb4c569fd1234",
-    profile_id: 1, execution_status: "succeeded", output: "Successfully wrote reports/summary.md\n共写入 68 个字符。",
+    profile_id: 1,
+    execution_status: "succeeded",
+    output: "Successfully wrote reports/summary.md\n共写入 68 个字符。",
     execution_ended_at: T("2026-07-26T08:00:03Z"),
   },
   93: {
-    run_id: "demo-run-review", tool_use_id: "call-pending-review", correlation: "exact",
+    run_id: "demo-run-review",
+    tool_use_id: "call-pending-review",
+    correlation: "exact",
     input_digest: "c5d670aec5d670aec5d670aec5d670aec5d670aec5d670aec5d670aec5d670ae1234",
-    user_message: "检查备份表的用途，涉及删除时需要先确认。", context: [],
-    captured_at: T("2026-07-25T15:14:00Z"), initial_action: "ask",
-    initial_reason: "[模型] 疑似备份表，无法确定是否生产数据。", profile_id: 1, execution_status: "not_started",
+    user_message: "检查备份表的用途，涉及删除时需要先确认。",
+    context: [],
+    captured_at: T("2026-07-25T15:14:00Z"),
+    initial_action: "ask",
+    initial_reason: "[模型] 疑似备份表，无法确定是否生产数据。",
+    profile_id: 1,
+    execution_status: "not_started",
   },
 };
 
@@ -3897,6 +3936,25 @@ export const coverageGraph = {
 };
 
 // ── 资产在本任务关联的意图/事实/发现（/tasks/{id}/asset-refs）──
+// 播报板 demo:探索节点 → 其锚定资产。真实后端读 exploration_anchors,mock 里静态给几条。
+const NODE_ASSETS: Record<string, number[]> = {
+  fi1: [3],
+  fi2: [2, 4],
+  fi3: [5],
+  fiRce: [4],
+  fiPriv: [19],
+  fiJenkins: [21],
+  i1: [2],
+  i7: [4],
+};
+
+export function nodeAssetsFor(nodeId: string): FindingAsset[] {
+  return (NODE_ASSETS[nodeId] ?? []).flatMap((id) => {
+    const asset = assets.find((candidate) => candidate.id === id);
+    return asset ? [assetRef(id)] : [];
+  });
+}
+
 export function assetRefsFor(_assetId: number) {
   return {
     intents: [

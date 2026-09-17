@@ -2542,13 +2542,38 @@ func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 		refs[i64s(n.ID)] = taskNodeDTO(n)
 	}
 	writeJSON(w, 200, map[string]any{
-		"items": taskNodeDTOs(nodes),
-		"total": total,
-		"page":  page,
-		"size":  size,
-		"edges": edgeDTOs(edges),
-		"refs":  refs,
+		"items":  taskNodeDTOs(nodes),
+		"total":  total,
+		"page":   page,
+		"size":   size,
+		"edges":  edgeDTOs(edges),
+		"refs":   refs,
+		"assets": s.nodeAnchoredAssets(t, append(ids, neighbourIDs...)),
 	})
+}
+
+// nodeAnchoredAssets resolves the exploration_anchors of the given nodes into
+// display-ready asset labels, keyed by node id. Anchors are provenance decoration
+// for the 播报板 — a failure here must not cost the caller its page, so errors are
+// logged and degrade to "no assets".
+func (s *Server) nodeAnchoredAssets(t *Task, nodeIDs []int64) map[string][]FindingAssetDTO {
+	out := map[string][]FindingAssetDTO{}
+	anchors, err := t.Store.NodeAssets(nodeIDs)
+	if err != nil {
+		log.Printf("[broadcast] node assets: %v", err)
+		return out
+	}
+	var flat []int64
+	for _, ids := range anchors {
+		flat = append(flat, ids...)
+	}
+	assets := s.resolveAssetIDs(flat)
+	for nodeID, ids := range anchors {
+		if dtos := findingAssetDTOs(ids, assets); len(dtos) > 0 {
+			out[i64s(nodeID)] = dtos
+		}
+	}
+	return out
 }
 
 // csvValues splits a comma-separated query parameter, dropping empty entries.
