@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -828,7 +829,15 @@ func (s *ExplorationStore) NodesPage(f NodeFilter, page, size int) ([]*Node, int
 	if q := strings.TrimSpace(f.Query); q != "" {
 		args = append(args, "%"+q+"%")
 		mark := "$" + fmt.Sprint(len(args))
-		conds = append(conds, "(payload::text ILIKE "+mark+" OR COALESCE(origin,'') ILIKE "+mark+")")
+		ors := []string{"payload::text ILIKE " + mark, "COALESCE(origin,'') ILIKE " + mark}
+		// 纯数字(或 UI 里带 # 前缀的形式,如「#41」)当作节点 id 精确匹配,方便直接定位某个节点。
+		if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
+			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+				args = append(args, id)
+				ors = append(ors, "id = $"+fmt.Sprint(len(args)))
+			}
+		}
+		conds = append(conds, "("+strings.Join(ors, " OR ")+")")
 	}
 	where := " WHERE " + strings.Join(conds, " AND ")
 

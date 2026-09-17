@@ -2156,7 +2156,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const rank = (id: string) => all.findIndex((n) => n.id === id);
     const matched = all
       .filter((n) => (kinds.size === 0 || kinds.has(n.type)) && (states.size === 0 || states.has(n.state)))
-      .filter((n) => !needle || `${n.payload ?? ""} ${n.origin}`.toLowerCase().includes(needle))
+      .filter(
+        (n) =>
+          !needle ||
+          // 内容 / 来源 / 节点 id 任一命中即可(id 兼容「#41」写法)。
+          `${n.payload ?? ""} ${n.origin} ${n.id}`.toLowerCase().includes(needle.replace(/^#/, "")),
+      )
       .sort((a, b) => {
         const d = Date.parse(a.ts) - Date.parse(b.ts) || rank(a.id) - rank(b.id);
         return asc ? d : -d;

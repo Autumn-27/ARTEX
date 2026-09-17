@@ -246,3 +246,51 @@ func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 	assertCount(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1`, 0, directFact)
 	assertCount(`SELECT COUNT(*) FROM assets WHERE id=$1`, 1, assetID)
 }
+
+// TestNodesPageQueryMatchesID verifies the 播报板 search filters on node id (both
+// the bare number and the「#id」form the UI shows) in addition to payload/origin.
+func TestNodesPageQueryMatchesID(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("test", "id 搜索")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	es := d.Exploration(expID)
+
+	target, err := es.AddNode("fact", map[string]any{"summary": "needle-alpha"}, 0, "confirmed", "worker-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := es.AddNode("fact", map[string]any{"summary": "unrelated-beta"}, 0, "confirmed", "worker-b", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	onlyTarget := func(label, q string) {
+		t.Helper()
+		nodes, total, err := es.NodesPage(NodeFilter{Query: q}, 1, 50)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if total != 1 || len(nodes) != 1 || nodes[0].ID != target {
+			t.Fatalf("%s: q=%q total=%d nodes=%+v, want single node %d", label, q, total, nodes, target)
+		}
+	}
+
+	onlyTarget("bare id", fmt.Sprint(target))
+	onlyTarget("hash id", "#"+fmt.Sprint(target))
+	onlyTarget("payload still works", "needle-alpha")
+
+	// A non-matching numeric id returns nothing (and does not accidentally match other).
+	if nodes, total, err := es.NodesPage(NodeFilter{Query: fmt.Sprint(target + other + 1000)}, 1, 50); err != nil {
+		t.Fatal(err)
+	} else if total != 0 || len(nodes) != 0 {
+		t.Fatalf("non-existent id: total=%d nodes=%+v, want empty", total, nodes)
+	}
+}

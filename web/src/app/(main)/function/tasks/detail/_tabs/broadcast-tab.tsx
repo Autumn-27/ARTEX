@@ -567,7 +567,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
           <Input
             value={queryInput}
             onChange={(e) => setQueryInput(e.target.value)}
-            placeholder="搜索播报内容 / 来源"
+            placeholder="搜索内容 / 来源 / 节点 id"
             className="h-8 pl-8"
             aria-label="搜索播报"
           />
