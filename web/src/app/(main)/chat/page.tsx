@@ -171,7 +171,7 @@ function Composer({
   stopDisabled?: boolean;
   // 方式1 文件上传:传了 onPickFiles 才显示回形针按钮 + 附件 chip 预览。
   attachments?: ChatAttachment[];
-  onPickFiles?: (files: FileList | null) => void;
+  onPickFiles?: (files: File[]) => void;
   onRemoveAttachment?: (path: string) => void;
   uploading?: boolean;
   allowBtw?: boolean;
@@ -222,8 +222,11 @@ function Composer({
               multiple
               className="hidden"
               onChange={(e) => {
-                onPickFiles(e.target.files);
+                // FileList 与 input 元素活绑定:必须先快照成数组,再清空 value,
+                // 否则异步的 onPickFiles(比如草稿态要先建会话)恢复执行时会拿到空列表。
+                const picked = Array.from(e.target.files ?? []);
                 e.target.value = ""; // allow re-picking the same file
+                if (picked.length > 0) onPickFiles(picked);
               }}
             />
             <Button
@@ -402,12 +405,12 @@ function DraftChat({
   // into it, then hands off to ChatView carrying the typed text + attachments (the
   // user sends from there). Mirrors the task main-agent console's upload, adapted to
   // the ChatGPT-style lazy-create flow.
-  async function pickFiles(files: FileList | null) {
-    if (!files || files.length === 0 || !agentKey || uploading || sending) return;
+  async function pickFiles(files: File[]) {
+    if (files.length === 0 || !agentKey || uploading || sending) return;
     setUploading(true);
     try {
       const c = await api.createConversation(agentKey, "", llmProfileId);
-      const r = await api.chatUpload("session", `conv-${c.id}`, Array.from(files));
+      const r = await api.chatUpload("session", `conv-${c.id}`, files);
       onStarted(c, { input, attachments: r.attachments });
     } catch (e) {
       toast.error("上传失败：" + (e as Error).message);
@@ -706,11 +709,11 @@ function ChatView({
 
   // pickFiles uploads into this conversation's session dir (sessions/conv-<id>/
   // uploads/) and queues the returned metadata to send with the next message.
-  async function pickFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
+  async function pickFiles(files: File[]) {
+    if (files.length === 0) return;
     setUploading(true);
     try {
-      const r = await api.chatUpload("session", `conv-${conv.id}`, Array.from(files));
+      const r = await api.chatUpload("session", `conv-${conv.id}`, files);
       setAttachments((prev) => [...prev, ...r.attachments]);
     } catch (e) {
       toast.error("上传失败：" + (e as Error).message);
