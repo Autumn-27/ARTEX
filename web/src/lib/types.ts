@@ -429,6 +429,8 @@ export interface ExplorationNodePage {
   size: number;
   edges: Edge[];
   refs: Record<string, TaskNode>;
+  // 节点 id → 该节点锚定的资产(播报板展开时顺带展示,含本页节点与其邻居)。
+  assets: Record<string, FindingAsset[]>;
 }
 
 export interface ExplorationNodeQuery {

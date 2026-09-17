@@ -674,6 +674,7 @@ export const api = {
       size: r.size ?? query.size ?? 20,
       edges: arr(r.edges),
       refs: r.refs ?? {},
+      assets: r.assets ?? {},
     }));
   },
   activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number }) => {

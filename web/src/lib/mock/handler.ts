@@ -2172,7 +2172,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         if (node) refs[id] = node;
       }
     }
-    return { items, total: matched.length, page, size, edges, refs };
+    // 顺带带上本页节点(含邻居)锚定的资产,供展开时展示。
+    const assets: Record<string, ReturnType<typeof D.nodeAssetsFor>> = {};
+    for (const id of new Set([...onPage, ...Object.keys(refs)])) {
+      const anchored = D.nodeAssetsFor(id);
+      if (anchored.length > 0) assets[id] = anchored;
+    }
+    return { items, total: matched.length, page, size, edges, refs, assets };
   }
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
