@@ -420,6 +420,26 @@ export interface TaskNode {
   inherited?: boolean;
 }
 
+// 播报板一页:按创建顺序分页的节点 + 这一页涉及的边 + 边另一端的节点(refs,按 id 索引),
+// 这样每条播报都能说清「从哪来、产出了什么」,而不用把整张图拉下来。
+export interface ExplorationNodePage {
+  items: TaskNode[];
+  total: number;
+  page: number;
+  size: number;
+  edges: Edge[];
+  refs: Record<string, TaskNode>;
+}
+
+export interface ExplorationNodeQuery {
+  page?: number;
+  size?: number;
+  kinds?: ExploreKind[];
+  states?: string[];
+  q?: string;
+  order?: "asc" | "desc";
+}
+
 // 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
 export interface TaskGoal {
   id: string;
