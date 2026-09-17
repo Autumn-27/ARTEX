@@ -150,7 +150,9 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("已读取引用")}}, "end_turn", llm.Usage{}, nil
 	}}, "test", m.dir, nil, 10000, 1)
 	worker.SetNonStreaming(func() bool { return true })
-	s.engine.UseLLM(nil, worker)
+	s.engine.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) {
+		return nil, worker
+	})
 	send := func(message string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]string{"message": message, "request_id": "worker-mention-test"})
 		r := httptest.NewRequest("POST", "/", strings.NewReader(string(body)))

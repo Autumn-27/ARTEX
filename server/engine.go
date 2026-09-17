@@ -96,9 +96,6 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	mu       sync.RWMutex
-	planner  *agent.Planner
-	worker   *agent.Worker
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
@@ -146,11 +143,14 @@ type Engine struct {
 	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
 	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
 
-	// resolve, if set, returns a task's dedicated planner/worker. In legacy mode
-	// nil,nil falls back to the global pair; an authoritative resolver uses nil,nil
-	// to mean this task is deliberately unavailable (for example an exhausted chain).
+	// resolve returns a task's dedicated planner/worker (wired by the server as the
+	// authoritative task-router). nil,nil means this task is deliberately unavailable
+	// (for example an exhausted failover chain) — there is no global-pair fallback.
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+	// readiness reports whether a global LLM provider is configured — the signal behind
+	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
+	readiness func() bool
 }
 
 type taskRuntime struct {
@@ -696,18 +696,9 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 	return 0, err
 }
 
-// UseLLM installs (or replaces) the LLM planner + work agent at runtime.
-func (e *Engine) UseLLM(p *agent.Planner, w *agent.Worker) {
-	e.mu.Lock()
-	e.planner, e.worker = p, w
-	e.mu.Unlock()
-}
-
-func (e *Engine) snapshot() (*agent.Planner, *agent.Worker) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.planner, e.worker
-}
+// SetReadiness wires the global "an LLM provider is configured" predicate (read by
+// Ready() / the llm_configured indicator). Called once at startup.
+func (e *Engine) SetReadiness(fn func() bool) { e.readiness = fn }
 
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
 // Called once at startup before any task loop runs, so no lock is needed on reads.
@@ -724,9 +715,9 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 	e.resolveAuthoritative = true
 }
 
-// snapshotFor returns the planner/worker a task should run on: the task's dedicated
-// pair when it pins a specific LLM profile (via the resolver), else the global active
-// pair. The resolver returning nil means "no override" (fall back to global).
+// snapshotFor returns the planner/worker a task should run on, from the task-router
+// resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
+// failover chain); there is no global-pair fallback.
 func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 	if e.resolve != nil {
 		p, w := e.resolve(t)
@@ -734,13 +725,13 @@ func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 			return p, w
 		}
 	}
-	return e.snapshot()
+	return nil, nil
 }
 
-// Ready reports whether an LLM provider is configured.
+// Ready reports whether a global LLM provider is configured (via the readiness
+// predicate wired at startup).
 func (e *Engine) Ready() bool {
-	p, w := e.snapshot()
-	return p != nil && w != nil
+	return e.readiness != nil && e.readiness()
 }
 
 // ReadyFor reports whether a specific task can resolve a planner/worker pair.
@@ -749,14 +740,6 @@ func (e *Engine) Ready() bool {
 func (e *Engine) ReadyFor(t *Task) bool {
 	p, w := e.snapshotFor(t)
 	return p != nil && w != nil
-}
-
-// Mode reports "llm" when ready, else "idle".
-func (e *Engine) Mode() string {
-	if e.Ready() {
-		return "llm"
-	}
-	return "idle"
 }
 
 // Run starts the planner loop + N worker loops for a task. The loops always run

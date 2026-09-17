@@ -164,6 +164,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	// Global readiness (Ready()/llm_configured): a global active LLM provider is
+	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
+	s.engine.SetReadiness(func() bool {
+		s.cfgMu.Lock()
+		defer s.cfgMu.Unlock()
+		return s.llmOn
+	})
 	// Wire DB-stored prompt templates into the agents (新版方案 §3.3 / §5a). With no
 	// override row, agents keep their built-in defaults — behavior is unchanged.
 	if m.pg != nil {
@@ -398,44 +405,6 @@ func (s *Server) webSearchFor(key string) agent.WebSearchOpts {
 	return o
 }
 
-// buildPlannerWorker builds a planner+worker pair. Each agent resolves its OWN LLM by
-// precedence agent-binding → pin → the passed global fallback (gProv/gCfg), so planner
-// and worker can run on different models (e.g. a stronger planner, a cheaper worker).
-// pinID is the task's pinned profile (nil on the global active path). With no agent
-// binding and no pin, both fall back to gProv/gCfg — identical to the previous single-
-// provider behavior. Called by applyLLM (global active pair).
-func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent.Config) (*agent.Planner, *agent.Worker) {
-	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts")) // raw LLM conversation logs
-	// traffic host tools flow through ToolAugment for every agent and are filtered by
-	// the tools-table binding (default = worker), so worker behavior is unchanged.
-	wProv, wCfg := s.providerForAgent("worker", pinID, gProv, gCfg)
-	wk := agent.NewWorker(wProv, wCfg.Model, s.m.dir, tx, wCfg.CompactionWindow(), s.agentMaxTurns("worker"))
-	wk.SetFindingRecorder(s.evidenceStore())
-	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
-	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	wk.SetWebSearch(s.webSearchFor("worker"))
-	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
-	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
-	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
-	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)       // 实验功能:noa 上下文压缩(每 run 读)
-	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
-	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
-	pl.SetFindingRecorder(s.evidenceStore())
-	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
-	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
-	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
-	pl.SetWebSearch(s.webSearchFor("planner"))
-	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
-	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
-	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
-	pl.SetNoaEnabled(s.m.NoaCompactionEnabled)        // 实验功能:noa 上下文压缩(每 run 读)
-	// cold-digest §7: background cold-node compaction, on the planner's provider/
-	// model (§4 uses the running agent's model). Uses Complete (non-streaming) for
-	// the one-shot body summarization.
-	pl.SetCompactor(agent.NewCompactor(pProv, pCfg.Model))
-	return pl, wk
-}
-
 // nonStreamingResolver returns a resolver capturing a profile's streaming choice.
 // The agents read it per run; a profile change rebuilds the agents (applyLLM),
 // so the captured value is always the one in effect for this build.
@@ -483,8 +452,9 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	if act, err := s.m.pg.ActiveProfile(); err == nil && act != nil {
 		prov = s.poolForActive(act.ID, prov, cfg)
 	}
-	pl, wk := s.buildPlannerWorker(nil, prov, cfg)
-	s.engine.UseLLM(pl, wk)
+	// No global planner/worker pair: every task runs on its own task-routed pair
+	// (agentsForTask), resolved through the engine's authoritative resolver. Global
+	// readiness (Ready()/llm_configured) is reported from s.llmOn, set below.
 
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	win := cfg.CompactionWindow()
@@ -620,21 +590,6 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	}
 	s.provCacheMu.Unlock()
 	return prov, cfg, true
-}
-
-// providerForAgent returns the provider+cfg one agent should run on: its bound/pinned
-// profile if that resolves, else the passed global fallback (gProv/gCfg).
-// A bound/pinned profile is EXCLUSIVE by default: it does not fail over, so an
-// agent deliberately put on a specific model never silently runs on another one.
-// Turning on llm_pool_bind_fallback relaxes that — poolForBinding then appends the
-// failover chain behind it.
-func (s *Server) providerForAgent(agentKey string, pinID *int64, gProv llm.Provider, gCfg agent.Config) (llm.Provider, agent.Config) {
-	if eff := s.effectiveProfileForAgent(agentKey, pinID); eff != nil {
-		if prov, cfg, ok := s.providerForProfile(*eff); ok {
-			return s.poolForBinding(*eff, prov, cfg), cfg
-		}
-	}
-	return gProv, gCfg
 }
 
 // chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached

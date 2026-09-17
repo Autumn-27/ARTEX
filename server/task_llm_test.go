@@ -601,9 +601,11 @@ func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
 func TestAuthoritativeTaskResolverDoesNotFallBackWhenChainUnavailable(t *testing.T) {
 	t.Parallel()
 	e := &Engine{}
-	e.UseLLM(&agent.Planner{}, &agent.Worker{})
+	e.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) {
+		return &agent.Planner{}, &agent.Worker{}
+	})
 	if !e.ReadyFor(&Task{ID: "7"}) {
-		t.Fatal("global provider should initially make task ready")
+		t.Fatal("an available authoritative chain should make the task ready")
 	}
 	e.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) {
 		return nil, nil
