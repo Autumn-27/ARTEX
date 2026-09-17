@@ -303,6 +303,9 @@ function BroadcastRow({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <KindChip kind={kind} />
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                #{node.id}
+              </code>
               <NodeStateBadge node={node} />
               {node.priority > 0 && (kind === "goal" || kind === "intent") && (
                 <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">P{node.priority}</span>
