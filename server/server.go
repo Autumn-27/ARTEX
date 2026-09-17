@@ -1122,7 +1122,8 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Action string `json:"action"`
-		Reason string `json:"reason"` // cancel(删除)时必填:删除原因,挂为事实并告知 planner
+		Reason string `json:"reason"` // cancel(删除)时必填:删除原因
+		Mode   string `json:"mode"`   // cancel 专用:soft(默认,假删除)| hard(真删除,级联移除独占子孙)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
@@ -1133,7 +1134,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.applyIntentControl(r.Context(), t, iid, req.Action, req.Reason)
+	result, err := s.applyIntentControl(r.Context(), t, iid, req.Action, req.Reason, req.Mode)
 	if err != nil {
 		writeErr(w, 409, err.Error())
 		return

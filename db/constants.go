@@ -25,6 +25,11 @@ const (
 // facts use state 'confirmed', so this never collides.
 const StateOrigin = "origin"
 
+// StateIntentDeleted marks an intent the user假删除(soft delete): it drops out of
+// the frontier and graph_overview like other terminal states, but keeps its node
+// and full lineage. The delete reason lives in exploration_nodes.delete_reason.
+const StateIntentDeleted = "deleted"
+
 // Exploration edge relations (exploration_edges.rel).
 const (
 	RelSpawns      = "spawns"

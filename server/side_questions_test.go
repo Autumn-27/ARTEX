@@ -344,7 +344,7 @@ func TestSideHTTPGlobalLimitTaskWorkerAndDeletion(t *testing.T) {
 		waitSide(t, f.m.pg, e.ID, "completed")
 	}
 	f.call(t, "GET", fmt.Sprintf("/api/tasks/%s/intents/%d/side-questions", task.ID, iid+1000000), nil, 404)
-	if _, err := f.s.applyIntentControl(t.Context(), task, iid, "cancel", "cleanup"); err != nil {
+	if _, err := f.s.applyIntentControl(t.Context(), task, iid, "cancel", "cleanup", ""); err != nil {
 		t.Fatal(err)
 	}
 	if snap, err := f.m.pg.SideSnapshot(t.Context(), (sidequestion.Parent{TaskID: id, ExplorationID: task.ExpID, IntentID: iid}).Key()); err != nil || snap != nil {

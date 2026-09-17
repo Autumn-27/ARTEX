@@ -177,17 +177,19 @@ type TaskNodeDTO struct {
 	TS           string `json:"ts"`
 	SourceTaskID string `json:"source_task_id,omitempty"`
 	Inherited    bool   `json:"inherited,omitempty"`
+	DeleteReason string `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
 	d := TaskNodeDTO{
-		ID:       i64s(n.ID),
-		Type:     n.Kind,
-		Payload:  rawString(n.Payload),
-		Priority: n.Priority,
-		State:    n.State,
-		Origin:   n.Origin,
-		TS:       rfc3339(n.CreatedAt),
+		ID:           i64s(n.ID),
+		Type:         n.Kind,
+		Payload:      rawString(n.Payload),
+		DeleteReason: n.DeleteReason,
+		Priority:     n.Priority,
+		State:        n.State,
+		Origin:       n.Origin,
+		TS:           rfc3339(n.CreatedAt),
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
