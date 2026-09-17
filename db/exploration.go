@@ -75,6 +75,7 @@ type Node struct {
 	Origin        string          `json:"origin,omitempty"`
 	Owner         string          `json:"owner,omitempty"`
 	BlockedReason string          `json:"blocked_reason,omitempty"`
+	DeleteReason  string          `json:"delete_reason,omitempty"` // 仅意图假删除(state='deleted')时非空
 	Anchors       []int64         `json:"anchors,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
 	SourceTaskID  int64           `json:"source_task_id,omitempty"`
@@ -380,16 +381,14 @@ type IntentCleanup struct {
 	Activities int64 `json:"activities"`
 }
 
-// StopIntentWithReason marks a running/paused intent as 'stopped' WITHOUT deleting
-// it or any of its yielded facts/findings/activities, and records the user's reason
-// as a fact node hanging off that intent (intent --yields--> fact). Returns the new
-// fact node id. The caller must first stop a running worker to prevent late writes.
-// Used by the "delete work" action, which no longer destroys data — it stops the
-// intent and attaches why, so the planner can account for it.
-func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string) (int64, error) {
+// SoftDeleteIntent 假删除一个待领/运行中/已暂停的意图:置 state='deleted' 并把用户填写的
+// 删除原因记入 delete_reason 字段,保留意图节点及其全部产出/血缘(不再像旧实现那样在图上
+// 另挂一条 fact)。返回删除前意图的 summary,供 planner 通知使用。副会话随删除态一并清理。
+// 调用方须先停掉运行中的 worker,避免其后续写入。
+func (s *ExplorationStore) SoftDeleteIntent(id int64, reason string) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	defer tx.Rollback()
 
@@ -398,58 +397,39 @@ func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string)
 	if err := tx.QueryRow(`SELECT state, payload FROM exploration_nodes
 		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state, &rawPayload); err != nil {
 		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("intent not found")
+			return "", fmt.Errorf("intent not found")
 		}
-		return 0, err
+		return "", err
 	}
-	if state != "running" && state != "paused" {
-		return 0, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
+	if state != "running" && state != "paused" && state != "open" {
+		return "", fmt.Errorf("%w: intent state %s cannot be deleted", ErrIntentStateConflict, state)
 	}
-	// Merge the delete marker into the intent's own payload so it travels with the
-	// intent everywhere (session list badge, detail banner) without a schema change.
-	ip := map[string]any{}
-	_ = json.Unmarshal(rawPayload, &ip)
-	ip["cancelled_by_user"] = true
-	ip["cancel_reason"] = reason
-	newPayload, _ := json.Marshal(ip)
-	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL
-		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
-		return 0, err
+	if _, err := tx.Exec(`UPDATE exploration_nodes
+		SET state='deleted', delete_reason=$3, blocked_reason=NULL,
+		    content_version=content_version+1, completed_at=now()
+		WHERE id=$1 AND exploration_id=$2`, id, s.expID, reason); err != nil {
+		return "", err
 	}
-	// Soft deletion retains the main intent audit trail, but side conversations
-	// are removed atomically with the stopped state. Delayed snapshots reject it.
+	// 主意图审计轨迹保留,但副问答会话随删除态原子清理(延迟快照会拒绝它)。
 	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE intent_id=$1`, id); err != nil {
-		return 0, err
+		return "", err
 	}
-
-	if origin == "" {
-		origin = "user"
+	var summary string
+	var p map[string]any
+	if json.Unmarshal(rawPayload, &p) == nil {
+		if sm, ok := p["summary"].(string); ok {
+			summary = sm
+		}
 	}
-	raw, _ := json.Marshal(map[string]any{
-		"summary":     "用户删除了该意图",
-		"detail":      "删除原因：" + reason,
-		"confidence":  "observed",
-		"user_cancel": true,
-	})
-	var factID int64
-	if err := tx.QueryRow(`
-INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
-VALUES ($1, 'fact', $2, 5, 'confirmed', $3) RETURNING id`,
-		s.expID, string(raw), origin).Scan(&factID); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`
-INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
-ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
-		return 0, err
-	}
-	return factID, tx.Commit()
+	return summary, tx.Commit()
 }
 
-// CancelIntent removes one local intent and the fact/finding nodes it directly
-// yielded. The standalone finding row must be deleted before its node (whose FK
-// otherwise uses ON DELETE SET NULL), so the entire cleanup is kept in one DB
-// transaction. The caller must first stop a running worker to prevent late writes.
+// CancelIntent 物理删除一个意图,以及"仅由该意图支撑"的全部独占子孙节点——从该意图沿
+// yields/derived_from 向下可达、且所有父节点(所有指向它的边的源)都落在删除集内的节点。
+// goal 与 origin fact 永不删除;还被删除集之外的意图/digest 引用的共享节点也保留,以免破坏
+// 其它分支、产生断链。被删的每个 intent 先做 token rollup(保留不可逆计量)并清理其 activity
+// 与副会话;被删的 finding 先删 findings 表行(node_id FK 为 ON DELETE SET NULL,否则留孤儿)。
+// 边随节点 CASCADE 清理,整个清理保持在一个事务内。调用方须先停掉运行中的 worker 防止其后续写入。
 func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 	var out IntentCleanup
 	tx, err := s.db.Begin()
@@ -458,96 +438,160 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 	}
 	defer tx.Rollback()
 
-	var state string
-	if err := tx.QueryRow(`SELECT state FROM exploration_nodes
-		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(&state); err != nil {
+	// 锁定意图行确认存在(幂等:已删则 not found)。状态不校验——真删除对任何状态成立,
+	// running 的 worker 由调用方先停。
+	if err := tx.QueryRow(`SELECT 1 FROM exploration_nodes
+		WHERE id=$1 AND exploration_id=$2 AND kind='intent' FOR UPDATE`, id, s.expID).Scan(new(int)); err != nil {
 		if err == sql.ErrNoRows {
 			return out, fmt.Errorf("intent not found")
 		}
 		return out, err
 	}
-	if state != "running" && state != "paused" {
-		return out, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
-	}
 
-	if err := tx.QueryRow(`SELECT
-		COUNT(*) FILTER (WHERE n.kind='fact'),
-		COUNT(*) FILTER (WHERE n.kind='finding')
-	FROM exploration_edges e
-	JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
-	WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
-	  AND n.kind IN ('fact','finding')
-	  AND NOT EXISTS (
-	      SELECT 1 FROM exploration_edges other
-	      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
-	        AND other.src_id<>$2
-	  )`, s.expID, id, RelYields).Scan(&out.Facts, &out.Findings); err != nil {
-		return out, err
-	}
-
-	if _, err := tx.Exec(`DELETE FROM findings f USING exploration_edges e, exploration_nodes n
-		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
-		  AND n.id=e.dst_id AND n.exploration_id=e.exploration_id
-		  AND n.kind='finding' AND f.node_id=n.id
-		  AND NOT EXISTS (
-		      SELECT 1 FROM exploration_edges other
-		      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
-		        AND other.src_id<>$2
-		  )`, s.expID, id, RelYields); err != nil {
-		return out, err
-	}
-	// Activity rows are part of the blackboard cleanup, but their token usage is
-	// irreversible metering data. Fold completed runs plus the latest unfinished
-	// usage frame into detached daily result rows before deleting the conversation.
-	// The rows are excluded from per-intent sessions while whole-task totals and
-	// the original UTC reporting dates remain accurate.
-	tokenBuckets, err := intentTokenRollup(tx, s.expID, id)
+	// 载入全图节点(判 protected)与边(算向下可达 + 父集)。图规模对真实任务很小。
+	kind := map[int64]string{}
+	protected := map[int64]bool{}
+	nrows, err := tx.Query(`SELECT id, kind, state FROM exploration_nodes WHERE exploration_id=$1`, s.expID)
 	if err != nil {
 		return out, err
 	}
-	res, err := tx.Exec(`DELETE FROM activity WHERE exploration_id=$1 AND node_id=$2`, s.expID, id)
+	for nrows.Next() {
+		var nid int64
+		var k, st string
+		if err := nrows.Scan(&nid, &k, &st); err != nil {
+			nrows.Close()
+			return out, err
+		}
+		kind[nid] = k
+		if k == KindGoal || (k == KindFact && st == StateOrigin) {
+			protected[nid] = true // 目标与任务根事实永不随意图删除
+		}
+	}
+	nrows.Close()
+	if err := nrows.Err(); err != nil {
+		return out, err
+	}
+
+	parentsOf := map[int64][]int64{} // dst -> 所有指向它的边的 src(任意 rel,含 covers:被 digest 覆盖的成员因此有 digest 父而被保留)
+	downOf := map[int64][]int64{}    // src -> 沿 yields/derived_from 的向下邻居
+	erows, err := tx.Query(`SELECT src_id, rel, dst_id FROM exploration_edges WHERE exploration_id=$1`, s.expID)
 	if err != nil {
 		return out, err
 	}
-	out.Activities, _ = res.RowsAffected()
-	for _, bucket := range tokenBuckets {
-		metadata, _ := json.Marshal(map[string]any{
-			"cancelled_intent_id": id,
-			"token_day":           bucket.Day.Format(time.DateOnly),
-			"token_rollup":        true,
-		})
-		if _, err := tx.Exec(`INSERT INTO activity(
-			exploration_id, worker, kind, summary, metadata,
-			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
-			VALUES ($1,'token-ledger','result',$2,$3,$4,$5,$6,$7,$8)`,
-			s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", id), metadata,
-			bucket.Usage.InputTokens, bucket.Usage.OutputTokens,
-			bucket.Usage.CacheReadTokens, bucket.Usage.CacheWriteTokens, bucket.Day); err != nil {
+	for erows.Next() {
+		var src, dst int64
+		var rel string
+		if err := erows.Scan(&src, &rel, &dst); err != nil {
+			erows.Close()
+			return out, err
+		}
+		parentsOf[dst] = append(parentsOf[dst], src)
+		if rel == RelYields || rel == RelDerivedFrom {
+			downOf[src] = append(downOf[src], dst)
+		}
+	}
+	erows.Close()
+	if err := erows.Err(); err != nil {
+		return out, err
+	}
+
+	// 独占级联:从意图向下扩展,一个节点入删除集当且仅当它未被保护、且它的每个父都已在集内
+	// (即除了经过被删节点外再无来路)。迭代到不动点。
+	del := map[int64]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for src := range del {
+			for _, dst := range downOf[src] {
+				if del[dst] || protected[dst] {
+					continue
+				}
+				exclusive := true
+				for _, p := range parentsOf[dst] {
+					if !del[p] {
+						exclusive = false
+						break
+					}
+				}
+				if exclusive {
+					del[dst] = true
+					changed = true
+				}
+			}
+		}
+	}
+
+	// 按类型分桶。
+	var ids, intentIDs, findingIDs []int64
+	for nid := range del {
+		ids = append(ids, nid)
+		switch kind[nid] {
+		case KindIntent:
+			intentIDs = append(intentIDs, nid)
+			out.Intents++
+		case KindFact:
+			out.Facts++
+		case KindFinding:
+			findingIDs = append(findingIDs, nid)
+			out.Findings++
+		}
+	}
+
+	// 每个被删意图:token rollup(保留不可逆计量)后清 activity。rollup 行 node_id 为 NULL,
+	// 不会被下面按 node_id 的删除命中。
+	for _, iid := range intentIDs {
+		tokenBuckets, err := intentTokenRollup(tx, s.expID, iid)
+		if err != nil {
+			return out, err
+		}
+		res, err := tx.Exec(`DELETE FROM activity WHERE exploration_id=$1 AND node_id=$2`, s.expID, iid)
+		if err != nil {
+			return out, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			out.Activities += n
+		}
+		for _, bucket := range tokenBuckets {
+			metadata, _ := json.Marshal(map[string]any{
+				"cancelled_intent_id": iid,
+				"token_day":           bucket.Day.Format(time.DateOnly),
+				"token_rollup":        true,
+			})
+			if _, err := tx.Exec(`INSERT INTO activity(
+				exploration_id, worker, kind, summary, metadata,
+				input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at)
+				VALUES ($1,'token-ledger','result',$2,$3,$4,$5,$6,$7,$8)`,
+				s.expID, fmt.Sprintf("已取消意图 #%d 的 Token 计量", iid), metadata,
+				bucket.Usage.InputTokens, bucket.Usage.OutputTokens,
+				bucket.Usage.CacheReadTokens, bucket.Usage.CacheWriteTokens, bucket.Day); err != nil {
+				return out, err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE intent_id=$1`, iid); err != nil {
 			return out, err
 		}
 	}
 
-	res, err = tx.Exec(`DELETE FROM exploration_nodes
-		WHERE exploration_id=$1 AND (
-			id=$2 OR id IN (
-				SELECT e.dst_id FROM exploration_edges e
-				JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
-					WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
-					  AND n.kind IN ('fact','finding')
-					  AND NOT EXISTS (
-					      SELECT 1 FROM exploration_edges other
-					      WHERE other.exploration_id=e.exploration_id AND other.dst_id=e.dst_id
-					        AND other.src_id<>$2
-					  )
-				)
-		)`, s.expID, id, RelYields)
-	if err != nil {
-		return out, err
+	// finding 节点删除前先删 findings 表行(否则留 node_id=NULL 的孤儿)。
+	for _, fid := range findingIDs {
+		if _, err := tx.Exec(`DELETE FROM findings WHERE node_id=$1`, fid); err != nil {
+			return out, err
+		}
 	}
-	if removed, _ := res.RowsAffected(); removed != 1+out.Facts+out.Findings {
+
+	// 删节点(边随 CASCADE 清理)。逐个删并核对行数,防并发改动。
+	var removed int64
+	for _, nid := range ids {
+		res, err := tx.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, nid, s.expID)
+		if err != nil {
+			return out, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed += n
+		}
+	}
+	if removed != int64(len(ids)) {
 		return out, fmt.Errorf("intent cleanup changed concurrently")
 	}
-	out.Intents = 1
 	return out, tx.Commit()
 }
 
@@ -653,12 +697,12 @@ func (u *TokenUsage) add(other TokenUsage) {
 	u.CacheWriteTokens += other.CacheWriteTokens
 }
 
-const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), created_at`
+const nodeCols = `id, kind, payload, priority, state, COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,''), COALESCE(delete_reason,''), created_at`
 
 func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 	var n Node
 	var payload []byte
-	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.BlockedReason, &n.CreatedAt); err != nil {
+	if err := sc.Scan(&n.ID, &n.Kind, &payload, &n.Priority, &n.State, &n.Origin, &n.Owner, &n.BlockedReason, &n.DeleteReason, &n.CreatedAt); err != nil {
 		return nil, err
 	}
 	n.Payload = json.RawMessage(payload)

@@ -418,6 +418,7 @@ export interface TaskNode {
   ts: string;
   source_task_id?: string;
   inherited?: boolean;
+  delete_reason?: string; // 意图假删除(state='deleted')时的删除原因
 }
 
 // 播报板一页:按创建顺序分页的节点 + 这一页涉及的边 + 边另一端的节点(refs,按 id 索引),
@@ -754,7 +755,7 @@ export interface LogLine {
 }
 
 export type SessionRole = "mainagent" | "planner" | "worker" | "system";
-export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped";
+export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped" | "deleted";
 
 // Daily token aggregate bucket (GET /api/tokens/daily).
 export interface DailyTokenBucket {

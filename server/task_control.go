@@ -149,7 +149,21 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 	return out, nil
 }
 
-func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason string) (intentControlResult, error) {
+// intentSummaryOf 取意图 payload 里的 summary,供删除通知在意图节点消失(真删除)前留档。
+func intentSummaryOf(n *db.Node) string {
+	if n == nil {
+		return ""
+	}
+	var p map[string]any
+	if json.Unmarshal(n.Payload, &p) == nil {
+		if s, ok := p["summary"].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason, mode string) (intentControlResult, error) {
 	out := intentControlResult{ID: iid}
 	node, err := t.Store.GetNode(iid)
 	if err != nil {
@@ -187,10 +201,14 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		t.Notify()
 		out.State = "open"
 	case "cancel":
-		// 「删除」新语义:不销毁意图与产出,而是把意图停到 stopped、把用户填写的删除原因
-		// 作为一条事实挂到该意图上,并用 cancelled 触发告知 planner(意图内容 + 删除原因)。
-		if node.State != "running" && node.State != "paused" {
-			return out, fmt.Errorf("仅运行中或已暂停的意图可以删除")
+		// 删除支持两种模式:
+		//   soft(默认,假删除):意图停到 state='deleted'、删除原因记入 delete_reason 字段,
+		//     保留意图节点与全部产出/血缘,不再在图上另挂 fact。
+		//   hard(真删除):物理删除该意图及"仅由它支撑"的独占子孙节点(级联到叶子),避免留下
+		//     孤立数据;共享节点、goal、任务根事实保留。
+		// 两种模式都用 cancelled 触发告知 planner(意图内容 + 删除原因),让它据此重规划。
+		if node.State != "running" && node.State != "paused" && node.State != "open" {
+			return out, fmt.Errorf("仅待领/运行中/已暂停的意图可以删除")
 		}
 		reason = strings.TrimSpace(reason)
 		if reason == "" {
@@ -201,12 +219,24 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 				return out, err
 			}
 		}
-		if _, err := t.Store.StopIntentWithReason(iid, reason, "user"); err != nil {
-			return out, err
+		summary := intentSummaryOf(node)
+		if mode == "hard" {
+			cleanup, err := t.Store.CancelIntent(iid)
+			if err != nil {
+				return out, err
+			}
+			s.cancelWorkerSide(t.ID, t.ExpID, iid)
+			t.NotifyCancelled(iid, summary, reason)
+			out.Deleted = &cleanup
+			out.State = "" // 节点已删除,前端据 Deleted 从列表移除
+		} else {
+			if _, err := t.Store.SoftDeleteIntent(iid, reason); err != nil {
+				return out, err
+			}
+			s.cancelWorkerSide(t.ID, t.ExpID, iid)
+			t.NotifyCancelled(iid, summary, reason)
+			out.State = db.StateIntentDeleted
 		}
-		s.cancelWorkerSide(t.ID, t.ExpID, iid)
-		t.NotifyCancelled(iid, reason)
-		out.State = "stopped"
 	default:
 		return out, fmt.Errorf("action must be pause|resume|cancel")
 	}

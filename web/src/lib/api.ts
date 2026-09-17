@@ -315,12 +315,19 @@ export const api = {
   deleteTaskArchive: (id: number) => del<TaskArchive>(`/task-archives/${id}`),
   deleteTaskArchives: (archiveIds: number[]) =>
     post<{ items: ArchiveBatchItem[] }>("/task-archives/delete/batch", { archive_ids: archiveIds }),
-  controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel", reason?: string) =>
+  controlIntent: (
+    taskId: string,
+    intentId: string,
+    action: "pause" | "resume" | "cancel",
+    reason?: string,
+    // cancel 专用:soft(默认,假删除,意图置 deleted + 记删除原因)| hard(真删除,级联移除独占子孙)。
+    mode?: "soft" | "hard",
+  ) =>
     post<{
       id: number;
-      state: "paused" | "open" | "stopped";
+      state: "paused" | "open" | "deleted" | "";
       deleted?: { intents: number; facts: number; findings: number; activities: number };
-    }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "" }),
+    }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "", mode: mode ?? "soft" }),
   sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>
     post<{
       id: number;

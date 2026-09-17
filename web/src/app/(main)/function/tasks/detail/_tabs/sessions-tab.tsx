@@ -27,9 +27,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
-import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -42,7 +43,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { MentionTextarea } from "@/components/mention-textarea";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupButton } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -181,6 +181,8 @@ function statusIcon(status: SessionStatus) {
       return <CircleXIcon className="size-3.5 text-red-500" />;
     case "exhausted": // 步数耗尽(撞 max_turns)
       return <ZapOffIcon className="size-3.5 text-violet-500" />;
+    case "deleted": // 用户假删除
+      return <CircleSlashIcon className="size-3.5 text-muted-foreground" />;
   }
 }
 
@@ -309,6 +311,8 @@ function intentStatus(state: string): SessionStatus {
       return "paused";
     case "open": // 待领取，区别于执行中
       return "pending";
+    case "deleted": // 用户假删除
+      return "deleted";
     default: // running
       return "running";
   }
@@ -362,7 +366,11 @@ function SessionItem({
   ) : null;
 
   const cancellable =
-    s.role === "worker" && !s.inherited && !deleted && (s.status === "running" || s.status === "paused");
+    s.role === "worker" &&
+    !s.inherited &&
+    !deleted &&
+    // pending = 待领(open)意图;连同运行中/已暂停都允许删除。
+    (s.status === "running" || s.status === "paused" || s.status === "pending");
   return (
     <div
       className={cn(
@@ -417,8 +425,8 @@ function SessionItem({
             size="icon-xs"
             onClick={onCancel}
             disabled={controlling}
-            title="删除该意图（需填写原因，保留数据）"
-            aria-label="删除该意图（需填写原因，保留数据）"
+            title="删除该意图（需填写原因，可选假删除/真删除）"
+            aria-label="删除该意图（需填写原因，可选假删除/真删除）"
             className="text-destructive hover:text-destructive"
           >
             <Trash2Icon />
@@ -528,6 +536,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
   const [cancelReason, setCancelReason] = React.useState("");
+  // 删除模式:soft=假删除(默认,置 deleted + 记原因,保留数据)| hard=真删除(级联移除独占子孙)。
+  const [deleteMode, setDeleteMode] = React.useState<"soft" | "hard">("soft");
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
@@ -583,7 +593,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, []);
 
   const controlWorker = React.useCallback(
-    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string) => {
+    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string, mode?: "soft" | "hard") => {
       if (!session.intent_id || session.inherited || controllingIntent) return;
       if (action === "cancel" && !reason?.trim()) {
         toast.error("请填写删除原因");
@@ -591,16 +601,23 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       }
       setControllingIntent(session.intent_id);
       try {
-        await api.controlIntent(taskId, session.intent_id, action, reason);
+        const res = await api.controlIntent(taskId, session.intent_id, action, reason, mode);
         if (action === "pause") {
           patchIntentState(session.intent_id, "paused");
           toast.success(`Worker #${session.intent_id} 已暂停`);
         } else if (action === "resume") {
           patchIntentState(session.intent_id, "open");
           toast.success(`Worker #${session.intent_id} 已恢复，等待重新领取`);
+        } else if (mode === "hard") {
+          // 真删除:意图及独占下游已物理移除,从列表剔除该行。
+          patchIntentState(session.intent_id);
+          const d = res.deleted;
+          const extra = d ? `（含 ${d.intents} 意图 / ${d.facts} 事实 / ${d.findings} 漏洞）` : "";
+          toast.success(`Worker #${session.intent_id} 及其独占下游已彻底删除${extra}`);
+          setCancelReason("");
         } else {
-          // 删除 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
-          patchIntentState(session.intent_id, "stopped");
+          // 假删除:意图置 deleted、记录删除原因,保留节点与产出。
+          patchIntentState(session.intent_id, "deleted");
           toast.success(`Worker #${session.intent_id} 已删除（原因已记录，规划者将据此重新规划）`);
           setCancelReason("");
         }
@@ -1139,17 +1156,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
-      let deleted = false;
-      let deleteReason = "";
+      // 假删除:意图 state='deleted',删除原因在独立字段 delete_reason 上。
+      const deleted = node.state === "deleted";
+      const deleteReason = node.delete_reason ?? "";
       if (node.payload) {
         try {
           const p = JSON.parse(node.payload);
           parsedPayload = p;
           if (p?.summary) title = String(p.summary);
-          if (p?.cancelled_by_user) {
-            deleted = true;
-            deleteReason = String(p.cancel_reason ?? "");
-          }
         } catch {
           title = node.payload.trim() || title;
         }
@@ -1288,16 +1302,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, [activeKey]);
 
   const focusKey = approvalFocus.state?.source?.session;
-  const loadFocusPage = React.useCallback((before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE), [taskId, focusKey]);
-  const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
-    if (!focusKey) return;
-    patchStore(focusKey, (s) => {
-      const items = mergeBySeq(page.items, s.items);
-      return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
-    });
-  }, [focusKey, patchStore]);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, !!focusKey && !!store[focusKey]?.loaded,
-    focusKey ? store[focusKey]?.items ?? [] : [], loadFocusPage, mergeFocusPage);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE),
+    [taskId, focusKey],
+  );
+  const mergeFocusPage = React.useCallback(
+    (page: { items: Activity[]; hasMore: boolean }) => {
+      if (!focusKey) return;
+      patchStore(focusKey, (s) => {
+        const items = mergeBySeq(page.items, s.items);
+        return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
+      });
+    },
+    [focusKey, patchStore],
+  );
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    !!focusKey && !!store[focusKey]?.loaded,
+    focusKey ? (store[focusKey]?.items ?? []) : [],
+    loadFocusPage,
+    mergeFocusPage,
+  );
   React.useEffect(() => {
     if (approvalFocus.state) atBottomRef.current = false;
   }, [approvalFocus.state]);
@@ -1828,10 +1853,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 </div>
               );
             })()}
-            <ApprovalExecutionFocus focus={{ ...approvalFocus, close: () => {
-              setActiveId(activeId);
-              approvalFocus.close();
-            } }} history={focusHistory} />
+            <ApprovalExecutionFocus
+              focus={{
+                ...approvalFocus,
+                close: () => {
+                  setActiveId(activeId);
+                  approvalFocus.close();
+                },
+              }}
+              history={focusHistory}
+            />
             {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
@@ -1863,7 +1894,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     </Button>
                   </div>
                 ) : activity.length ? (
-                  <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+                  <Transcript
+                    activity={activity}
+                    live={active.live}
+                    taskId={taskId}
+                    chat={isMain}
+                    focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+                  />
                 ) : (
                   <div className="pl-9 text-xs text-muted-foreground">
                     {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
@@ -1908,7 +1945,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     inputGroup
                     rows={1}
                     aria-label="给主 Agent 发消息"
-                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"}
+                    placeholder={
+                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                    }
                     value={input}
                     disabled={sending}
                     onValueChange={setInput}
@@ -2069,6 +2108,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             if (!open) {
               setCancelIntent(null);
               setCancelReason("");
+              setDeleteMode("soft");
             }
           }}
         >
@@ -2076,33 +2116,68 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <AlertDialogHeader>
               <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                删除会<strong>停止该意图</strong>
-                （不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞
-                <strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                {deleteMode === "hard" ? (
+                  <>
+                    <strong>真删除</strong>会物理移除该意图，以及<strong>仅由它支撑</strong>
+                    的下游节点（级联到叶子，避免留下孤立数据）；共享节点、目标和任务根事实会保留。
+                    <strong>此操作不可恢复。</strong>规划者会收到删除通知并据此重新规划。
+                  </>
+                ) : (
+                  <>
+                    <strong>假删除</strong>会把该意图置为「已删除」并记录删除原因，意图节点、执行记录、
+                    已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                  </>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
-            <div className="grid gap-2 py-1">
-              <label htmlFor="cancel-reason" className="text-sm font-medium">
-                删除原因（必填）
-              </label>
-              <Textarea
-                id="cancel-reason"
-                value={cancelReason}
-                onChange={(e) => setCancelReason(e.target.value)}
-                placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
-                rows={3}
-                autoFocus
-              />
+            <div className="grid gap-3 py-1">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteMode("soft")}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    deleteMode === "soft" ? "border-primary bg-primary/5" : "hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">假删除</div>
+                  <div className="text-xs text-muted-foreground">保留数据，可追溯</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeleteMode("hard")}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    deleteMode === "hard" ? "border-destructive bg-destructive/5" : "hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">真删除</div>
+                  <div className="text-xs text-muted-foreground">级联移除，不可恢复</div>
+                </button>
+              </div>
+              <div className="grid gap-2">
+                <label htmlFor="cancel-reason" className="text-sm font-medium">
+                  删除原因（必填）
+                </label>
+                <Textarea
+                  id="cancel-reason"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
+                  rows={3}
+                  autoFocus
+                />
+              </div>
             </div>
             <AlertDialogFooter>
               <AlertDialogCancel>返回</AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
                 disabled={!cancelIntent || controllingIntent !== null || !cancelReason.trim()}
-                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)}
+                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason, deleteMode)}
               >
                 {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
-                确认删除
+                {deleteMode === "hard" ? "彻底删除" : "确认删除"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

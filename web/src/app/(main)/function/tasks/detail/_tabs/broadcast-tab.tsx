@@ -405,6 +405,12 @@ function BroadcastRow({
               <span>来源 {node.origin || "system"}</span>
               <span>{Number.isNaN(ts) ? node.ts : new Date(ts).toLocaleString("zh-CN")}</span>
             </div>
+            {node.state === "deleted" && node.delete_reason && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+                <span className="font-medium text-destructive">删除原因</span>
+                <span className="ml-2 break-words text-muted-foreground">{node.delete_reason}</span>
+              </div>
+            )}
             <AssetList assets={assets[node.id] ?? []} />
             {(upstream.length > 0 || downstream.length > 0) && (
               <div className="flex flex-col gap-3 sm:flex-row">

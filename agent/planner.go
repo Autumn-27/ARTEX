@@ -159,6 +159,7 @@ type TriggerEvent struct {
 	Kind     string
 	IntentID int64
 	Detail   string
+	Summary  string   // Kind=="cancelled" 专用：删除前捕获的意图摘要（真删除后节点已不存在，无法再查）
 	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
 	OldGoal  string   // Kind=="goal_edited" 专用：修改前的目标文本
 	NewGoal  string   // Kind=="goal_edited" 专用：修改后的目标文本
@@ -196,7 +197,12 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 		case "finding":
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 报告了一个 finding：%s", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
 		case "cancelled":
-			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已停止（不再执行），其原因已作为事实挂在该意图上；请据此重新规划。", ev.IntentID, intentSummary(ts, ev.IntentID), ev.Detail))
+			// 意图内容优先用删除时捕获的 Summary（真删除后节点已不存在，intentSummary 查不到）。
+			sm := ev.Summary
+			if sm == "" {
+				sm = intentSummary(ts, ev.IntentID)
+			}
+			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已删除（不再执行）；请据此重新规划。", ev.IntentID, sm, ev.Detail))
 		default: // "done"
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), workerOutput(ts, ev.IntentID)))
 			if fids := factIDsYielded(ts, ev.IntentID); fids != "" {

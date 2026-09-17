@@ -1452,20 +1452,32 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (b.action === "cancel") {
       const index = mockIntents.findIndex((item) => item.id === id);
       const intent = mockIntents[index];
-      if (!intent || intent.inherited || (intent.state !== "running" && intent.state !== "paused")) {
+      if (
+        !intent ||
+        intent.inherited ||
+        (intent.state !== "running" && intent.state !== "paused" && intent.state !== "open")
+      ) {
         throw new Error("Worker 状态已变化");
       }
-      mockIntents.splice(index, 1);
-      return {
-        id: Number(id.replace(/\D/g, "")) || 0,
-        state: "cancelled",
-        deleted: {
-          intents: 1,
-          facts: 1,
-          findings: 1,
-          activities: mockActivity.filter((item) => item.intent_id === id).length,
-        },
-      };
+      const numId = Number(id.replace(/\D/g, "")) || 0;
+      if (b.mode === "hard") {
+        // 真删除:从列表移除,返回级联删除计数。
+        mockIntents.splice(index, 1);
+        return {
+          id: numId,
+          state: "",
+          deleted: {
+            intents: 1,
+            facts: 1,
+            findings: 1,
+            activities: mockActivity.filter((item) => item.intent_id === id).length,
+          },
+        };
+      }
+      // 假删除(默认):置 deleted + 记删除原因,保留节点。
+      intent.state = "deleted";
+      intent.delete_reason = String(b.reason ?? "");
+      return { id: numId, state: "deleted" };
     }
     const action = b.action === "resume" ? "resume" : "pause";
     const result = controlMockIntent(id, action);
