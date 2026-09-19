@@ -5,6 +5,7 @@ import * as React from "react";
 import { LibraryIcon, PlusIcon, SaveIcon, Settings2Icon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
+import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,37 +27,51 @@ import {
 } from "@/components/ui/combobox";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { TaskTemplate } from "@/lib/types";
+import type { AssetInterceptRuleInput, TaskCategory, TaskTemplate } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface TemplateDraft {
   name: string;
   description: string;
   goal: string;
+  categoryID: number | null;
+  interceptRules: AssetInterceptRuleInput[];
 }
+
+// TemplateSeed 是「另存为模板」时从创建表单带入的初值。
+type TemplateSeed = Pick<TemplateDraft, "description" | "goal" | "categoryID" | "interceptRules">;
 
 interface TaskTemplateManagerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   templates: TaskTemplate[];
-  seed: Pick<TemplateDraft, "description" | "goal"> | null;
+  seed: TemplateSeed | null;
   onCreated: (template: TaskTemplate) => void;
   onUpdated: (template: TaskTemplate) => void;
   onDeleted: (id: number) => void;
 }
 
-const emptyDraft = (): TemplateDraft => ({ name: "", description: "", goal: "" });
+const emptyDraft = (): TemplateDraft => ({
+  name: "",
+  description: "",
+  goal: "",
+  categoryID: null,
+  interceptRules: [],
+});
 
 function templateDraft(template: TaskTemplate): TemplateDraft {
   return {
     name: template.name,
     description: template.description,
     goal: template.goal,
+    categoryID: template.category_id ?? null,
+    interceptRules: template.intercept_rules ?? [],
   };
 }
 
@@ -74,13 +89,28 @@ function TaskTemplateManager({
   const [saving, setSaving] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const wasOpen = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!open) return;
+    api
+      .taskCategories()
+      .then(setCategories)
+      .catch(() => setCategories([]));
+  }, [open]);
 
   React.useEffect(() => {
     if (open && !wasOpen.current) {
       if (seed) {
         setSelectedID(null);
-        setDraft({ name: "", description: seed.description, goal: seed.goal });
+        setDraft({
+          name: "",
+          description: seed.description,
+          goal: seed.goal,
+          categoryID: seed.categoryID,
+          interceptRules: seed.interceptRules,
+        });
       } else if (templates[0]) {
         setSelectedID(templates[0].id);
         setDraft(templateDraft(templates[0]));
@@ -102,8 +132,12 @@ function TaskTemplateManager({
     setDraft(emptyDraft());
   };
 
-  const updateDraft = (field: keyof TemplateDraft, value: string) => {
+  const updateDraft = (field: "name" | "description" | "goal", value: string) => {
     setDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const patchDraft = (patch: Partial<TemplateDraft>) => {
+    setDraft((current) => ({ ...current, ...patch }));
   };
 
   async function save() {
@@ -111,6 +145,10 @@ function TaskTemplateManager({
       name: draft.name.trim(),
       description: draft.description.trim(),
       goal: draft.goal.trim(),
+      category_id: draft.categoryID,
+      intercept_rules: draft.interceptRules
+        .map((r) => ({ ...r, pattern: r.pattern.trim() }))
+        .filter((r) => r.pattern !== ""),
     };
     if (!input.name || !input.description || !input.goal) {
       toast.error("请填写模板名称、描述和目标");
@@ -169,7 +207,7 @@ function TaskTemplateManager({
         <SheetContent className="grid h-full w-full! max-w-none! grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:w-[48rem]! sm:max-w-[48rem]!">
           <SheetHeader className="border-b px-6 py-5">
             <SheetTitle>任务模板管理</SheetTitle>
-            <SheetDescription>模板只保存描述与目标；修改不会影响已经创建的任务。</SheetDescription>
+            <SheetDescription>模板保存描述、目标、分类与任务级拦截/允许规则；修改不会影响已经创建的任务。</SheetDescription>
           </SheetHeader>
           <div className="grid min-h-0 overflow-y-auto lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
             <div className="flex min-h-0 flex-col border-b p-3 lg:border-r lg:border-b-0">
@@ -231,6 +269,35 @@ function TaskTemplateManager({
                     onChange={(event) => updateDraft("goal", event.target.value)}
                   />
                 </Field>
+                <Field>
+                  <FieldLabel htmlFor="task-template-category">任务分类</FieldLabel>
+                  <NativeSelect
+                    id="task-template-category"
+                    className="w-full"
+                    value={draft.categoryID == null ? "" : String(draft.categoryID)}
+                    onChange={(event) =>
+                      patchDraft({ categoryID: event.target.value === "" ? null : Number(event.target.value) })
+                    }
+                  >
+                    <NativeSelectOption value="">未分类</NativeSelectOption>
+                    {categories.map((c) => (
+                      <NativeSelectOption key={c.id} value={String(c.id)}>
+                        {c.name}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                  <FieldDescription>应用模板时预填此分类（可再改）。</FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel>任务级拦截 / 允许规则</FieldLabel>
+                  <AssetInterceptRulesEditor
+                    value={draft.interceptRules}
+                    onChange={(rules) => patchDraft({ interceptRules: rules })}
+                  />
+                  <FieldDescription>
+                    应用模板时预填这些任务级规则（拦截/允许，仅对新任务生效，不进全局）。
+                  </FieldDescription>
+                </Field>
               </FieldGroup>
             </ScrollArea>
           </div>
@@ -280,6 +347,8 @@ function TaskTemplateManager({
 interface TaskTemplateControlsProps {
   description: string;
   goal: string;
+  categoryID?: number;
+  interceptRules?: AssetInterceptRuleInput[];
   selectedTemplateID: number | null;
   onSelectedTemplateIDChange: (id: number | null) => void;
   onApply: (template: TaskTemplate) => void;
@@ -289,6 +358,8 @@ interface TaskTemplateControlsProps {
 export function TaskTemplateControls({
   description,
   goal,
+  categoryID,
+  interceptRules,
   selectedTemplateID,
   onSelectedTemplateIDChange,
   onApply,
@@ -299,7 +370,7 @@ export function TaskTemplateControls({
   const [templateInputValue, setTemplateInputValue] = React.useState("");
   const [pendingTemplate, setPendingTemplate] = React.useState<TaskTemplate | null>(null);
   const [managerOpen, setManagerOpen] = React.useState(false);
-  const [managerSeed, setManagerSeed] = React.useState<Pick<TemplateDraft, "description" | "goal"> | null>(null);
+  const [managerSeed, setManagerSeed] = React.useState<TemplateSeed | null>(null);
 
   const loadTemplates = React.useCallback(async () => {
     setLoading(true);
@@ -348,7 +419,7 @@ export function TaskTemplateControls({
     applyTemplate(template);
   };
 
-  const openManager = (seed: Pick<TemplateDraft, "description" | "goal"> | null) => {
+  const openManager = (seed: TemplateSeed | null) => {
     setManagerSeed(seed);
     setManagerOpen(true);
   };
@@ -380,7 +451,14 @@ export function TaskTemplateControls({
               variant="ghost"
               size="sm"
               disabled={!description.trim() || !goal.trim()}
-              onClick={() => openManager({ description, goal })}
+              onClick={() =>
+                openManager({
+                  description,
+                  goal,
+                  categoryID: categoryID ?? null,
+                  interceptRules: interceptRules ?? [],
+                })
+              }
             >
               <SaveIcon data-icon="inline-start" />
               另存为模板
@@ -420,7 +498,7 @@ export function TaskTemplateControls({
             </ComboboxList>
           </ComboboxContent>
         </Combobox>
-        <FieldDescription>选择后会复制模板的描述和目标，不与模板保持关联。</FieldDescription>
+        <FieldDescription>选择后会复制模板的描述、目标、分类与任务级规则，不与模板保持关联。</FieldDescription>
       </Field>
 
       <AlertDialog

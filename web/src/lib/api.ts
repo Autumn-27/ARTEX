@@ -276,10 +276,13 @@ export const api = {
       category_id: categoryId ?? null,
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
-  createTaskTemplate: (input: Pick<TaskTemplate, "name" | "description" | "goal">) =>
-    post<TaskTemplate>("/task-templates", input),
-  updateTaskTemplate: (id: number, input: Partial<Pick<TaskTemplate, "name" | "description" | "goal">>) =>
-    patch<TaskTemplate>(`/task-templates/${id}`, input),
+  createTaskTemplate: (
+    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+  ) => post<TaskTemplate>("/task-templates", input),
+  updateTaskTemplate: (
+    id: number,
+    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+  ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
     put<{

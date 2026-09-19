@@ -53,6 +53,8 @@ export interface TaskTemplate {
   name: string;
   description: string;
   goal: string;
+  category_id?: number | null; // 预设分类；null/缺省=无
+  intercept_rules?: AssetInterceptRuleInput[]; // 预设的任务级拦截/允许规则
   created_at: string;
   updated_at: string;
 }
