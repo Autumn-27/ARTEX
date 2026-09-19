@@ -1248,3 +1248,32 @@ CREATE INDEX IF NOT EXISTS idx_asset_intercept_enabled ON asset_intercept_rules(
 DROP TRIGGER IF EXISTS trg_asset_intercept_rules_upd ON asset_intercept_rules;
 CREATE TRIGGER trg_asset_intercept_rules_upd BEFORE UPDATE ON asset_intercept_rules
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =====================================================================
+-- 任务级资产拦截/允许规则
+-- 与全局 asset_intercept_rules 同构（kind/pattern/note/enabled），但按 task_id
+-- 关联、随任务级联删除；创建任务时录入、任务详情里可编辑。
+-- action: 'block'=拦截(禁止测试)  'allow'=允许(白名单)。
+-- 执行判定：先按 拦截规则(全局 ∪ 任务block) 匹配，命中即禁止；未命中且该任务存在
+-- 启用的 allow 规则时，须命中某条 allow 才放行，否则「不允许测试」。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS task_intercept_rules (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    action      TEXT NOT NULL DEFAULT 'block' CHECK (action IN ('block','allow')),
+    kind        TEXT NOT NULL CHECK (kind IN (
+                    'exact_domain', 'exact_ip', 'exact_url',
+                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
+                    'cidr')),
+    pattern     TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_task_intercept_task ON task_intercept_rules(task_id);
+-- 补旧库(本会话早前建过该表、无 action 列)：加列(带 IF NOT EXISTS)。
+ALTER TABLE task_intercept_rules ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'block';
+DROP TRIGGER IF EXISTS trg_task_intercept_rules_upd ON task_intercept_rules;
+CREATE TRIGGER trg_task_intercept_rules_upd BEFORE UPDATE ON task_intercept_rules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();

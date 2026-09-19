@@ -1211,6 +1211,21 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
+	// 资产拦截：意图绑定的资产若命中系统资产拦截规则，则禁止下发该意图。
+	if t.as != nil && len(anchors) > 0 {
+		hits, err := t.as.CheckAssetsIntercept(t.taskID, anchors)
+		if err != nil {
+			return 0, fmt.Errorf("资产拦截校验失败：%w", err)
+		}
+		if len(hits) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "意图「%s」绑定的资产未通过测试范围校验，请停止对相关资产进行测试：", it.Summary)
+			for _, h := range hits {
+				fmt.Fprintf(&b, "\n - %s", h.Describe())
+			}
+			return 0, fmt.Errorf("%s", b.String())
+		}
+	}
 	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors

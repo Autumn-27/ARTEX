@@ -98,6 +98,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Label } from "@/components/ui/label";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -121,6 +122,8 @@ import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
+  AssetInterceptKind,
+  AssetInterceptRuleInput,
   ChatAttachment,
   Company,
   DeleteTaskOptions,
@@ -3032,6 +3035,92 @@ function CategoryManagementSheet({
   );
 }
 
+const TASK_INTERCEPT_KIND_OPTIONS: { value: AssetInterceptKind; label: string; placeholder: string }[] = [
+  { value: "exact_domain", label: "域名(全等)", placeholder: "example.gov.cn" },
+  { value: "exact_ip", label: "IP(全等)", placeholder: "203.0.113.10" },
+  { value: "exact_url", label: "URL(全等)", placeholder: "https://example.com/login" },
+  { value: "fuzzy_domain", label: "域名(模糊)", placeholder: ".gov.cn" },
+  { value: "fuzzy_ip", label: "IP(模糊)", placeholder: "203.0.113." },
+  { value: "fuzzy_url", label: "URL(模糊)", placeholder: "/admin" },
+  { value: "cidr", label: "CIDR 网段", placeholder: "192.168.0.0/16" },
+];
+
+// TaskInterceptRulesField 是创建任务时录入「任务级资产拦截规则」的多行编辑区。
+// 规则只对本任务生效、不进全局表；与全局规则合并后在 agent 执行时匹配。
+function TaskInterceptRulesField({
+  value,
+  onChange,
+}: {
+  value: AssetInterceptRuleInput[];
+  onChange: (v: AssetInterceptRuleInput[]) => void;
+}) {
+  function update(i: number, patch: Partial<AssetInterceptRuleInput>) {
+    onChange(value.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function remove(i: number) {
+    onChange(value.filter((_, idx) => idx !== i));
+  }
+  function add() {
+    onChange([...value, { action: "block", kind: "fuzzy_domain", pattern: "", note: "", enabled: true }]);
+  }
+  return (
+    <div className="grid gap-2">
+      {value.map((r, i) => {
+        const ph = TASK_INTERCEPT_KIND_OPTIONS.find((o) => o.value === r.kind)?.placeholder ?? "";
+        return (
+          <div key={i} className="flex items-center gap-2">
+            <NativeSelect
+              size="sm"
+              className="w-[84px] shrink-0"
+              value={r.action}
+              onChange={(e) => update(i, { action: e.target.value as "block" | "allow" })}
+            >
+              <NativeSelectOption value="block">拦截</NativeSelectOption>
+              <NativeSelectOption value="allow">允许</NativeSelectOption>
+            </NativeSelect>
+            <NativeSelect
+              size="sm"
+              className="w-[120px] shrink-0"
+              value={r.kind}
+              onChange={(e) => update(i, { kind: e.target.value as AssetInterceptKind })}
+            >
+              {TASK_INTERCEPT_KIND_OPTIONS.map((o) => (
+                <NativeSelectOption key={o.value} value={o.value}>
+                  {o.label}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+            <Input
+              className="flex-1"
+              placeholder={ph}
+              value={r.pattern}
+              onChange={(e) => update(i, { pattern: e.target.value })}
+            />
+            <Input
+              className="w-[120px] shrink-0"
+              placeholder="备注(可选)"
+              value={r.note}
+              onChange={(e) => update(i, { note: e.target.value })}
+            />
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="text-destructive hover:text-destructive size-8 shrink-0"
+              onClick={() => remove(i)}
+            >
+              <Trash2Icon className="size-4" />
+            </Button>
+          </div>
+        );
+      })}
+      <Button type="button" size="sm" variant="outline" className="w-fit" onClick={add}>
+        <PlusIcon className="size-4" /> 添加一条
+      </Button>
+    </div>
+  );
+}
+
 function CreateTaskSheet({
   tasks,
   categories,
@@ -3059,6 +3148,7 @@ function CreateTaskSheet({
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
+  const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3125,6 +3215,9 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        interceptRules: interceptRules
+          .map((r) => ({ ...r, pattern: r.pattern.trim() }))
+          .filter((r) => r.pattern !== ""),
       });
       toast.success("任务已创建");
       setName("");
@@ -3139,6 +3232,7 @@ function CreateTaskSheet({
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
+      setInterceptRules([]);
       setUploadCount(0);
       draftIdRef.current = "";
       setOpen(false);
@@ -3272,6 +3366,13 @@ function CreateTaskSheet({
               <FieldDescription>
                 创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
                 作为范围上下文；不会自动生成意图或强制改变执行目标。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
+              <TaskInterceptRulesField value={interceptRules} onChange={setInterceptRules} />
+              <FieldDescription>
+                仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
               </FieldDescription>
             </Field>
             <Field>

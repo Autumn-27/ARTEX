@@ -4,12 +4,65 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
 )
+
+// assetInterceptCandidates 提取一条待插入资产输入项的 域名/IP/URL 候选串，用于资产拦截匹配。
+// URL 的 host 会拆出归类，使「只带 URL」的服务/端点资产也能被 域名/IP 规则命中。
+func assetInterceptCandidates(item assetInputItem) (domains, ips, urls []string) {
+	add := func(dst *[]string, s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			*dst = append(*dst, s)
+		}
+	}
+	add(&domains, item.Domain)
+	for _, d := range item.BoundDomains {
+		add(&domains, d)
+	}
+	add(&ips, item.IP)
+	add(&ips, item.ServiceIP)
+	add(&urls, item.URL)
+	if item.URL != "" {
+		if u, err := url.Parse(item.URL); err == nil {
+			if h := u.Hostname(); h != "" {
+				if net.ParseIP(h) != nil {
+					add(&ips, h)
+				} else {
+					add(&domains, h)
+				}
+			}
+		}
+	}
+	return domains, ips, urls
+}
+
+// assetInputLabel 返回一条待插入资产的简短标识，用于拦截说明消息。
+func assetInputLabel(item assetInputItem) string {
+	typ := strings.TrimSpace(item.Type)
+	var target string
+	switch {
+	case strings.TrimSpace(item.Domain) != "":
+		target = strings.TrimSpace(item.Domain)
+	case strings.TrimSpace(item.URL) != "":
+		target = strings.TrimSpace(item.URL)
+	case strings.TrimSpace(item.IP) != "":
+		target = strings.TrimSpace(item.IP)
+	case strings.TrimSpace(item.ServiceIP) != "":
+		target = strings.TrimSpace(item.ServiceIP)
+	default:
+		target = "(未知)"
+	}
+	if typ != "" {
+		return fmt.Sprintf("[%s] %s", typ, target)
+	}
+	return target
+}
 
 // =====================================================================
 // Unified asset insertion tools
@@ -174,7 +227,28 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			var results []result
 			var errs []errEntry
 
+			// 资产闸门规则一次性载入；读取失败则跳过判定（不阻断插入）。
+			// 拦截规则 = 全局 ∪ 任务级 block；允许规则 = 任务级 allow。
+			blockRules, _ := t.as.ListAssetInterceptRules()
+			var allowRules []db.AssetInterceptRule
+			if t.taskID > 0 {
+				if tb, ta, err := t.as.TaskInterceptRulesSplit(t.taskID); err == nil {
+					blockRules = append(blockRules, tb...)
+					allowRules = ta
+				}
+			}
+
 			for i, item := range a.Assets {
+				// 资产闸门：先拦截后允许，被拒的资产禁止插入（跳过 Upsert 及后续副作用）。
+				domains, ips, urls := assetInterceptCandidates(item)
+				if d := db.EvaluateAssetGate(blockRules, allowRules, domains, ips, urls); !d.Allowed {
+					errs = append(errs, errEntry{
+						Index: i,
+						Error: fmt.Sprintf("资产 %s %s，已禁止插入", assetInputLabel(item), d.Reason),
+					})
+					continue
+				}
+
 				typ := strings.TrimSpace(item.Type)
 				var id int64
 				var err error
