@@ -1191,6 +1191,27 @@ export interface InterceptRule {
   updated_at: string;
 }
 
+// ---- Asset Intercept Rules（资产拦截：全局黑名单） ----
+export type AssetInterceptKind =
+  | "exact_domain"
+  | "exact_ip"
+  | "exact_url"
+  | "fuzzy_domain"
+  | "fuzzy_ip"
+  | "fuzzy_url"
+  | "cidr";
+
+export interface AssetInterceptRule {
+  id: number;
+  enabled: boolean;
+  kind: AssetInterceptKind;
+  pattern: string;
+  note: string;
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface InterceptPending {
   decision_source?: "rule" | "model" | "unknown" | "";
   id: number;

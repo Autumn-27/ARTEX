@@ -14,6 +14,7 @@ import type {
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
+  AssetInterceptRule,
   Audit,
   BatchCategoryItem,
   BatchControlItem,
@@ -1098,6 +1099,16 @@ export const api = {
   deleteInterceptRule: (id: number) => del<{ deleted: number }>(`/intercept/rules/${id}`),
   toggleInterceptRule: (id: number, enabled: boolean) =>
     post<{ ok: boolean; enabled: boolean }>(`/intercept/rules/${id}/toggle`, { enabled }),
+
+  // ---- asset intercept rules（资产拦截：全局黑名单） ----
+  assetInterceptRules: () => get<{ rules: AssetInterceptRule[] }>("/asset-intercept/rules").then((r) => arr(r.rules)),
+  createAssetInterceptRule: (rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
+    post<AssetInterceptRule>("/asset-intercept/rules", rule),
+  updateAssetInterceptRule: (id: number, rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
+    put<AssetInterceptRule>(`/asset-intercept/rules/${id}`, rule),
+  deleteAssetInterceptRule: (id: number) => del<{ deleted: number }>(`/asset-intercept/rules/${id}`),
+  toggleAssetInterceptRule: (id: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/asset-intercept/rules/${id}/toggle`, { enabled }),
 
   // ---- intercept pending (ask) ----
   interceptPending: () => get<{ pending: InterceptPending[] }>("/intercept/pending").then((r) => arr(r.pending)),

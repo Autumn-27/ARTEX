@@ -1220,3 +1220,31 @@ CREATE INDEX IF NOT EXISTS idx_side_requests_history ON side_question_requests(s
 -- Additive v3 archive fields; old archives restore these as empty objects.
 ALTER TABLE side_question_sessions ADD COLUMN IF NOT EXISTS memory JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE side_question_requests ADD COLUMN IF NOT EXISTS context_info JSONB NOT NULL DEFAULT '{}';
+
+-- =====================================================================
+-- 资产拦截规则（全局黑名单）
+-- 独立于 §K 命令拦截(intercept_rules)：intercept_rules 匹配工具名/入参文本，
+-- 这张表匹配「目标资产」——全等/模糊的域名·IP·URL 以及 CIDR 网段。
+-- 仅存规则；具体的匹配/拦截逻辑在别处实现。
+-- kind 七种：
+--   exact_domain / exact_ip / exact_url  —— 全等匹配
+--   fuzzy_domain / fuzzy_ip / fuzzy_url  —— 模糊匹配
+--   cidr                                 —— CIDR 网段
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS asset_intercept_rules (
+    id          BIGSERIAL PRIMARY KEY,
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    kind        TEXT NOT NULL CHECK (kind IN (
+                    'exact_domain', 'exact_ip', 'exact_url',
+                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
+                    'cidr')),
+    pattern     TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    builtin     BOOLEAN NOT NULL DEFAULT false,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_asset_intercept_enabled ON asset_intercept_rules(enabled);
+DROP TRIGGER IF EXISTS trg_asset_intercept_rules_upd ON asset_intercept_rules;
+CREATE TRIGGER trg_asset_intercept_rules_upd BEFORE UPDATE ON asset_intercept_rules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
