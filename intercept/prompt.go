@@ -30,14 +30,13 @@ func EffectiveJudgePrompt(prompt string) string {
 // Output is an application contract, also applied to saved custom policies.
 // It changes the explanation format, not the user's policy or rule precedence.
 const JudgeOutputContract = `# 裁决输出协议（替代前文的旧输出格式要求，不改变判定策略）
-仅输出一个 JSON 对象，恰好包含 decision 和 comment 两个字符串字段，不要代码块或额外文字。
-回复必须以 { 开始、以 } 结束；键名和字符串值使用双引号。不得输出 YAML 格式的 decision: ... 或 comment: ...。
+只输出一个 JSON 对象：第一个字符必须是 {、最后一个字符必须是 }。不要输出任何思考、前言、说明或用代码块（反引号栅栏）包裹；JSON 前后不得有其他字符。
+对象恰好包含 decision 和 comment 两个字符串字段；键名与字符串值用双引号。不得输出 YAML 形式的 decision: ... / comment: ...。
 decision 只能是 allow、ask、deny，分别表示允许、转人工审批、拒绝。
-三种裁决都必须给出说明。comment 严格使用“实际操作：...；成功后的后果：...；命中规则：...”结构，三项均不可为空，合计不超过 500 个汉字。
-实际操作：只描述当前 tool_name 和 arguments 真正执行的行为。background.text 中的多步骤请求不能并入本次操作。用户要求“先创建再读取”，而当前 Bash 的 command 仅为 cat 时，本次实际操作只能写“读取文件”，不能写“创建并读取”，应按当前审查策略中实际适用的条款说明。
-Write/Edit 中的报告正文、代码示例或历史记述是文件内容，不是本次已经执行的命令；写一份上传验证报告不能描述为本次上传并执行了代码。不得复述下方示例中本次参数未包含的行为或后果。
-成功后的后果：说明本次调用成功时的直接效果，不宣称尚未执行的操作已经成功；如涉及覆盖或副作用，说明可见事实与不确定性。
-命中规则：填写审查策略中实际适用的编号或明确条款；默认策略允许用 A1–A6，拒绝用 D1–D6，转人工用 ASK 并注明缺失的事实，默认允许用 DEFAULT。自定义策略使用其真实编号或条款，不得虚构。
+comment 严格为“实际操作：…；成功后的后果：…；命中规则：…”三段，三项均不可为空；每段一句话、务必精简，整个 comment 不超过 120 个汉字（宁短勿长，避免被截断）。
+实际操作：只描述当前 tool_name 与 arguments 真正执行的行为；background 中的多步骤请求、Write/Edit 写入的正文或示例都不算本次已执行的动作（如 command 仅 cat 就只写“读取文件”）。
+成功后的后果：本次调用成功时的直接效果，不把尚未执行的操作说成已成功。
+命中规则：填审查策略中实际适用的编号（默认策略：允许 A1–A6、拒绝 D1–D6、转人工 ASK、默认放行 DEFAULT），不得虚构。
 `
 
 // DefaultJudgePrompt is the built-in system prompt for the LLM fallback judge.
