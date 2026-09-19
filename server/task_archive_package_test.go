@@ -94,6 +94,39 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTaskArchivePackageSkipsSymlink(t *testing.T) {
+	dataDir := t.TempDir()
+	payload := filepath.Join(dataDir, "payload")
+	if err := os.MkdirAll(payload, archiveDirMode); err != nil {
+		t.Fatal(err)
+	}
+	regular := filepath.Join(payload, "keep.txt")
+	if err := os.WriteFile(regular, []byte("keep me"), archiveFileMode); err != nil {
+		t.Fatal(err)
+	}
+	// 工作目录里出现的符号链接应被跳过，而不是让整个归档失败。
+	if err := os.Symlink(regular, filepath.Join(payload, "link.txt")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	archivePath := filepath.Join(dataDir, "archive.tar.zst")
+	snapshot := &pgdb.TaskArchiveSnapshot{FormatVersion: pgdb.TaskArchiveFormatVersion, TaskID: 42}
+	_, _, checksum, err := writeTaskArchivePackage(archivePath, payload, snapshot)
+	if err != nil {
+		t.Fatalf("archive should skip symlink, not fail: %v", err)
+	}
+	extracted := filepath.Join(dataDir, "restore")
+	if err := extractTaskArchivePackage(archivePath, checksum, extracted); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(extracted, "keep.txt")); err != nil || string(got) != "keep me" {
+		t.Fatalf("regular file not archived: got=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(extracted, "link.txt")); !os.IsNotExist(err) {
+		t.Fatalf("symlink should have been skipped, but link.txt exists: %v", err)
+	}
+}
+
 func TestTaskArchiveStageJournalRollsBackInterruptedMoves(t *testing.T) {
 	dataDir := t.TempDir()
 	taskFile := filepath.Join(dataDir, "tasks", "42", "evidence.txt")
