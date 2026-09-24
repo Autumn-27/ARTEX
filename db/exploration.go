@@ -808,6 +808,16 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('done','blocked','exhaus
 	return n, err
 }
 
+// CountOpenIntents counts this exploration's open intents — graph_overview's
+// frontier_open, so the planner knows open_intents (capped at the top-N by
+// priority) is a truncated view and there may be more claimable work.
+func (s *ExplorationStore) CountOpenIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='open'`, s.expID).Scan(&n)
+	return n, err
+}
+
 // GetNode returns one node of this exploration by id (nil, nil if not found).
 func (s *ExplorationStore) GetNode(id int64) (*Node, error) {
 	n, err := scanNode(s.db.QueryRow(`SELECT `+nodeCols+` FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, id, s.expID))

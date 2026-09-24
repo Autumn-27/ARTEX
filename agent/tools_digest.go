@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
@@ -52,6 +53,50 @@ func activeDigestBodies(store *db.ExplorationStore) []map[string]any {
 		out = append(out, map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)})
 	}
 	return out
+}
+
+// coldDigestsRecent returns the current task's active digests as flat bodies for
+// graph_overview, ordered by the recency of their freshest member (max member id ≈
+// latest cooled node — a digest near the live frontier is likelier relevant), and
+// capped at `cap`. Overflow digest ids are returned separately (moreIDs) so they
+// stay reachable via expand_digest even when not shown inline — cold_digests is the
+// only exit for folded cold nodes.
+func (t *ToolSet) coldDigestsRecent(cap int) (shown []map[string]any, moreIDs []int64) {
+	ads, err := t.ts.ActiveDigests()
+	if err != nil || len(ads) == 0 {
+		return nil, nil
+	}
+	type dg struct {
+		id        int64
+		entry     map[string]any
+		freshness int64 // max member id (ids are monotonic ≈ creation time)
+	}
+	items := make([]dg, 0, len(ads))
+	for _, d := range ads {
+		var p struct {
+			Body string `json:"body"`
+		}
+		_ = json.Unmarshal(d.Payload, &p)
+		ms, _ := t.ts.DigestMembers(d.ID) // sorted asc → last = freshest
+		var fresh int64
+		if len(ms) > 0 {
+			fresh = ms[len(ms)-1]
+		}
+		items = append(items, dg{
+			id:        d.ID,
+			entry:     map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)},
+			freshness: fresh,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].freshness > items[j].freshness })
+	for i, it := range items {
+		if i < cap {
+			shown = append(shown, it.entry)
+		} else {
+			moreIDs = append(moreIDs, it.id)
+		}
+	}
+	return shown, moreIDs
 }
 
 // hiddenMembersFor returns a predicate telling whether a member is hidden (folded
