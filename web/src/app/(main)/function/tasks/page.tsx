@@ -950,7 +950,9 @@ export default function TasksPage() {
                       onSort={sortTasksBy}
                     />
                     <TableHead className="text-center">目标进度</TableHead>
-                    <TableHead className="text-center">漏洞</TableHead>
+                    <TableHead className="text-center" title="严重 / 高 / 中 / 低">
+                      漏洞 <span className="text-muted-foreground font-normal">严/高/中/低</span>
+                    </TableHead>
                     <TableHead className="text-center">运行中 Worker</TableHead>
                     <SortableTaskHead
                       field="created"
@@ -1217,11 +1219,25 @@ const TaskRow = React.memo(function TaskRow({
         )}
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
-        {task.findings && task.findings > 0 ? (
-          <span className="text-destructive font-medium">{task.findings}</span>
-        ) : (
-          <span className="text-muted-foreground">0</span>
-        )}
+        {(() => {
+          const f = task.findings;
+          const total = f ? f.critical + f.high + f.medium + f.low : 0;
+          if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
+          const seg = (n: number, cls: string) => (
+            <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>
+          );
+          return (
+            <span className="font-medium whitespace-nowrap" title="严重 / 高 / 中 / 低">
+              {seg(f.critical, "text-rose-600 dark:text-rose-400")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.high, "text-red-600 dark:text-red-400")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.medium, "text-amber-600 dark:text-amber-400")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.low, "text-slate-600 dark:text-slate-400")}
+            </span>
+          );
+        })()}
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
         {task.in_flight && task.in_flight > 0 ? (

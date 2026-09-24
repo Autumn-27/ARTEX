@@ -1293,13 +1293,17 @@ func (d *DB) LastActivityAll() (map[int64]int64, error) {
 // GoalCounts is the goal summary for one exploration.
 type GoalCounts struct{ Total, Met int }
 
+// FindingSeverityCounts breaks a task's findings down by severity for the task
+// list (severity 白名单外/为空的记录不计入任一档)。
+type FindingSeverityCounts struct{ Critical, High, Medium, Low int }
+
 // TaskListMetrics contains the aggregates rendered in task lists.
 type TaskListMetrics struct {
 	Tokens         TokenUsage
 	LastActivity   int64
 	Goals          GoalCounts
-	RunningIntents int // kind='intent' 且 state='running' 的条数，即运行中 Worker 数
-	Findings       int // findings 表里该任务的漏洞条数
+	RunningIntents int                   // kind='intent' 且 state='running' 的条数，即运行中 Worker 数
+	Findings       FindingSeverityCounts // findings 表里该任务的漏洞数（按严重度分档）
 }
 
 // TaskListMetricsAll returns list aggregates for every live task in one query.
@@ -1316,7 +1320,10 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		       COALESCE(goal_metrics.total,0),
 		       COALESCE(goal_metrics.met,0),
 		       COALESCE(intent_metrics.running,0),
-		       COALESCE(finding_metrics.findings,0)
+		       COALESCE(finding_metrics.critical,0),
+		       COALESCE(finding_metrics.high,0),
+		       COALESCE(finding_metrics.medium,0),
+		       COALESCE(finding_metrics.low,0)
 		FROM tasks task
 		LEFT JOIN LATERAL (
 			SELECT SUM(input_tokens) AS input_tokens,
@@ -1345,7 +1352,10 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
 		) intent_metrics ON true
 		LEFT JOIN LATERAL (
-			SELECT COUNT(*) AS findings
+			SELECT COUNT(*) FILTER (WHERE severity='critical') AS critical,
+			       COUNT(*) FILTER (WHERE severity='high')     AS high,
+			       COUNT(*) FILTER (WHERE severity='medium')   AS medium,
+			       COUNT(*) FILTER (WHERE severity='low')      AS low
 			FROM findings
 			WHERE task_id=task.id
 		) finding_metrics ON true
@@ -1368,7 +1378,10 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			&metrics.Goals.Total,
 			&metrics.Goals.Met,
 			&metrics.RunningIntents,
-			&metrics.Findings,
+			&metrics.Findings.Critical,
+			&metrics.Findings.High,
+			&metrics.Findings.Medium,
+			&metrics.Findings.Low,
 		); err != nil {
 			return nil, err
 		}

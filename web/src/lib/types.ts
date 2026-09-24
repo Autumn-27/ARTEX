@@ -23,7 +23,7 @@ export interface Task {
   queued?: boolean;
   active?: boolean;
   in_flight?: number;
-  findings?: number; // 该任务已登记的漏洞数
+  findings?: { critical: number; high: number; medium: number; low: number }; // 已登记漏洞数(按严重度分档)
   last_activity?: string;
   stalled?: boolean;
   goals_total?: number;
