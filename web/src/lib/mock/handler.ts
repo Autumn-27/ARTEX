@@ -1192,6 +1192,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       paused: false,
       active: true,
       in_flight: 0,
+      findings: 0,
       stalled: false,
       goals_total: 0,
       goals_met: 0,

@@ -1040,6 +1040,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		dto.GoalsTotal = metric.Goals.Total
 		dto.GoalsMet = metric.Goals.Met
 		dto.InFlight = metric.RunningIntents
+		dto.Findings = metric.Findings
 		dtos = append(dtos, dto)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})

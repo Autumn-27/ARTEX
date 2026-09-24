@@ -23,6 +23,7 @@ export interface Task {
   queued?: boolean;
   active?: boolean;
   in_flight?: number;
+  findings?: number; // 该任务已登记的漏洞数
   last_activity?: string;
   stalled?: boolean;
   goals_total?: number;
