@@ -2,8 +2,8 @@ package agent
 
 // cold-digest §6: graph_overview folding + the restore tools.
 //
-//	activeDigestBodies — builds the folded cold region for graph_overview:
-//	  cold_digests (flat {id, body, member_count}).
+//	coldDigestsRecent — builds the folded cold region for graph_overview:
+//	  cold_digests (flat {id, body, member_count}), newest-member first, capped.
 //	expand_digest(id)  — level-1 restore: a digest's member compact list.
 
 import (
@@ -35,34 +35,15 @@ func (t *ToolSet) digestMemberEntry(store *db.ExplorationStore, id int64) map[st
 	return m
 }
 
-// activeDigestBodies returns [{id, body, member_count}] for a store's active
-// digests — the folded cold region as flat bodies (§6.1). Shared by the current
-// task overview and the read-only related-task overview (§2 cross-task reuse).
-func activeDigestBodies(store *db.ExplorationStore) []map[string]any {
-	ads, err := store.ActiveDigests()
-	if err != nil || len(ads) == 0 {
-		return nil
-	}
-	out := make([]map[string]any, 0, len(ads))
-	for _, d := range ads {
-		var p struct {
-			Body string `json:"body"`
-		}
-		_ = json.Unmarshal(d.Payload, &p)
-		ms, _ := store.DigestMembers(d.ID)
-		out = append(out, map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)})
-	}
-	return out
-}
-
-// coldDigestsRecent returns the current task's active digests as flat bodies for
+// coldDigestsRecent returns a store's active digests as flat bodies for
 // graph_overview, ordered by the recency of their freshest member (max member id ≈
 // latest cooled node — a digest near the live frontier is likelier relevant), and
 // capped at `cap`. Overflow digest ids are returned separately (moreIDs) so they
 // stay reachable via expand_digest even when not shown inline — cold_digests is the
-// only exit for folded cold nodes.
-func (t *ToolSet) coldDigestsRecent(cap int) (shown []map[string]any, moreIDs []int64) {
-	ads, err := t.ts.ActiveDigests()
+// only exit for folded cold nodes. Shared by the current task overview and the
+// read-only related-task overview (§2 cross-task reuse).
+func coldDigestsRecent(store *db.ExplorationStore, cap int) (shown []map[string]any, moreIDs []int64) {
+	ads, err := store.ActiveDigests()
 	if err != nil || len(ads) == 0 {
 		return nil, nil
 	}
@@ -77,7 +58,7 @@ func (t *ToolSet) coldDigestsRecent(cap int) (shown []map[string]any, moreIDs []
 			Body string `json:"body"`
 		}
 		_ = json.Unmarshal(d.Payload, &p)
-		ms, _ := t.ts.DigestMembers(d.ID) // sorted asc → last = freshest
+		ms, _ := store.DigestMembers(d.ID) // sorted asc → last = freshest
 		var fresh int64
 		if len(ms) > 0 {
 			fresh = ms[len(ms)-1]

@@ -501,7 +501,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// cold-digest §6.1: 折叠冷区的 digest body，按最新成员时间降序取前 N；被截的更旧 digest
 	// 只给裸 id（仍可 expand_digest 展开），避免冷区唯一出口被无限拉长。
 	const coldDigestsCap = 15
-	if cds, more := t.coldDigestsRecent(coldDigestsCap); len(cds) > 0 {
+	if cds, more := coldDigestsRecent(t.ts, coldDigestsCap); len(cds) > 0 {
 		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
 		if len(more) > 0 {
 			out["cold_digests_more"] = more // 被截断的更旧 digest 的 id；用 expand_digest(id) 展开
@@ -558,14 +558,15 @@ func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
 }
 
 const (
-	relatedOverviewTotalTextRunes     = 48_000
-	relatedOverviewMaxTextPerSource   = 8_000
-	relatedOverviewMaxGoalsPerSource  = 8
-	relatedOverviewMaxHintsPerSource  = 6
-	relatedOverviewMaxFactsPerSource  = 12
-	relatedOverviewMaxFindingsPerTask = 6
-	relatedOverviewMaxIntentsPerTask  = 8
-	relatedOverviewMaxScopePerSource  = 12
+	relatedOverviewTotalTextRunes      = 48_000
+	relatedOverviewMaxTextPerSource    = 8_000
+	relatedOverviewMaxGoalsPerSource   = 8
+	relatedOverviewMaxHintsPerSource   = 6
+	relatedOverviewMaxFactsPerSource   = 12
+	relatedOverviewMaxFindingsPerTask  = 6
+	relatedOverviewMaxIntentsPerTask   = 8
+	relatedOverviewMaxScopePerSource   = 12
+	relatedOverviewMaxDigestsPerSource = 6
 )
 
 // overviewTextBudget bounds inherited prompt text while preserving a fair slice
@@ -800,14 +801,18 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			}
 		}
 		item["recent_intent_results"] = intentResults
-		// §2 cross-task: the source task's folded cold region, read-only. Members are
+		// §2 cross-task: the source task's folded cold region, read-only, newest-member
+		// first & capped like the current task's. Members (and overflow digests) are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		if cds := activeDigestBodies(ts); len(cds) > 0 {
+		if cds, more := coldDigestsRecent(ts, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
 			for _, cd := range cds {
 				cd["inherited"] = true
 				cd["source_task_id"] = source.Task.TaskID
 			}
 			item["cold_digests"] = cds
+			if len(more) > 0 {
+				item["cold_digests_more"] = more // 被截断的更旧 digest 的 id；expand_digest(id) 展开
+			}
 		}
 		if statsErr == nil {
 			item["node_stats"] = stats
