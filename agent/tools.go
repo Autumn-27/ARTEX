@@ -419,8 +419,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// (below), not the flat recent_* lists. `covered` maps member id → its digest id.
 	// §6 render-time revival check: a covered member that has become hot again (a new
 	// intent derived from it) must reappear this round — so `hidden` folds a member out
-	// only when it is covered AND still cold. covered_members (built from hidden) lets a
-	// parents/yields id pointing into a live fold stay resolvable (§6.5 dangling lineage).
+	// only when it is covered AND still cold.
 	covered, _ := t.ts.CoveredMembers()
 	// Hot set at render time serves two §6 needs: (1) a covered member that revived
 	// (now hot) must reappear this round; (2) the 60-cap must never truncate hot
@@ -466,57 +465,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物、单任务通常也不多 → 直接全量带进概览（不像 facts 那样
 	// 只给最近窗口），让 planner 每轮判目标时一眼看全所有确认漏洞，无需再调 list_findings。
-	// 每条只留 {id, summary, evidence?, from_intent?, assets?}：evidence 是 report_finding 的
-	// PoC 文本（payload.evidence.poc）；from_intent 是产生本漏洞的意图；assets 直接给受影响资产
-	// 的可读内容（url/域名/ip:port 等，不再是裸 id）——锚定关系存于 exploration_anchors、经 findings
-	// 表回填。vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
-	var findingMeta map[int64]db.FindingMeta // node_id -> 锚定资产等；仅任务上下文可查
-	assetByID := map[int64]*db.Asset{}
-	if t.as != nil && t.taskID > 0 {
-		findingMeta, _ = t.as.FindingMetaByNodeID(t.taskID)
-		idSet := map[int64]struct{}{}
-		for _, meta := range findingMeta {
-			for _, aid := range meta.AssetIDs {
-				idSet[aid] = struct{}{}
-			}
-		}
-		if len(idSet) > 0 {
-			ids := make([]int64, 0, len(idSet))
-			for aid := range idSet {
-				ids = append(ids, aid)
-			}
-			if assets, err := t.as.GetByIDs(ids); err == nil {
-				for _, a := range assets {
-					assetByID[a.ID] = a
-				}
-			}
-		}
-	}
+	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
+	// evidence/assets/vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
 	findingList := make([]map[string]any, 0, len(vulnNodes))
 	for _, n := range vulnNodes {
 		var fp map[string]any
 		_ = json.Unmarshal(n.Payload, &fp)
 		m := map[string]any{"id": n.ID, "summary": fp["summary"]}
-		if ev, ok := fp["evidence"].(map[string]any); ok {
-			if poc, ok := ev["poc"].(string); ok && poc != "" {
-				m["evidence"] = poc
-			}
-		}
 		if from := factFrom[n.ID]; from > 0 {
 			m["from_intent"] = from // 本漏洞由哪个意图产生
-		}
-		if meta, ok := findingMeta[n.ID]; ok && len(meta.AssetIDs) > 0 {
-			assets := make([]string, 0, len(meta.AssetIDs))
-			for _, aid := range meta.AssetIDs {
-				if a := assetByID[aid]; a != nil {
-					if v := assetValue(a); v != "" {
-						assets = append(assets, v)
-						continue
-					}
-				}
-				assets = append(assets, fmt.Sprintf("#%d", aid)) // 资产已删/查不到 → 退回 id 标记，别丢信息
-			}
-			m["assets"] = assets // 受影响资产的可读内容
 		}
 		findingList = append(findingList, m)
 	}
@@ -568,23 +525,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		compactIntents(doneHot, parentsOf, yieldsOf),
 		compactIntents(doneCold[:keepColdDone], parentsOf, yieldsOf)...)
 	out["recent_facts"] = append(recentFactsHot, recentFactsCold[:keepColdFacts]...) // {id, summary, from_intent, confidence?}；详情用 node_detail(id)
-	// cold-digest §6.1/§6.2: the folded cold region + the per-asset directory that
-	// collapses independent directions, plus the dangling-lineage resolver map.
-	if cds, cidx := t.coldDigestOverview(); len(cds) > 0 {
+	// cold-digest §6.1: the folded cold region as flat digest bodies.
+	if cds := activeDigestBodies(t.ts); len(cds) > 0 {
 		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
-		out["cold_index"] = cidx  // [{asset, asset_id, digest_ids}] —— 按资产收敛方向 (§6.2)
-	}
-	if len(covered) > 0 {
-		cm := make(map[string]int64, len(covered))
-		for member, dig := range covered {
-			if hotAtRender[member] {
-				continue // revived → shown live this round, not a dangling folded id
-			}
-			cm[strconv.FormatInt(member, 10)] = dig
-		}
-		if len(cm) > 0 {
-			out["covered_members"] = cm // 悬空血缘 id → 它属于哪个 digest；用 expand_digest 展开 (§6.5)
-		}
 	}
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
@@ -597,9 +540,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["related_tasks"] = t.relatedTaskOverviews()
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
 	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
-	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 scope/hosts(范围边界与目标主机的
-	// 感知信息，company 关联经由 scope 在此浮现)，丢弃 denominator/tested/pct/by_type/note
-	// 等覆盖度度量，避免污染上下文、也不诱导已隐藏的 add_task_scope/list_untested_assets。
+	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 host_count(目标主机数的感知信息)，
+	// 丢弃 denominator/tested/pct/by_type/note 等覆盖度度量，避免污染上下文、也不诱导
+	// 已隐藏的 add_task_scope/list_untested_assets。
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
 			m := map[string]any{}
@@ -616,65 +559,6 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 						m["pct"] = cov.Pct
 					}
 				}
-			}
-			// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
-			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。覆盖度开关无关，始终提供。
-			if rows, err := t.as.ListTaskScopeWithSources(t.taskID); err == nil && len(rows) > 0 {
-				scope := make([]map[string]any, 0, len(rows))
-				for _, r := range rows {
-					e := map[string]any{"kind": r.Kind, "source": r.Source, "task_id": r.TaskID}
-					if r.TaskID != t.taskID {
-						inheritedMap(e, r.TaskID)
-					}
-					switch {
-					case r.Domain != "":
-						e["value"] = r.Domain
-					case r.Net != "":
-						e["value"] = r.Net
-					case r.Value != "":
-						e["value"] = r.Value
-					case r.CompanyID != nil:
-						e["company_id"] = *r.CompanyID
-						if t.cs != nil {
-							if company, err := t.cs.GetCompany(*r.CompanyID); err == nil && company != nil {
-								e["company_name"] = company.Name
-							}
-							if rules, err := t.cs.GetScope(*r.CompanyID); err == nil {
-								keywords := make([]string, 0)
-								companyScope := make([]map[string]any, 0, len(rules))
-								for _, rule := range rules {
-									value := rule.Raw
-									if value == "" {
-										switch rule.Kind {
-										case "domain":
-											value = rule.Domain
-										case "ip", "cidr":
-											value = rule.Net
-										default:
-											value = rule.Value
-										}
-									}
-									entry := map[string]any{"kind": rule.Kind, "value": value}
-									if rule.Reason != "" {
-										entry["reason"] = rule.Reason
-									}
-									companyScope = append(companyScope, entry)
-									if rule.Kind == "keyword" && rule.Raw != "" {
-										keywords = append(keywords, rule.Raw)
-									}
-								}
-								if len(companyScope) > 0 {
-									e["company_scope"] = companyScope
-								}
-								if len(keywords) > 0 {
-									e["company_keywords"] = keywords
-								}
-							}
-						}
-					}
-					scope = append(scope, e)
-				}
-				m["scope"] = scope
 			}
 			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
 				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
@@ -1012,35 +896,6 @@ func compactNode(n *db.Node) map[string]any {
 		inheritedMap(m, n.SourceTaskID)
 	}
 	return m
-}
-
-// assetValue distills an asset to its most identifying human-readable string
-// (url / domain / ip[:port] / app / service name) so finding_list can show the
-// affected asset's content inline instead of a bare id. Empty when nothing
-// identifying is set (caller falls back to #id).
-func assetValue(a *db.Asset) string {
-	switch {
-	case a.URL != "":
-		if a.Method != "" {
-			return a.Method + " " + a.URL // 接口：带上 HTTP 方法
-		}
-		return a.URL
-	case a.Domain != "":
-		if a.Port != nil {
-			return fmt.Sprintf("%s:%d", a.Domain, *a.Port)
-		}
-		return a.Domain
-	case a.IP != "":
-		if a.Port != nil {
-			return fmt.Sprintf("%s:%d", a.IP, *a.Port)
-		}
-		return a.IP
-	case a.AppName != "":
-		return a.AppName
-	case a.ServiceName != "":
-		return a.ServiceName
-	}
-	return ""
 }
 
 // compactFinding is compactNode plus the vuln-specific vulnclass/severity.
@@ -2196,7 +2051,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
-		t.expandDigest(), t.expandIndex(),
+		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
