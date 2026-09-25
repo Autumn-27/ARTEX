@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver ("pgx")
 )
+
+// dbNameRe 是 CREATE DATABASE 拼接前对库名的严格白名单（见 ensureDatabase）。
+var dbNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 //go:embed schema.sql
 var schemaSQL string
@@ -117,6 +121,11 @@ func ensureDatabase(dsn string) error {
 	var exists bool
 	_ = admin.QueryRow(`SELECT true FROM pg_database WHERE datname=$1`, dbName).Scan(&exists)
 	if !exists {
+		// 数据库名来自 DSN（本机配置，非 HTTP 输入），但 CREATE DATABASE 不支持
+		// 参数化，标识符内双引号可逃逸——严格白名单后再拼接，杜绝注入。
+		if !dbNameRe.MatchString(dbName) {
+			return fmt.Errorf("create database: 非法库名 %q（仅允许字母/数字/下划线，且不以数字开头）", dbName)
+		}
 		if _, err := admin.Exec(`CREATE DATABASE "` + dbName + `"`); err != nil {
 			return fmt.Errorf("create database %q: %w", dbName, err)
 		}

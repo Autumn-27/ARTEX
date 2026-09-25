@@ -23,6 +23,18 @@ cd "$(dirname "$0")" || exit 1
 BIN=./artex
 [ -x "$BIN" ] || { echo "[artex] 找不到可执行文件 $BIN" >&2; exit 1; }
 
+# 监听地址/代理可用环境变量覆盖（未显式传 -addr/-proxy 参数时追加）：
+#   ARTEX_ADDR   默认 127.0.0.1:8787（仅本机回环；对外暴露请显式传 -addr :8787）
+#   ARTEX_PROXY  默认 127.0.0.1:8788（流量录制代理）
+case " $* " in
+ *" -addr "*) : ;;
+ *) set -- "$@" -addr "${ARTEX_ADDR:-127.0.0.1:8787}" ;;
+esac
+case " $* " in
+ *" -proxy "*) : ;;
+ *) set -- "$@" -proxy "${ARTEX_PROXY:-127.0.0.1:8788}" ;;
+esac
+
 RESTART_CODE=75
 MAX_DELAY=60
 

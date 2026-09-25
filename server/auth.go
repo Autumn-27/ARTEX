@@ -4,11 +4,15 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -80,7 +84,7 @@ func verifyJWT(tokenStr string, key []byte) bool {
 	return err == nil && t.Valid
 }
 
-// extractToken reads the JWT from Authorization: Bearer header,
+// extractToken reads the JWT from Authorization: Bearer ***
 // artex_token cookie, or ?token= query param (for SSE connections).
 func extractToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
@@ -90,6 +94,89 @@ func extractToken(r *http.Request) string {
 		return c.Value
 	}
 	return r.URL.Query().Get("token")
+}
+
+// --- 登录限流（防爆破）---
+//
+// loginLimiter 对 /api/auth/login 与 /api/auth/init 做按客户端 IP 的令牌桶限流：
+// 初始容量 5、每 60 秒补 1 个令牌，即最多约 5 次/分钟/IP，超出返回 429。
+// 内存态、单实例语义（多实例部署请在网关层再做一次限流）。清理协程定期删除
+// 空闲 30 分钟以上的条目，防止 IP 字典无限增长。
+type loginLimiter struct {
+	mu    sync.Mutex
+	burst int
+	m     map[string]*loginBucket
+}
+
+type loginBucket struct {
+	tokens     float64
+	lastRefill time.Time
+	lastSeen   time.Time
+}
+
+const (
+	loginRateBurst   = 5           // 突发上限
+	loginRefillEvery = time.Minute // 每 60s 补 1 个令牌
+	loginTTL         = 30 * time.Minute
+)
+
+var loginRateLimiter = newLoginLimiter()
+
+func newLoginLimiter() *loginLimiter {
+	l := &loginLimiter{burst: loginRateBurst, m: map[string]*loginBucket{}}
+	go l.gcLoop()
+	return l
+}
+
+func (l *loginLimiter) gcLoop() {
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		now := time.Now()
+		l.mu.Lock()
+		for ip, b := range l.m {
+			if now.Sub(b.lastSeen) > loginTTL {
+				delete(l.m, ip)
+			}
+		}
+		l.mu.Unlock()
+	}
+}
+
+// allow 返回 (是否放行, 重试等待秒数)。
+func (l *loginLimiter) allow(ip string) (bool, int) {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.m[ip]
+	if !ok {
+		b = &loginBucket{tokens: float64(l.burst), lastRefill: now}
+		l.m[ip] = b
+	}
+	b.lastSeen = now
+	elapsed := now.Sub(b.lastRefill).Seconds()
+	b.tokens = math.Min(float64(l.burst), b.tokens+elapsed/float64(loginRefillEvery.Seconds()))
+	b.lastRefill = now
+	if b.tokens >= 1 {
+		b.tokens--
+		return true, 0
+	}
+	wait := int(math.Ceil((1 - b.tokens) * loginRefillEvery.Seconds()))
+	return false, wait
+}
+
+// clientIP 取 X-Forwarded-For 首段（部署在反向代理后时）或 RemoteAddr 主机名。
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if h := strings.TrimSpace(strings.Split(xff, ",")[0]); h != "" {
+			return h
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // requireAuth wraps h with JWT validation.
@@ -126,6 +213,11 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/auth/init — sets the password for the first time; rejected if already set.
 func (s *Server) authInit(w http.ResponseWriter, r *http.Request) {
+	if ok, wait := loginRateLimiter.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(wait))
+		writeErr(w, 429, "请求过于频繁，请稍后再试")
+		return
+	}
 	pg := s.pg(w)
 	if pg == nil {
 		return
@@ -206,6 +298,11 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/auth/login — validates username/password and returns a JWT.
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
+	if ok, wait := loginRateLimiter.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(wait))
+		writeErr(w, 429, "请求过于频繁，请稍后再试")
+		return
+	}
 	pg := s.pg(w)
 	if pg == nil {
 		return

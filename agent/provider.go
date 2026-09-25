@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
@@ -416,6 +417,9 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
+	// SSRF 防护：先解析校验全部目标 IP（拒绝云元数据 169.254.0.0/16 等禁网段，
+	// 防 DNS 重绑定），再直连已校验 IP。base_url 用户可配，必须做出口校验。
+	netguard.ProtectTransport(transport)
 	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
 }
 
