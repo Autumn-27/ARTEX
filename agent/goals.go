@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -10,6 +11,7 @@ import (
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // goalsDefaultTmpl is the built-in EDITABLE body (段 [A]) of the goals-decomposer
@@ -108,6 +110,15 @@ func DecomposeGoals(ctx context.Context, prov llm.Provider, dataDir, goalText, d
 func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, emit func(db.Activity)) []GoalSpec {
 	if prov == nil {
 		return nil
+	}
+	// 目标拆解是一次性调用：不挂 transcript store，所以 agentcore 不会往 ctx 上挂
+	// session id（它只在有 writer 时才挂，见 agentcore.Prompt）。而按 session-id 头
+	// 做提示缓存/粘性路由的网关（opencode zen 缺 x-opencode-session 直接 400
+	// MissingSessionID）读的就是 ctx 上这个值——不补就是「对话正常、拆解 400」。
+	// 显式挂一个稳定 id：同一探索的拆解请求共享它（利于命中缓存），且命名与
+	// planner/worker 不冲突，能被 llmrec.parseSession 正确归因。
+	if ts != nil {
+		ctx = transcript.WithSessionID(ctx, fmt.Sprintf("exp%d-goals", ts.ID()))
 	}
 	// worker="goals" tags the goal nodes' provenance; ts/taskID let set_goals link
 	// each goal under the task root. This is the catalog's real set_goals tool, so a

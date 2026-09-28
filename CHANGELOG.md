@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### LLM
+
+#### 修复的问题
+
+- **修复自定义会话头在「一次性 LLM 调用」路径上不生效**：会话头的头值取自请求 context 上的 session id，而该 id 由 agentcore 仅在挂载了 transcript store 时才写入 context。目标拆解（第 0 轮）与冷节点压缩（§4 body 调用）都是不挂 store 的一次性调用，context 上没有 session id，网关侧读不到该头——对 opencode zen 这类「缺 `x-opencode-session` 直接 400 MissingSessionID」的端点，表现为「第 0 轮目标拆解 400 失败、后续 planner 轮次却完全正常」，且压缩失败只留一行日志、极难关联。现为这两条路径显式挂上按探索稳定的 session id（`exp<N>-goals` / `exp<N>-compactor`）：既能正常带上该头，也让 llmrec 能把这两条路径的 token 用量正确归因到对应探索（此前完全记不到）。
+
 ## [0.3.14] - 2026-09-24
 
 ### 任务列表
