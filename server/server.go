@@ -24,6 +24,7 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
@@ -923,7 +924,10 @@ func (s *Server) Handler() http.Handler {
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
 	root.Handle("/", s.webuiHandler())
-	return root
+	// 统一安全响应头：限制点击劫持 / 浏览器 MIME 嗅探 / 引用信息泄漏。
+	// 不设 Content-Security-Policy：前端是静态导出页且允许内联 bootstrap 脚本，
+	// 写错 CSP 会直接白屏；此项留给后续按页面拆分内联脚本后再启用。
+	return securityHeaders(root)
 }
 
 // --- handlers ---
@@ -1306,6 +1310,10 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	if err := netguard.CheckURL(cfg.BaseURL); err != nil {
+		writeErr(w, 400, "base_url 不合法: "+err.Error())
+		return
+	}
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
 	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
@@ -1365,6 +1373,10 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	if err := netguard.CheckURL(cfg.BaseURL); err != nil {
+		writeErr(w, 400, "base_url 不合法: "+err.Error())
+		return
+	}
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
@@ -3764,15 +3776,49 @@ func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
 
 // --- utils ---
 
+// cors 返回同源响应头：默认不设置 Access-Control-Allow-Origin（浏览器对同源请求
+// 无 CORS 限制，跨域请求则被拦截）。历史实现无条件设置 "*"+放行任意 Origin 预检，
+// 与 ?token= 令牌通道叠加后可被第三方页面跨域读取受保护数据。
+// 确需跨域部署（非同源前端）时，通过环境变量 ARTEX_CORS_ORIGINS 配置逗号分隔的
+// 精确 Origin 白名单（如 "https://artex.example.com"）。
+var corsAllowedOrigins = map[string]bool{}
+
+func init() {
+	if v := os.Getenv("ARTEX_CORS_ORIGINS"); strings.TrimSpace(v) != "" {
+		for _, o := range strings.Split(v, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				corsAllowedOrigins[o] = true
+			}
+		}
+	}
+}
+
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if origin := r.Header.Get("Origin"); origin != "" && corsAllowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders 给所有响应补上基础安全头（点击劫持 / MIME 嗅探 / 引用泄漏）。
+// 刻意不加 Content-Security-Policy：前端为静态导出页，内联 bootstrap 脚本多，
+// 贸然启用 CSP 会白屏；待内联脚本拆分后再单独引入。
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		next.ServeHTTP(w, r)
 	})
 }

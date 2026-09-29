@@ -311,9 +311,14 @@ const (
 )
 
 // Judge default values.
+//
+// FailAction 默认 "deny"（安全默认）：裁判模型不可用、调用超时或输出无法解析时，
+// 宁可拦截转人工，也不放行未审查的命令执行。ARTEX 的 Agent 在宿主机直接执行
+// shell，fail-open 会放大提示注入风险（不可信的目标页面内容可诱导模型发起外传等
+// 操作）。用户可在拦截设置中显式改回 allow/ask。
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
+	defaultJudgeFailAction       = "deny"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
 )
